@@ -1,0 +1,11 @@
+[package]
+name = "precellar"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+bwa = { git = "https://github.com/regulatory-genomics/bwa-rust.git", rev = "1eb8967f4952337c9ba4955242db2d485843f7c5" }
+noodles = { version = "0.80", features = ["core", "fastq", "bam", "sam", "async"] }
+yaml-rust = "0.4"
+anyhow = "1.0"
+flate2 = "1.0"
