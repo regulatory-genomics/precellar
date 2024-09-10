@@ -4,6 +4,7 @@ use std::collections::HashMap;
 const BC_MAX_QV: u8 = 66; // This is the illumina quality value
 pub(crate) const BASE_OPTS: [u8; 4] = [b'A', b'C', b'G', b'T'];
 
+#[derive(Debug)]
 pub struct Whitelist {
     whitelist_exists: bool,
     barcode_counts: HashMap<String, usize>,
