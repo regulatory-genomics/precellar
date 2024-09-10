@@ -1,9 +1,8 @@
-use crate::barcode::{self, Whitelist};
-use crate::seqspec::{open_file_for_read, Modality, RegionType, SeqSpec};
+use crate::barcode::{BarcodeCorrector, Whitelist};
+use crate::seqspec::{open_file_for_read, RegionType, SeqSpec};
 
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader};
-use std::path::Path;
 use anyhow::{bail, Result};
 use multi_reader::MultiReader;
 use noodles::{sam, fastq};
@@ -12,23 +11,35 @@ use noodles::sam::alignment::{
 };
 use noodles::sam::alignment::record_buf::data::field::value::Value;
 use bwa::BurrowsWheelerAligner;
+use log::info;
+use rayon::iter::{IndexedParallelIterator, IntoParallelIterator, ParallelIterator};
 
 pub trait Alinger {
-    fn align_reads<'a, I>(&'a self, records: I) -> impl Iterator<Item = sam::Record> + '_
-    where I: Iterator<Item = fastq::Record> + 'a;
+    fn chunk_size(&self) -> usize;
 
-    fn align_read_pairs<'a, I>(&'a self, records: I) -> impl Iterator<Item = (sam::Record, sam::Record)> + '_
-    where I: Iterator<Item = (fastq::Record, fastq::Record)> + 'a;
+    fn header(&self) -> sam::Header;
+
+    fn align_reads(&self, records: &mut [fastq::Record]) -> impl ExactSizeIterator<Item = sam::Record>;
+
+    fn align_read_pairs(&self, records: &mut [(fastq::Record, fastq::Record)]) ->
+        impl ExactSizeIterator<Item = (sam::Record, sam::Record)>;
 }
 
 impl Alinger for BurrowsWheelerAligner {
-    fn align_reads<'a, I>(&'a self, records: I) -> impl Iterator<Item = sam::Record> + '_
-    where I: Iterator<Item = fastq::Record> + 'a {
+    fn chunk_size(&self) -> usize {
+        self.chunk_size()
+    }
+
+    fn header(&self) -> sam::Header {
+        self.get_sam_header()
+    }
+
+    fn align_reads(&self, records: &mut [fastq::Record]) -> impl ExactSizeIterator<Item = sam::Record> {
         self.align_reads(records)
     }
 
-    fn align_read_pairs<'a, I>(&'a self, records: I) -> impl Iterator<Item = (sam::Record, sam::Record)> + '_
-    where I: Iterator<Item = (fastq::Record, fastq::Record)> + 'a {
+    fn align_read_pairs(&self, records: &mut [(fastq::Record, fastq::Record)]) ->
+        impl ExactSizeIterator<Item = (sam::Record, sam::Record)> {
         self.align_read_pairs(records)
     }
 }
@@ -53,18 +64,82 @@ impl<A: Alinger> FastqProcessor<A> {
         self
     }
 
+    pub fn gen_barcoded_alignments(&self) -> Box<dyn Iterator<Item = RecordBuf> + '_> {
+        info!("Counting barcodes...");
+        let whitelist = self.count_barcodes().unwrap();
+
+        let fq_records = self.gen_raw_fastq_records();
+        let is_paired = fq_records.is_paired_end();
+        let fq_chunks = fq_records.chunk(self.aligner.chunk_size());
+        let corrector = BarcodeCorrector::default();
+        let header = self.aligner.header();
+
+        info!("Aligning reads...");
+        if is_paired {
+            Box::new(fq_chunks.flat_map(move |data| {
+                let (barcodes, mut reads): (Vec<_>, Vec<_>) = data.into_iter()
+                    .map(|(barcode, (read1, read2))| (barcode, (read1.unwrap(), read2.unwrap()))).unzip();
+                let alignments: Vec<_> = self.aligner.align_read_pairs(&mut reads).collect();
+                barcodes.into_par_iter().zip(alignments).flat_map(|(barcode, (ali1, ali2))| {
+                    let corrected_barcode = corrector.correct(
+                        whitelist.get_barcode_counts(),
+                        std::str::from_utf8(barcode.sequence()).unwrap(),
+                        barcode.quality_scores()
+                    ).ok();
+                    let ali1_ = add_cell_barcode(
+                        &header,
+                        &ali1,
+                        std::str::from_utf8(barcode.sequence()).unwrap(),
+                        barcode.quality_scores(),
+                        corrected_barcode.as_ref().map(|x| x.as_str())
+                    ).unwrap();
+                    let ali2_ = add_cell_barcode(
+                        &header,
+                        &ali2,
+                        std::str::from_utf8(barcode.sequence()).unwrap(),
+                        barcode.quality_scores(),
+                        corrected_barcode.as_ref().map(|x| x.as_str())
+                    ).unwrap();
+                    [ali1_, ali2_]
+                }).collect::<Vec<_>>()
+            }))
+        } else {
+            Box::new(fq_chunks.flat_map(move |data| {
+                let (barcodes, mut reads): (Vec<_>, Vec<_>) = data.into_iter()
+                    .map(|(barcode, (read1, _))| (barcode, read1.unwrap())).unzip();
+                let alignments: Vec<_> = self.aligner.align_reads(&mut reads).collect();
+                barcodes.into_par_iter().zip(alignments).map(|(barcode, alignment)| {
+                    let corrected_barcode = corrector.correct(
+                        whitelist.get_barcode_counts(),
+                        std::str::from_utf8(barcode.sequence()).unwrap(),
+                        barcode.quality_scores()
+                    ).ok();
+                    add_cell_barcode(
+                        &header,
+                        &alignment,
+                        std::str::from_utf8(barcode.sequence()).unwrap(),
+                        barcode.quality_scores(),
+                        corrected_barcode.as_ref().map(|x| x.as_str())
+                    ).unwrap()
+                }).collect::<Vec<_>>()
+            }))
+        }
+    }
+
     pub fn gen_raw_alignments(&self) -> Box<dyn Iterator<Item = sam::Record> + '_> {
         let fq_records = self.gen_raw_fastq_records();
-        if fq_records.is_paired_end() {
-            let data = fq_records.map(|(_, (read1, read2))| {
-                (read1.unwrap(), read2.unwrap())
-            });
-            Box::new(self.aligner.align_read_pairs(data).flat_map(|(r1, r2)| [r1, r2]))
+        let is_paired = fq_records.is_paired_end();
+        let fq_chunks = fq_records.chunk(self.aligner.chunk_size());
+        if is_paired {
+            Box::new(fq_chunks.flat_map(|data| {
+                let mut reads: Vec<_> = data.into_iter().map(|(_, (read1, read2))| (read1.unwrap(), read2.unwrap())).collect();
+                self.aligner.align_read_pairs(&mut reads).flat_map(|(r1, r2)| [r1, r2]).collect::<Vec<_>>()
+            }))
         } else {
-            let data = fq_records.map(|(_, (read1, _))| {
-                read1.unwrap()
-            });
-            Box::new(self.aligner.align_reads(data))
+            Box::new(fq_chunks.flat_map(|data| {
+                let mut reads: Vec<_> = data.into_iter().map(|(_, (read1, _))| read1.unwrap()).collect();
+                self.aligner.align_reads(reads.as_mut()).collect::<Vec<_>>()
+            }))
         }
     }
 
@@ -167,6 +242,10 @@ impl<R: BufRead> FastqRecords<R> {
         Self { ids, strandness, subregions, records }
     }
 
+    fn chunk(self, chunk_size: usize) -> FastqRecordChunk<R> {
+        FastqRecordChunk { fq: self, chunk_size }
+    }
+
     fn is_paired_end(&self) -> bool {
         let mut read1 = false;
         let mut read2 = false;
@@ -234,6 +313,35 @@ impl<R: BufRead> Iterator for FastqRecords<R> {
     }
 }
 
+pub struct FastqRecordChunk<R> {
+    fq: FastqRecords<R>,
+    chunk_size: usize,
+}
+
+impl<R: BufRead> Iterator for FastqRecordChunk<R> {
+    type Item = Vec<(Barcode, (Option<fastq::Record>, Option<fastq::Record>))>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let mut chunk = Vec::new();
+        let mut accumulated_length = 0;
+
+        for record in self.fq.by_ref() {
+            accumulated_length += record.1.0.as_ref().map_or(0, |x| x.sequence().len()) +
+                record.1.1.as_ref().map_or(0, |x| x.sequence().len());
+            chunk.push(record);
+            if accumulated_length >= self.chunk_size {
+                break;
+            }
+        }
+
+        if chunk.is_empty() {
+            None
+        } else {
+            Some(chunk)
+        }
+    }
+}
+
 
 pub fn add_cell_barcode<R: Record>(
     header: &sam::Header,
@@ -277,7 +385,7 @@ mod tests {
         let processor = FastqProcessor::new(spec, aligner)
             .set_modality("atac");
 
-        processor.gen_raw_alignments().take(6).for_each(|x| {
+        processor.gen_barcoded_alignments().take(6).for_each(|x| {
             println!("{:?}", x);
         });
 

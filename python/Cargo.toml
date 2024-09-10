@@ -1,5 +1,5 @@
 [package]
-name = "precellar"
+name = "precellar-py"
 version = "0.1.0"
 edition = "2021"
 
@@ -9,4 +9,15 @@ name = "precellar"
 crate-type = ["cdylib"]
 
 [dependencies]
-pyo3 = "0.22.0"
+bwa = { git = "https://github.com/regulatory-genomics/bwa-rust.git", rev = "65398d202db9e79ef80b550853102eb3a1575078" }
+anyhow = "1.0"
+precellar = { path = "../precellar" }
+noodles = { version = "0.80", features = ["core", "fastq", "bam", "sam"] }
+pyo3-log = "0.11"
+
+[dependencies.pyo3]
+version = "0.22.0"
+features = ["anyhow"]
+
+[target.'cfg(not(target_env = "msvc"))'.dependencies]
+tikv-jemallocator = {version = "0.6", features = ["disable_initial_exec_tls"]}
