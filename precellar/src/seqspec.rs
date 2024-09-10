@@ -1,7 +1,8 @@
 use anyhow::{bail, Context, Result};
-use std::{collections::HashMap, fs::File, path::{Path, PathBuf}};
+use std::{collections::HashMap, fs::File, io::BufRead, path::Path};
 use yaml_rust::{Yaml, YamlLoader};
-use noodles::fastq;
+use cached_path::Cache;
+use itertools::Itertools;
 
 pub type Modality = String;
 
@@ -19,13 +20,13 @@ pub struct SeqSpec {
     pub sequence_protocol: String,
     pub sequence_kit: Option<String>,
     pub library_spec: HashMap<Modality, Region>,
-    pub sequence_spec: HashMap<Modality, Read>,
+    pub sequence_spec: HashMap<Modality, Vec<Read>>,
 }
 
-impl TryFrom<Yaml> for SeqSpec {
+impl TryFrom<&Yaml> for SeqSpec {
     type Error = anyhow::Error;
 
-    fn try_from(yaml: Yaml) -> Result<Self> {
+    fn try_from(yaml: &Yaml) -> Result<Self> {
         let version = yaml["seqspec_version"].as_str().unwrap().to_string();
         let id = yaml["assay_id"].as_str().unwrap().to_string();
         let name = yaml["name"].as_str().unwrap().to_string();
@@ -40,13 +41,25 @@ impl TryFrom<Yaml> for SeqSpec {
         let library_spec = yaml["library_spec"].clone().into_iter().map(|region|
             (region["region_type"].as_str().unwrap().to_string(), Region::try_from(region.clone()).unwrap())
         ).collect();
-        let sequence_spec = yaml["sequence_spec"].clone().into_iter().map(|read|
-            (read["modality"].as_str().unwrap().to_string(), Read::try_from(read.clone()).unwrap())
-        ).collect();
+        let sequence_spec = yaml["sequence_spec"].clone().into_iter()
+            .map(|read| (read["modality"].as_str().unwrap().to_string(), Read::try_from(&read).unwrap()))
+            .sorted_by(|a, b| a.0.cmp(&b.0))
+            .chunk_by(|x| x.0.clone())
+            .into_iter()
+            .map(|(k, g)| (k, g.map(|x| x.1).collect()))
+            .collect();
         Ok(Self {
             version, id, name, doi, date, description, lib_struct, library_protocol,
             library_kit, sequence_protocol, sequence_kit, library_spec, sequence_spec,
         })
+    }
+}
+
+impl TryFrom<Yaml> for SeqSpec {
+    type Error = anyhow::Error;
+
+    fn try_from(yaml: Yaml) -> Result<Self> {
+        Self::try_from(&yaml)
     }
 }
 
@@ -61,11 +74,22 @@ impl SeqSpec {
     pub fn modality(&self, name: &str) -> Option<&Region> {
         self.library_spec.get(name)
     }
+
+    /// Return an iterator over all regions in the region tree.
+    pub fn iter_regions(&self) -> impl Iterator<Item = &Region> {
+        self.library_spec.values().flat_map(|x| {
+            Box::new(std::iter::once(x).chain(x.iter_regions())) as Box<dyn Iterator<Item = &Region>>
+        })
+    }
+
+    pub fn get_read_by_primer_id(&self, modality: &str, primer_id: &str) -> Vec<&Read> {
+        self.sequence_spec.get(modality).unwrap().iter().filter(|x| x.primer_id == primer_id).collect()
+    }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Read {
-    pub id: String,
+    pub id: String,   // The file path
     pub name: String,
     pub modality: Modality,
     pub primer_id: String,  // the primer_id should maps to the correct region id off
@@ -74,10 +98,10 @@ pub struct Read {
     pub strand: bool,
 }
 
-impl TryFrom<Yaml> for Read {
+impl TryFrom<&Yaml> for Read {
     type Error = anyhow::Error;
 
-    fn try_from(yaml: Yaml) -> Result<Self> {
+    fn try_from(yaml: &Yaml) -> Result<Self> {
         let id = yaml["read_id"].as_str().unwrap().to_string();
         let name = yaml["name"].as_str().unwrap().to_string();
         let modality = yaml["modality"].as_str().unwrap().to_string();
@@ -101,9 +125,36 @@ impl TryFrom<Yaml> for Read {
 #[derive(Debug, Clone)]
 pub enum SequenceType {
     Fixed(String),
-    OnList(Vec<String>),
+    OnList {
+        filepath: String,
+        md5: Option<String>,
+        local: bool,
+    },
     Random,
     Joined,
+}
+
+impl SequenceType {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Fixed(_) => "fixed",
+            Self::OnList { .. } => "onlist",
+            Self::Random => "random",
+            Self::Joined => "joined",
+        }
+    }
+
+    pub(crate) fn fetch_onlist(&self) -> Result<Vec<String>> {
+        match self {
+            Self::OnList { filepath, .. } => {
+                let cache = Cache::new()?;
+                let file = cache.cached_path(&filepath)?;
+                let reader = std::io::BufReader::new(open_file_for_read(file));
+                Ok(reader.lines().map(|x| x.unwrap()).collect())
+            }
+            _ => panic!("Not an onlist sequence type"),
+        }
+    }
 }
 
 #[derive(Debug, PartialEq, Eq, Clone)]
@@ -129,7 +180,7 @@ impl From<&str> for RegionType {
     }
 }
 
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum Length {
     Fixed(usize),
     Range(usize, usize),
@@ -137,12 +188,12 @@ pub enum Length {
 
 #[derive(Debug, Clone)]
 pub struct Region {
-    id: String,
-    region_type: RegionType,
-    name: String,
-    sequence_type: SequenceType,
-    length: Length,
-    sub_regions: Vec<Region>,
+    pub id: String,
+    pub region_type: RegionType,
+    pub name: String,
+    pub sequence_type: SequenceType,
+    pub length: Length,
+    pub sub_regions: Vec<Region>,
 }
 
 impl TryFrom<Yaml> for Region {
@@ -154,7 +205,17 @@ impl TryFrom<Yaml> for Region {
         let name = yaml["name"].as_str().unwrap().to_string();
         let sequence_type = match yaml["sequence_type"].as_str().unwrap() {
             "fixed" => SequenceType::Fixed(yaml["sequence"].as_str().unwrap().to_string()),
-            "onlist" => SequenceType::OnList(Vec::new()),
+            "onlist" => {
+                let md5 = yaml["onlist"].as_hash().unwrap().get(&Yaml::String("md5".to_string()))
+                    .and_then(|x| x.as_str()).map(|x| x.to_string());
+                let filepath = yaml["onlist"]["filename"].as_str().unwrap().to_string();
+                let local = match yaml["onlist"]["location"].as_str().unwrap() {
+                    "local" => true,
+                    "remote" => false,
+                    x => bail!("Invalid location: {:?}", x),
+                };
+                SequenceType::OnList { filepath, md5, local }
+            },
             "random" => SequenceType::Random,
             "joined" => SequenceType::Joined,
             _ => bail!("Invalid sequence type: {:?}", yaml["sequence_type"]),
@@ -190,6 +251,13 @@ impl Region {
             }
         }
         result
+    }
+
+    /// Return an iterator over all regions in the region tree.
+    pub fn iter_regions(&self) -> impl Iterator<Item = &Region> {
+        self.sub_regions.iter().flat_map(|x| {
+            Box::new(std::iter::once(x).chain(x.iter_regions())) as Box<dyn Iterator<Item = &Region>>
+        })
     }
 
     /// Return the start and end position of each subregion in a fastq region.
@@ -231,7 +299,7 @@ impl Region {
 
 
 /// Open a file, possibly compressed. Supports gzip and zstd.
-pub fn open_file_for_read<P: AsRef<Path>>(file: P) -> Box<dyn std::io::Read> {
+pub(crate) fn open_file_for_read<P: AsRef<Path>>(file: P) -> Box<dyn std::io::Read> {
     if is_gzipped(file.as_ref()) {
         Box::new(flate2::read::MultiGzDecoder::new(File::open(file.as_ref()).unwrap()))
     } else {
@@ -249,10 +317,24 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_seqspec() {
+    fn test_seqspec_io() {
         let spec = SeqSpec::from_path("tests/data/spec.yaml").unwrap();
+
         for fq in spec.modality("rna").unwrap().fastqs() {
             println!("{:?}", fq.subregion_range().collect::<Vec<_>>());
         }
+    }
+
+    #[test]
+    fn test_onlist() {
+        let spec = SeqSpec::from_path("tests/data/spec.yaml").unwrap();
+
+        spec.iter_regions().for_each(|region| {
+            if let SequenceType::OnList { filepath, .. } = &region.sequence_type {
+                if region.sequence_type.fetch_onlist().is_err() {
+                    panic!("Failed to fetch onlist: {:?}", region.region_type);
+                }
+            }
+        });
     }
 }
