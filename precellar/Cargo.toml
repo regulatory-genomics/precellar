@@ -4,11 +4,13 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-bwa = { git = "https://github.com/regulatory-genomics/bwa-rust.git", rev = "1eb8967f4952337c9ba4955242db2d485843f7c5" }
+bwa = { git = "https://github.com/regulatory-genomics/bwa-rust.git", rev = "65398d202db9e79ef80b550853102eb3a1575078" }
 noodles = { version = "0.80", features = ["core", "fastq", "bam", "sam", "async"] }
 yaml-rust = "0.4"
+log = "0.4"
 anyhow = "1.0"
 flate2 = "1.0"
 cached-path = "0.6"
 itertools = "0.13"
 multi_reader = "0.1"
+rayon = "1.10"
