@@ -65,11 +65,19 @@ impl Whitelist {
         &self.barcode_counts
     }
 
-    pub fn get_mean_base_quality_score(&self) -> f64 {
+    pub fn mean_base_quality_score(&self) -> f64 {
         if self.total_base_count <= 0 {
             0.0
         } else {
             self.base_qual_sum as f64 / self.total_base_count as f64
+        }
+    }
+
+    pub fn frac_q30_bases(&self) -> f64 {
+        if self.total_base_count <= 0 {
+            0.0
+        } else {
+            self.q30_base_count as f64 / self.total_base_count as f64
         }
     }
 }
