@@ -9,8 +9,9 @@ name = "precellar"
 crate-type = ["cdylib"]
 
 [dependencies]
-bwa = { git = "https://github.com/regulatory-genomics/bwa-rust.git", rev = "65398d202db9e79ef80b550853102eb3a1575078" }
 anyhow = "1.0"
+bwa = { git = "https://github.com/regulatory-genomics/bwa-rust.git", rev = "6c2da03c579d8e9cc1e6cd0e9a56bb79ba23b587" }
+either = "1.13"
 precellar = { path = "../precellar" }
 noodles = { version = "0.80", features = ["core", "fastq", "bam", "sam"] }
 pyo3-log = "0.11"

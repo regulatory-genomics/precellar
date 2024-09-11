@@ -1,6 +1,7 @@
-use std::path::PathBuf;
+use std::{collections::HashMap, ops::Deref, path::PathBuf};
 
 use bwa::{AlignerOpts, BurrowsWheelerAligner, FMIndex, PairedEndStats};
+use either::Either;
 use pyo3::prelude::*;
 use anyhow::Result;
 use noodles::sam::alignment::io::Write;
@@ -27,7 +28,7 @@ fn align(
     modality: &str,
     output: PathBuf,
     n_jobs: usize,
-) -> Result<()> {
+) -> Result<HashMap<String, f64>> {
     let spec = SeqSpec::from_path(seqspec).unwrap();
     let aligner = BurrowsWheelerAligner::new(
         FMIndex::read(genome_index).unwrap(),
@@ -35,15 +36,28 @@ fn align(
         PairedEndStats::default()
     );
     let header = aligner.header();
-    let processor = FastqProcessor::new(spec, aligner).set_modality(modality);
+    let mut processor = FastqProcessor::new(spec, aligner).set_modality(modality);
 
     let mut writer = noodles::bam::io::writer::Builder::default().build_from_path(output)?;
     writer.write_header(&header)?;
-    processor.gen_barcoded_alignments().try_for_each(|x| {
-        py.check_signals()?;
-        writer.write_alignment_record(&header, &x)
-    })?;
-    Ok(())
+    match processor.gen_barcoded_alignments() {
+        Either::Left(mut data) => data.try_for_each(|chunk| {
+            py.check_signals()?;
+            chunk.iter().try_for_each(|x| writer.write_alignment_record(&header, x))?;
+            anyhow::Ok(())
+        }),
+        Either::Right(mut data) => data.try_for_each(|chunk| {
+            py.check_signals()?;
+            chunk.iter().try_for_each(|(a, b)| {
+                writer.write_alignment_record(&header, a)?;
+                writer.write_alignment_record(&header, b)?;
+                anyhow::Ok(())
+            })?;
+            Ok(())
+        }),
+    }?;
+
+    Ok(processor.get_report().unwrap().deref().clone())
 }
 
 /// A Python module implemented in Rust.
