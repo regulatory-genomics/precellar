@@ -114,7 +114,7 @@ impl Default for FragmentGenerator {
             shift_left: 4,
             shift_right: -5,
             mapq: 30,
-            chunk_size: 50000000,
+            chunk_size: 30000000,
             temp_dir: None,
         }
     }

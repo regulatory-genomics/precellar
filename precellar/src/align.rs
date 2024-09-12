@@ -4,12 +4,13 @@ use crate::io::open_file_for_read;
 use crate::qc::{AlignQC, Metrics};
 
 use bstr::BString;
+use noodles::bam::record;
 use std::sync::{Arc, Mutex};
 use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, BufReader};
 use anyhow::{bail, Result};
 use multi_reader::MultiReader;
-use noodles::{sam, fastq};
+use noodles::{bam, sam, fastq};
 use noodles::sam::alignment::{
     Record, record_buf::RecordBuf, record::data::field::tag::Tag,
 };
@@ -407,6 +408,56 @@ fn slice_fastq_record(record: &fastq::Record, start: usize, end: usize) -> fastq
         record.quality_scores().get(start..end).unwrap(),
     )
 }
+
+pub struct NameCollatedRecords<'a, R> {
+    records: bam::io::reader::Records<'a, R>,
+    prev_record: Option<(BString, bam::Record)>,
+    checker: HashSet<BString>,
+}
+
+impl<'a, R: std::io::Read> NameCollatedRecords<'a, R> {
+    pub fn new(records: bam::io::reader::Records<'a, R>) -> Self {
+        Self {
+            records,
+            prev_record: None,
+            checker: HashSet::new(),
+        }
+    }
+
+    fn check(&mut self, name: &BString) {
+        assert!(!self.checker.contains(name), "bam file must be name collated or name sorted");
+        self.checker.insert(name.to_owned());
+    }
+}
+
+impl<'a, R: std::io::Read> Iterator for NameCollatedRecords<'a, R> {
+    type Item = Either<bam::Record, (bam::Record, bam::Record)>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if let Some(record) = self.records.next() {
+            let record = record.unwrap();
+            let name = record.name().unwrap().to_owned();
+
+            if let Some((prev_name, prev_record)) = self.prev_record.take() {
+                if name == prev_name {
+                    Some(Either::Right((prev_record, record)))
+                } else {
+                    self.check(&name);
+                    self.prev_record = Some((name, record));
+                    Some(Either::Left(prev_record))
+                }
+            } else {
+                self.check(&name);
+                self.prev_record = Some((name, record));
+                self.next()
+            }
+        } else {
+            self.prev_record.take().map(|x| Either::Left(x.1))
+        }
+    }
+
+}
+
 
 #[cfg(test)]
 mod tests {
