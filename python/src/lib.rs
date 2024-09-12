@@ -5,8 +5,15 @@ use either::Either;
 use pyo3::prelude::*;
 use anyhow::Result;
 use noodles::sam::alignment::io::Write;
+use noodles::bam;
+use itertools::Itertools;
 
-use ::precellar::{align::{Alinger, FastqProcessor}, fragment::FragmentGenerator, io::{open_file_for_write, Compression}, qc::FragmentQC, seqspec::SeqSpec};
+use ::precellar::{
+    align::{Alinger, FastqProcessor, NameCollatedRecords},
+    fragment::FragmentGenerator,
+    io::{open_file_for_write, Compression},
+    qc::{FragmentQC, Metrics, AlignQC}, seqspec::SeqSpec,
+};
 
 #[cfg(not(target_env = "msvc"))]
 use tikv_jemallocator::Jemalloc;
@@ -14,7 +21,6 @@ use tikv_jemallocator::Jemalloc;
 #[cfg(not(target_env = "msvc"))]
 #[global_allocator]
 static GLOBAL: Jemalloc = Jemalloc;
-
 
 #[pyfunction]
 #[pyo3(
@@ -91,12 +97,13 @@ fn align(
             if let Some(dir) = temp_dir {
                 fragment_generator.set_temp_dir(dir)
             };
-            fragment_generator.gen_unique_fragments(&header, alignments).into_iter().for_each(|fragments|
+            fragment_generator.gen_unique_fragments(&header, alignments).into_iter().for_each(|fragments| {
+                py.check_signals().unwrap();
                 fragments.into_iter().for_each(|frag| {
                     fragment_qc.update(&frag);
                     writeln!(writer.as_mut(), "{}", frag).unwrap();
                 })
-            );
+            });
         }
     }
 
@@ -107,11 +114,88 @@ fn align(
     Ok(report.into())
 }
 
+#[pyfunction]
+#[pyo3(
+    signature = (
+        input,
+        output,
+        *,
+        mito_dna=vec!["chrM".to_owned(), "M".to_owned()],
+        compression=None,
+        compression_level=None,
+        temp_dir=None,
+        n_jobs=8,
+    ),
+    text_signature = "(seqspec, genome_index, *, modality, output_bam=None, output_fragment=None, n_jobs=8)",
+)]
+fn make_fragment(
+    py: Python<'_>,
+    input: PathBuf,
+    output : PathBuf,
+    mito_dna: Vec<String>,
+    compression: Option<&str>,
+    compression_level: Option<u32>,
+    temp_dir: Option<PathBuf>,
+    n_jobs: usize,
+) -> Result<HashMap<String, f64>> {
+    let file = std::fs::File::open(input)?;
+    let mut reader = bam::io::Reader::new(file);
+    let header = reader.read_header()?;
+
+    let mut fragment_qc = FragmentQC::default();
+    let mut align_qc = AlignQC::default();
+    mito_dna.into_iter().for_each(|mito| {
+        fragment_qc.add_mito_dna(&mito);
+        header.reference_sequences().get_index_of(&bstr::BString::from(mito)).map(|x| align_qc.add_mito_dna(x));
+    });
+
+    let chunks = NameCollatedRecords::new(reader.records()).chunks(5000000);
+    let alignments = chunks
+        .into_iter().map(|chunk| {
+            let mut left = Vec::new();
+            let mut right = Vec::new();
+            chunk.for_each(|x| if x.is_left() {
+                let rec = x.left().unwrap();
+                align_qc.update(&rec, &header);
+                left.push(rec);
+            } else {
+                let rec = x.right().unwrap();
+                align_qc.update(&rec.0, &header);
+                align_qc.update(&rec.1, &header);
+                right.push(rec);
+            });
+            if right.is_empty() { Either::Left(left) } else { Either::Right(right) }
+        });
+
+    let compression = compression.map(|x| Compression::from_str(x).unwrap());
+    let mut writer = open_file_for_write(output, compression, compression_level)?;
+
+    let mut fragment_generator = FragmentGenerator::default();
+    if let Some(dir) = temp_dir {
+        fragment_generator.set_temp_dir(dir)
+    };
+
+    fragment_generator.gen_unique_fragments(&header, alignments).into_iter().for_each(|fragments| {
+        py.check_signals().unwrap();
+        fragments.into_iter().for_each(|frag| {
+            fragment_qc.update(&frag);
+            writeln!(writer.as_mut(), "{}", frag).unwrap();
+        })
+    });
+
+    let mut report = Metrics::default();
+    align_qc.report(&mut report);
+    fragment_qc.report(&mut report);
+    Ok(report.into())
+}
+
+
 /// A Python module implemented in Rust.
 #[pymodule]
 fn precellar(m: &Bound<'_, PyModule>) -> PyResult<()> {
     //pyo3_log::init();
 
     m.add_function(wrap_pyfunction!(align, m)?)?;
+    m.add_function(wrap_pyfunction!(make_fragment, m)?)?;
     Ok(())
 }
