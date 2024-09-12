@@ -1,8 +1,10 @@
 use anyhow::{bail, Context, Result};
-use std::{collections::HashMap, fs::File, io::BufRead, path::Path};
+use std::{collections::HashMap, io::BufRead, path::Path};
 use yaml_rust::{Yaml, YamlLoader};
 use cached_path::Cache;
 use itertools::Itertools;
+
+use crate::io::open_file_for_read;
 
 pub type Modality = String;
 
@@ -295,21 +297,6 @@ impl Region {
             Some((region.region_type.clone(), range))
         })
     }
-}
-
-
-/// Open a file, possibly compressed. Supports gzip and zstd.
-pub(crate) fn open_file_for_read<P: AsRef<Path>>(file: P) -> Box<dyn std::io::Read> {
-    if is_gzipped(file.as_ref()) {
-        Box::new(flate2::read::MultiGzDecoder::new(File::open(file.as_ref()).unwrap()))
-    } else {
-        Box::new(File::open(file.as_ref()).unwrap())
-    }
-}
-
-/// Determine the file compression type. Supports gzip and zstd.
-fn is_gzipped<P: AsRef<Path>>(file: P) -> bool {
-    flate2::read::MultiGzDecoder::new(File::open(file.as_ref()).unwrap()).header().is_some()
 }
 
 #[cfg(test)]

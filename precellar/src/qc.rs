@@ -1,13 +1,28 @@
 use std::collections::{HashMap, HashSet};
 use std::ops::{Deref, DerefMut};
 use std::fmt::Display;
+use bed_utils::bed::BEDLike;
 use noodles::sam;
 use noodles::sam::alignment::{
     Record, record::data::field::tag::Tag,
 };
 
-#[derive(Debug, Default)]
+use crate::fragment::Fragment;
+
+#[derive(Debug, Default, Clone)]
 pub struct Metrics(HashMap<String, f64>);
+
+impl From <HashMap<String, f64>> for Metrics {
+    fn from(map: HashMap<String, f64>) -> Self {
+        Metrics(map)
+    }
+}
+
+impl Into<HashMap<String, f64>> for Metrics {
+    fn into(self) -> HashMap<String, f64> {
+        self.0
+    }
+}
 
 impl Deref for Metrics {
     type Target = HashMap<String, f64>;
@@ -133,15 +148,15 @@ impl FlagStat {
 
 #[derive(Debug, Default)]
 pub struct AlignQC {
-    mito_dna: HashSet<usize>,  // Mitochondrial DNA reference sequence IDs
-    all_reads_flagstat: FlagStat,
-    barcoded_reads_flagstat: FlagStat,
-    hq_flagstat: FlagStat,
-    mito_flagstat: FlagStat,
-    num_read1_bases: u64,
-    num_read1_q30_bases: u64,
-    num_read2_bases: u64,
-    num_read2_q30_bases: u64,
+    pub(crate) mito_dna: HashSet<usize>,  // Mitochondrial DNA reference sequence IDs
+    pub(crate) all_reads_flagstat: FlagStat,
+    pub(crate) barcoded_reads_flagstat: FlagStat,
+    pub(crate) hq_flagstat: FlagStat,
+    pub(crate) mito_flagstat: FlagStat,
+    pub(crate) num_read1_bases: u64,
+    pub(crate) num_read1_q30_bases: u64,
+    pub(crate) num_read2_bases: u64,
+    pub(crate) num_read2_q30_bases: u64,
 }
 
 impl AlignQC {
@@ -166,7 +181,7 @@ impl AlignQC {
             self.hq_flagstat.add(&flagstat);
         }
 
-        if record.data().get(&Tag::CELL_BARCODE_ID).is_some() {
+        if record.data().get(&Tag::CELL_BARCODE_ID).transpose().unwrap().is_some() {
             self.barcoded_reads_flagstat.add(&flagstat);
             if let Some(rid) = record.reference_sequence_id(header) {
                 if is_hq && self.mito_dna.contains(&rid.unwrap()) {
@@ -215,5 +230,39 @@ impl AlignQC {
         metric.insert("frac_unmapped".to_string(), fraction_unmapped);
         metric.insert("frac_valid_barcode".to_string(), valid_barcode);
         metric.insert("frac_nonnuclear".to_string(), fraction_nonnuclear);
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct FragmentQC {
+    mito_dna: HashSet<String>,
+    num_pcr_duplicates: u64,
+    num_unique_fragments: u64,
+    num_frag_nfr: u64,
+    num_frag_single: u64,
+}
+
+impl FragmentQC {
+    pub fn add_mito_dna<S: Into<String>>(&mut self, mito_dna: S) {
+        self.mito_dna.insert(mito_dna.into());
+    }
+
+    pub fn update(&mut self, fragment: &Fragment) {
+        self.num_pcr_duplicates += fragment.count as u64 - 1;
+        self.num_unique_fragments += 1;
+        let size = fragment.len();
+        if self.mito_dna.contains(fragment.chrom()) {
+            if size < 147 {
+                self.num_frag_nfr += 1;
+            } else if size <= 294 {
+                self.num_frag_single += 1;
+            }
+        }
+    }
+
+    pub fn report(&self, metric: &mut Metrics) {
+        metric.insert("frac_duplicates".to_string(), self.num_pcr_duplicates as f64 / (self.num_unique_fragments + self.num_pcr_duplicates) as f64);
+        metric.insert("frac_fragment_in_nucleosome_free_region".to_string(), self.num_frag_nfr as f64 / self.num_unique_fragments as f64);
+        metric.insert("frac_fragment_flanking_single_nucleosome".to_string(), self.num_frag_single as f64 / self.num_unique_fragments as f64);
     }
 }
