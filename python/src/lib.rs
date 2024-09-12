@@ -152,6 +152,7 @@ fn make_fragment(
     let chunks = NameCollatedRecords::new(reader.records()).chunks(5000000);
     let alignments = chunks
         .into_iter().map(|chunk| {
+            py.check_signals().unwrap();
             let mut left = Vec::new();
             let mut right = Vec::new();
             chunk.for_each(|x| if x.is_left() {

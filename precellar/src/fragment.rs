@@ -8,6 +8,7 @@ use serde::{Serialize, Deserialize};
 use std::path::PathBuf;
 use bed_utils::{bed::{BEDLike, ParseError, Strand}, extsort::ExternalSorterBuilder};
 use anyhow::Result;
+use std::ops::Deref;
 
 pub type CellBarcode = String;
 
@@ -185,16 +186,23 @@ impl<'a, I: Iterator<Item = AlignmentInfo>, F: FnMut(&AlignmentInfo) -> String> 
     type Item = Vec<Fragment>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        self.iter.next().map(|(_, group)| remove_duplicates(group, self.header).into_iter().flat_map(|mut frag| {
-            if frag.strand().is_none() { // perform fragment length correction for paired-end reads
-                frag.set_start(frag.start().saturating_add_signed(self.shift_left));
-                frag.set_end(frag.end().saturating_add_signed(self.shift_right));
-            }
-            if frag.len() > 0 { Some(frag) } else { None }
-        }).collect())
+        let mut fragments: Vec<_> = self.iter.next().map(|(_, group)|
+            remove_duplicates(group, self.header).into_iter().flat_map(|mut frag| {
+                if frag.strand().is_none() { // perform fragment length correction for paired-end reads
+                    frag.set_start(frag.start().saturating_add_signed(self.shift_left));
+                    frag.set_end(frag.end().saturating_add_signed(self.shift_right));
+                }
+                if frag.len() > 0 { Some(frag) } else { None }
+            }).collect())?;
+        fragments.sort_unstable_by(|a, b|
+            a.chrom().cmp(b.chrom())
+                .then_with(|| a.start().cmp(&b.start()))
+                .then_with(|| a.end().cmp(&b.end()))
+                .then_with(|| a.score().as_ref().map(|x| x.deref()).cmp(&b.score().as_ref().map(|x| x.deref())))
+        );
+        Some(fragments)
     }
 }
-
 
 fn sort_by_barcode<I, P>(
     reads: I,
