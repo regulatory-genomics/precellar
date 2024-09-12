@@ -89,7 +89,8 @@ fn align(
         });
         
         let fragment_writer = output_fragment.as_ref().map(|output| {
-            let compression = compression.map(|x| Compression::from_str(x).unwrap());
+            let compression = compression.map(|x| Compression::from_str(x).unwrap())
+                .or(output.try_into().ok());
             open_file_for_write(output, compression, compression_level)
         }).transpose()?;
         if let Some(mut writer) = fragment_writer {
@@ -168,7 +169,8 @@ fn make_fragment(
             if right.is_empty() { Either::Left(left) } else { Either::Right(right) }
         });
 
-    let compression = compression.map(|x| Compression::from_str(x).unwrap());
+    let compression = compression.map(|x| Compression::from_str(x).unwrap())
+        .or((&output).try_into().ok());
     let mut writer = open_file_for_write(output, compression, compression_level)?;
 
     let mut fragment_generator = FragmentGenerator::default();
