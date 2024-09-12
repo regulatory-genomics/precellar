@@ -1,10 +1,11 @@
-pub mod qc;
-
 use crate::barcode::{BarcodeCorrector, Whitelist};
-use crate::seqspec::{open_file_for_read, Modality, RegionType, SeqSpec};
+use crate::seqspec::{Modality, RegionType, SeqSpec};
+use crate::io::open_file_for_read;
+use crate::qc::{AlignQC, Metrics};
 
+use bstr::BString;
 use std::sync::{Arc, Mutex};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, BufReader};
 use anyhow::{bail, Result};
 use multi_reader::MultiReader;
@@ -52,16 +53,23 @@ pub struct FastqProcessor<A> {
     seqspec: SeqSpec,
     aligner: A,
     current_modality: Option<String>,
-    metrics: HashMap<Modality, qc::Metrics>,
+    mito_dna: HashSet<usize>,
+    metrics: HashMap<Modality, Metrics>,
+    align_qc: HashMap<Modality, Arc<Mutex<AlignQC>>>,
 }
 
 impl<A: Alinger> FastqProcessor<A> {
     pub fn new(seqspec: SeqSpec, aligner: A) -> Self {
-        Self { seqspec, aligner, current_modality: None, metrics: HashMap::new() }
+        Self { seqspec, aligner, current_modality: None, metrics: HashMap::new(), align_qc: HashMap::new(), mito_dna: HashSet::new() }
     }
 
     pub fn modality(&self) -> &str {
         self.current_modality.as_ref().expect("modality not set, please call set_modality first")
+    }
+
+    pub fn add_mito_dna(&mut self, mito_dna: &str) {
+        self.aligner.header().reference_sequences().get_index_of(&BString::from(mito_dna))
+            .map(|x| self.mito_dna.insert(x));
     }
 
     pub fn set_modality(mut self, modality: &str) -> Self {
@@ -69,14 +77,16 @@ impl<A: Alinger> FastqProcessor<A> {
         self
     }
 
-    pub fn get_report(&self) -> Option<&qc::Metrics> {
-        self.metrics.get(self.modality())
+    pub fn get_report(&self) -> Metrics {
+        let mut metrics = self.metrics.get(self.modality()).map_or(Metrics::default(), |x| x.clone());
+        if let Some(align_qc) = self.align_qc.get(self.modality()) {
+            align_qc.lock().unwrap().report(&mut metrics);
+        }
+        metrics
     }
 
-    pub fn gen_barcoded_alignments(&mut self) -> Either<
-        impl Iterator<Item = Vec<RecordBuf>> + '_,
-        impl Iterator<Item = Vec<(RecordBuf, RecordBuf)>> + '_
-    >
+    pub fn gen_barcoded_alignments(&mut self) ->
+        impl Iterator<Item = Either<Vec<RecordBuf>, Vec<(RecordBuf, RecordBuf)>>> + '_
     {
         info!("Counting barcodes...");
         let whitelist = self.count_barcodes().unwrap();
@@ -84,90 +94,90 @@ impl<A: Alinger> FastqProcessor<A> {
         info!("Aligning reads...");
         let fq_records = self.gen_raw_fastq_records();
         let is_paired = fq_records.is_paired_end();
-        let fq_chunks = fq_records.chunk(self.aligner.chunk_size());
         let corrector = BarcodeCorrector::default();
         let header = self.aligner.header();
-        let align_qc = Arc::new(Mutex::new(qc::AlignQC::default()));
-        if is_paired {
-            Either::Right(fq_chunks.map(move |data| {
-                let (barcodes, mut reads): (Vec<_>, Vec<_>) = data.into_iter()
-                    .map(|(barcode, (read1, read2))| (barcode, (read1.unwrap(), read2.unwrap()))).unzip();
-                let alignments: Vec<_> = self.aligner.align_read_pairs(&mut reads).collect();
-                barcodes.into_par_iter().zip(alignments).map(|(barcode, (ali1, ali2))| {
-                    let corrected_barcode = corrector.correct(
-                        whitelist.get_barcode_counts(),
-                        std::str::from_utf8(barcode.sequence()).unwrap(),
-                        barcode.quality_scores()
-                    ).ok();
-                    let ali1_ = add_cell_barcode(
-                        &header,
-                        &ali1,
-                        std::str::from_utf8(barcode.sequence()).unwrap(),
-                        barcode.quality_scores(),
-                        corrected_barcode.as_ref().map(|x| x.as_str())
-                    ).unwrap();
-                    let ali2_ = add_cell_barcode(
-                        &header,
-                        &ali2,
-                        std::str::from_utf8(barcode.sequence()).unwrap(),
-                        barcode.quality_scores(),
-                        corrected_barcode.as_ref().map(|x| x.as_str())
-                    ).unwrap();
-                    {
-                        let mut align_qc_lock = align_qc.lock().unwrap();
-                        align_qc_lock.update(&ali1_, &header);
-                        align_qc_lock.update(&ali2_, &header);
-                    }
-                    (ali1_, ali2_)
-                }).collect::<Vec<_>>()
+        self.align_qc.insert(
+            self.modality().into(),
+            Arc::new(Mutex::new(AlignQC {
+                mito_dna: self.mito_dna.clone(),
+                ..AlignQC::default()
             }))
+        );
+        let align_qc = self.align_qc.get(self.modality()).unwrap().clone();
+
+        fq_records.chunk(self.aligner.chunk_size()).map(move |data| if is_paired {
+            let (barcodes, mut reads): (Vec<_>, Vec<_>) = data.into_iter()
+                .map(|(barcode, (read1, read2))| (barcode, (read1.unwrap(), read2.unwrap()))).unzip();
+            let alignments: Vec<_> = self.aligner.align_read_pairs(&mut reads).collect();
+            let results = barcodes.into_par_iter().zip(alignments).map(|(barcode, (ali1, ali2))| {
+                let corrected_barcode = corrector.correct(
+                    whitelist.get_barcode_counts(),
+                    std::str::from_utf8(barcode.sequence()).unwrap(),
+                    barcode.quality_scores()
+                ).ok();
+                let ali1_ = add_cell_barcode(
+                    &header,
+                    &ali1,
+                    std::str::from_utf8(barcode.sequence()).unwrap(),
+                    barcode.quality_scores(),
+                    corrected_barcode.as_ref().map(|x| x.as_str())
+                ).unwrap();
+                let ali2_ = add_cell_barcode(
+                    &header,
+                    &ali2,
+                    std::str::from_utf8(barcode.sequence()).unwrap(),
+                    barcode.quality_scores(),
+                    corrected_barcode.as_ref().map(|x| x.as_str())
+                ).unwrap();
+                {
+                    let mut align_qc_lock = align_qc.lock().unwrap();
+                    align_qc_lock.update(&ali1_, &header);
+                    align_qc_lock.update(&ali2_, &header);
+                }
+                (ali1_, ali2_)
+            }).collect::<Vec<_>>();
+            Either::Right(results)
         } else {
-            Either::Left(fq_chunks.map(move |data| {
-                let (barcodes, mut reads): (Vec<_>, Vec<_>) = data.into_iter()
-                    .map(|(barcode, (read1, _))| (barcode, read1.unwrap())).unzip();
-                let alignments: Vec<_> = self.aligner.align_reads(&mut reads).collect();
-                barcodes.into_par_iter().zip(alignments).map(|(barcode, alignment)| {
-                    let corrected_barcode = corrector.correct(
-                        whitelist.get_barcode_counts(),
-                        std::str::from_utf8(barcode.sequence()).unwrap(),
-                        barcode.quality_scores()
-                    ).ok();
-                    let ali = add_cell_barcode(
-                        &header,
-                        &alignment,
-                        std::str::from_utf8(barcode.sequence()).unwrap(),
-                      
-                       barcode.quality_scores(),
-                        corrected_barcode.as_ref().map(|x| x.as_str())
-                    ).unwrap();
-                    { align_qc.lock().unwrap().update(&ali, &header); }
-                    ali
-                }).collect::<Vec<_>>()
-            }))
-        }
+            let (barcodes, mut reads): (Vec<_>, Vec<_>) = data.into_iter()
+                .map(|(barcode, (read1, _))| (barcode, read1.unwrap())).unzip();
+            let alignments: Vec<_> = self.aligner.align_reads(&mut reads).collect();
+            let results = barcodes.into_par_iter().zip(alignments).map(|(barcode, alignment)| {
+                let corrected_barcode = corrector.correct(
+                    whitelist.get_barcode_counts(),
+                    std::str::from_utf8(barcode.sequence()).unwrap(),
+                    barcode.quality_scores()
+                ).ok();
+                let ali = add_cell_barcode(
+                    &header,
+                    &alignment,
+                    std::str::from_utf8(barcode.sequence()).unwrap(),
+                    
+                    barcode.quality_scores(),
+                    corrected_barcode.as_ref().map(|x| x.as_str())
+                ).unwrap();
+                { align_qc.lock().unwrap().update(&ali, &header); }
+                ali
+            }).collect::<Vec<_>>();
+            Either::Left(results)
+        })
     }
 
-    pub fn gen_raw_alignments(&self) -> Either<
-        impl Iterator<Item = Vec<sam::Record>> + '_,
-        impl Iterator<Item = Vec<(sam::Record, sam::Record)>> + '_
-    >
+    pub fn gen_raw_alignments(&self) -> 
+        impl Iterator<Item = Either<Vec<sam::Record>, Vec<(sam::Record, sam::Record)>>> + '_
     {
         let fq_records = self.gen_raw_fastq_records();
         let is_paired = fq_records.is_paired_end();
-        let fq_chunks = fq_records.chunk(self.aligner.chunk_size());
-        if is_paired {
-            Either::Right(fq_chunks.map(|data| {
-                let mut reads: Vec<_> = data.into_iter().map(|(_, (read1, read2))|
-                    (read1.unwrap(), read2.unwrap())).collect();
-                self.aligner.align_read_pairs(&mut reads).collect()
-            }))
+        fq_records.chunk(self.aligner.chunk_size()).map(move |data| if is_paired {
+            let mut reads: Vec<_> = data.into_iter().map(|(_, (read1, read2))|
+                (read1.unwrap(), read2.unwrap())).collect();
+            let alignments = self.aligner.align_read_pairs(&mut reads).collect();
+            Either::Right(alignments)
         } else {
-            Either::Left(fq_chunks.map(|data| {
-                let mut reads: Vec<_> = data.into_iter().map(|(_, (read1, _))|
-                    read1.unwrap()).collect();
-                self.aligner.align_reads(reads.as_mut()).collect()
-            }))
-        }
+            let mut reads: Vec<_> = data.into_iter().map(|(_, (read1, _))|
+                read1.unwrap()).collect();
+            let alignments = self.aligner.align_reads(reads.as_mut()).collect();
+            Either::Left(alignments)
+        })
     }
 
     pub fn gen_raw_fastq_records(&self) -> FastqRecords<BufReader<MultiReader<Box<(dyn std::io::Read + 'static)>, std::vec::IntoIter<Box<(dyn std::io::Read + 'static)>>>>> {
@@ -220,8 +230,8 @@ impl<A: Alinger> FastqProcessor<A> {
                 whitelist.count_barcode(std::str::from_utf8(barcode).unwrap(), barcode_qual);
             });
 
-        self.metrics.entry(modality.to_string()).or_insert_with(qc::Metrics::default)
-            .insert("frac_q30_bases".to_string(), whitelist.frac_q30_bases());
+        self.metrics.entry(modality.to_string()).or_insert_with(Metrics::default)
+            .insert("frac_q30_bases_barcode".to_string(), whitelist.frac_q30_bases());
 
         Ok(whitelist)
     }
@@ -415,10 +425,10 @@ mod tests {
         let mut processor = FastqProcessor::new(spec, aligner)
             .set_modality("atac");
 
-        processor.gen_barcoded_alignments().right().unwrap().take(6).for_each(|x| {
+        processor.gen_barcoded_alignments().take(6).for_each(|x| {
             ()
         });
 
-        println!("{}", processor.get_report().unwrap());
+        println!("{}", processor.get_report());
     }
 }
