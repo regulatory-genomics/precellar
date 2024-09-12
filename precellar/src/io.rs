@@ -1,5 +1,5 @@
-use std::{fs::File, io::{BufWriter, Write}, path::Path, str::FromStr};
-use anyhow::{Context, Result};
+use std::{fs::File, io::{BufWriter, Write}, path::{Path, PathBuf}, str::FromStr};
+use anyhow::{Context, Result, anyhow};
 
 /// Open a file, possibly compressed. Supports gzip and zstd.
 pub fn open_file_for_read<P: AsRef<Path>>(file: P) -> Box<dyn std::io::Read> {
@@ -29,6 +29,21 @@ impl FromStr for Compression {
             "gzip" => Ok(Compression::Gzip),
             "zstd" | "zstandard" => Ok(Compression::Zstd),
             _ => Err(format!("unsupported compression: {}", s)),
+        }
+    }
+}
+
+impl TryFrom<&PathBuf> for Compression {
+    type Error = anyhow::Error;
+
+    fn try_from(path: &PathBuf) -> Result<Self> {
+        let ext = path.extension().unwrap_or(std::ffi::OsStr::new(""));
+        if ext == "gz" {
+            Ok(Compression::Gzip)
+        } else if ext == "zst" {
+            Ok(Compression::Zstd)
+        } else {
+            Err(anyhow!("unsupported compression: {:?}", path))
         }
     }
 }

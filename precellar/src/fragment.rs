@@ -4,11 +4,11 @@ use deduplicate::{remove_duplicates, AlignmentInfo};
 use either::Either;
 use itertools::Itertools;
 use noodles::sam::{alignment::{record::{data::field::Tag, Flags}, Record}, Header};
+use rayon::prelude::ParallelSliceMut;
 use serde::{Serialize, Deserialize};
-use std::path::PathBuf;
+use std::{ops::Deref, path::PathBuf};
 use bed_utils::{bed::{BEDLike, ParseError, Strand}, extsort::ExternalSorterBuilder};
 use anyhow::Result;
-use std::ops::Deref;
 
 pub type CellBarcode = String;
 
@@ -194,7 +194,7 @@ impl<'a, I: Iterator<Item = AlignmentInfo>, F: FnMut(&AlignmentInfo) -> String> 
                 }
                 if frag.len() > 0 { Some(frag) } else { None }
             }).collect())?;
-        fragments.sort_unstable_by(|a, b|
+        fragments.par_sort_unstable_by(|a, b|
             a.chrom().cmp(b.chrom())
                 .then_with(|| a.start().cmp(&b.start()))
                 .then_with(|| a.end().cmp(&b.end()))
