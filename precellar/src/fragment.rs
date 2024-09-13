@@ -3,7 +3,7 @@ mod deduplicate;
 use deduplicate::{remove_duplicates, AlignmentInfo};
 use either::Either;
 use itertools::Itertools;
-use noodles::sam::{alignment::{record::{data::field::Tag, Flags}, Record}, Header};
+use noodles::sam::{alignment::{record::Flags, Record}, Header};
 use rayon::prelude::ParallelSliceMut;
 use serde::{Serialize, Deserialize};
 use std::{ops::Deref, path::PathBuf};
@@ -133,23 +133,23 @@ impl FragmentGenerator {
         R: Record + 'a,
     {
         let data = records.flat_map(move |x| match x {
-            Either::Left(chunk) => Box::new(
-                chunk.into_iter()
-                    .filter(move |r| filter_read(r, self.mapq))
-                    .map(move |r| AlignmentInfo::from_read(&r, header).unwrap())
-            ) as Box<dyn Iterator<Item = AlignmentInfo>>,
-            Either::Right(chunk) => Box::new(
-                chunk.into_iter()
-                    .filter(move |r| filter_read_pair(r, self.mapq))
-                    .map(move |r| AlignmentInfo::from_read_pair(&r, header).unwrap())
-            ) as Box<dyn Iterator<Item = AlignmentInfo>>,
+            Either::Left(chunk) => Box::new(chunk.into_iter().flat_map(|r| if filter_read(&r, self.mapq) {
+                AlignmentInfo::from_read(&r, header).unwrap()
+            } else {
+                None
+            })) as Box<dyn Iterator<Item = AlignmentInfo>>,
+            Either::Right(chunk) => Box::new(chunk.into_iter().flat_map(|(r1, r2)|
+                if filter_read_pair((&r1, &r2), self.mapq) {
+                    AlignmentInfo::from_read_pair((&r1, &r2), header).unwrap()
+                } else {
+                    None
+                })) as Box<dyn Iterator<Item = AlignmentInfo>>,
         });
 
         UniqueFragments {
             shift_left: self.shift_left,
             shift_right: self.shift_right,
             chunks: sort_by_barcode(data, self.temp_dir.clone(), self.chunk_size),
-            header: header.clone(),
         }
     }
 }
@@ -158,7 +158,6 @@ pub struct UniqueFragments<I: Iterator, F> {
     shift_left: i64,
     shift_right: i64,
     chunks: itertools::ChunkBy<String, I, F>,
-    header: Header,
 }
 
 impl<'a, I: Iterator<Item = AlignmentInfo>, F: FnMut(&AlignmentInfo) -> String> IntoIterator for &'a UniqueFragments<I, F> {
@@ -169,7 +168,6 @@ impl<'a, I: Iterator<Item = AlignmentInfo>, F: FnMut(&AlignmentInfo) -> String> 
         UniqueFragmentsIter {
             shift_left: self.shift_left,
             shift_right: self.shift_right,
-            header: &self.header,
             iter: self.chunks.into_iter(),
         }
     }
@@ -178,7 +176,6 @@ impl<'a, I: Iterator<Item = AlignmentInfo>, F: FnMut(&AlignmentInfo) -> String> 
 pub struct UniqueFragmentsIter<'a, I: Iterator, F> {
     shift_left: i64,
     shift_right: i64,
-    header: &'a Header,
     iter: itertools::structs::Groups<'a, String, I, F>,
 }
 
@@ -186,14 +183,14 @@ impl<'a, I: Iterator<Item = AlignmentInfo>, F: FnMut(&AlignmentInfo) -> String> 
     type Item = Vec<Fragment>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        let mut fragments: Vec<_> = self.iter.next().map(|(_, group)|
-            remove_duplicates(group, self.header).into_iter().flat_map(|mut frag| {
-                if frag.strand().is_none() { // perform fragment length correction for paired-end reads
-                    frag.set_start(frag.start().saturating_add_signed(self.shift_left));
-                    frag.set_end(frag.end().saturating_add_signed(self.shift_right));
-                }
-                if frag.len() > 0 { Some(frag) } else { None }
-            }).collect())?;
+        let (_, chunk) = self.iter.next()?;
+        let mut fragments: Vec<_> = remove_duplicates(chunk).drain().flat_map(|(_, mut frag)| {
+            if frag.strand().is_none() { // perform fragment length correction for paired-end reads
+                frag.set_start(frag.start().saturating_add_signed(self.shift_left));
+                frag.set_end(frag.end().saturating_add_signed(self.shift_right));
+            }
+            if frag.len() > 0 { Some(frag) } else { None }
+        }).collect();
         fragments.par_sort_unstable_by(|a, b|
             a.chrom().cmp(b.chrom())
                 .then_with(|| a.start().cmp(&b.start()))
@@ -222,10 +219,10 @@ where
     sorter.build().unwrap()
         .sort_by(
             reads.map(|x| std::io::Result::Ok(x)),
-            |a, b| a.this.barcode.cmp(&b.this.barcode)
+            |a, b| a.barcode.cmp(&b.barcode)
         ).unwrap()
         .map(|x| x.unwrap())
-        .chunk_by(|x| x.this.barcode.clone())
+        .chunk_by(|x| x.barcode.clone())
 }
 
 fn filter_read<R: Record>(record: &R, min_q: u8) -> bool {
@@ -237,11 +234,10 @@ fn filter_read<R: Record>(record: &R, min_q: u8) -> bool {
     //   - read is PCR or optical duplicate
     //   - supplementary alignment
     !record.flags().unwrap().intersects(Flags::from_bits_retain(3852)) &&
-        record.mapping_quality().map_or(255, |x| x.unwrap().get()) >= min_q &&
-        record.data().get(&Tag::CELL_BARCODE_ID).transpose().unwrap().is_some()
+        record.mapping_quality().map_or(255, |x| x.unwrap().get()) >= min_q
 }
 
-fn filter_read_pair<R: Record>(pair: &(R, R), min_q: u8) -> bool {
-    filter_read(&pair.0, min_q) && filter_read(&pair.1, min_q) &&
+fn filter_read_pair<R: Record>(pair: (&R, &R), min_q: u8) -> bool {
+    filter_read(pair.0, min_q) && filter_read(pair.1, min_q) &&
         pair.0.flags().unwrap().is_properly_segmented()
 }

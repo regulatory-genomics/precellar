@@ -150,24 +150,12 @@ fn make_fragment(
         header.reference_sequences().get_index_of(&bstr::BString::from(mito)).map(|x| align_qc.add_mito_dna(x));
     });
 
-    let chunks = NameCollatedRecords::new(reader.records()).chunks(5000000);
-    let alignments = chunks
-        .into_iter().map(|chunk| {
-            py.check_signals().unwrap();
-            let mut left = Vec::new();
-            let mut right = Vec::new();
-            chunk.for_each(|x| if x.is_left() {
-                let rec = x.left().unwrap();
-                align_qc.update(&rec, &header);
-                left.push(rec);
-            } else {
-                let rec = x.right().unwrap();
-                align_qc.update(&rec.0, &header);
-                align_qc.update(&rec.1, &header);
-                right.push(rec);
-            });
-            if right.is_empty() { Either::Left(left) } else { Either::Right(right) }
-        });
+    let chunks = NameCollatedRecords::new(reader.records()).map(|x| {
+        align_qc.update(&x.0, &header);
+        align_qc.update(&x.1, &header);
+        x
+    }).chunks(5000000);
+    let alignments = chunks.into_iter().map(|chunk| Either::Right(chunk.collect_vec()));
 
     let compression = compression.map(|x| Compression::from_str(x).unwrap())
         .or((&output).try_into().ok());

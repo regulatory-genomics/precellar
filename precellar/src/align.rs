@@ -4,7 +4,6 @@ use crate::io::open_file_for_read;
 use crate::qc::{AlignQC, Metrics};
 
 use bstr::BString;
-use noodles::bam::record;
 use std::sync::{Arc, Mutex};
 use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, BufReader};
@@ -431,31 +430,23 @@ impl<'a, R: std::io::Read> NameCollatedRecords<'a, R> {
 }
 
 impl<'a, R: std::io::Read> Iterator for NameCollatedRecords<'a, R> {
-    type Item = Either<bam::Record, (bam::Record, bam::Record)>;
+    type Item = (bam::Record, bam::Record);
 
     fn next(&mut self) -> Option<Self::Item> {
-        if let Some(record) = self.records.next() {
-            let record = record.unwrap();
-            let name = record.name().unwrap().to_owned();
-
-            if let Some((prev_name, prev_record)) = self.prev_record.take() {
-                if name == prev_name {
-                    Some(Either::Right((prev_record, record)))
-                } else {
-                    self.check(&name);
-                    self.prev_record = Some((name, record));
-                    Some(Either::Left(prev_record))
-                }
+        let record = self.records.next()?.unwrap();
+        let name = record.name().unwrap().to_owned();
+        if let Some((prev_name, prev_record)) = self.prev_record.take() {
+            if name == prev_name {
+                Some((prev_record, record))
             } else {
-                self.check(&name);
-                self.prev_record = Some((name, record));
-                self.next()
+                panic!("Expecting paired end reads with the same name, found {} and {}", prev_name, name);
             }
         } else {
-            self.prev_record.take().map(|x| Either::Left(x.1))
+            self.check(&name);
+            self.prev_record = Some((name, record));
+            self.next()
         }
     }
-
 }
 
 
