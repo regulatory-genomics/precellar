@@ -3,6 +3,7 @@ mod deduplicate;
 use deduplicate::{remove_duplicates, AlignmentInfo};
 use either::Either;
 use itertools::Itertools;
+use log::info;
 use noodles::sam::{alignment::{record::Flags, Record}, Header};
 use rayon::prelude::ParallelSliceMut;
 use serde::{Serialize, Deserialize};
@@ -146,10 +147,12 @@ impl FragmentGenerator {
                 })) as Box<dyn Iterator<Item = AlignmentInfo>>,
         });
 
+        info!("Sorting by cell barcode...");
+        let sorted = sort_by_barcode(data, self.temp_dir.clone(), self.chunk_size);
         UniqueFragments {
             shift_left: self.shift_left,
             shift_right: self.shift_right,
-            chunks: sort_by_barcode(data, self.temp_dir.clone(), self.chunk_size),
+            chunks: sorted.chunk_by(|x| x.barcode.clone()),
         }
     }
 }
@@ -205,7 +208,7 @@ fn sort_by_barcode<I, P>(
     reads: I,
     temp_dir: Option<P>,
     chunk_size: usize,
-) -> itertools::ChunkBy<String, impl Iterator<Item = AlignmentInfo>, impl FnMut(&AlignmentInfo) -> String>
+) -> impl ExactSizeIterator<Item = AlignmentInfo>
 where
     I: Iterator<Item = AlignmentInfo>,
     P: AsRef<std::path::Path>,
@@ -217,12 +220,9 @@ where
         sorter = sorter.with_tmp_dir(tmp);
     }
     sorter.build().unwrap()
-        .sort_by(
-            reads.map(|x| std::io::Result::Ok(x)),
-            |a, b| a.barcode.cmp(&b.barcode)
+        .sort_by(reads, |a, b| a.barcode.cmp(&b.barcode)
         ).unwrap()
         .map(|x| x.unwrap())
-        .chunk_by(|x| x.barcode.clone())
 }
 
 fn filter_read<R: Record>(record: &R, min_q: u8) -> bool {

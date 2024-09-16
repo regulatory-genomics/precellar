@@ -102,9 +102,10 @@ pub struct Read {
 }
 
 impl Read {
-    pub fn read_fastq(&self) -> fastq::Reader<impl BufRead + '_> {
+    pub fn read_fastq(&self) -> fastq::Reader<impl BufRead> {
+        let files: Vec<_> = self.id.split(',').map(|x| x.trim().to_string()).collect();
         let reader = multi_reader::MultiReader::new(
-            self.id.split(',').map(|x| open_file_for_read(x.trim()))
+            files.into_iter().map(|x| open_file_for_read(x))
         );
         fastq::Reader::new(BufReader::new(reader))
     }
