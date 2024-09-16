@@ -3,16 +3,29 @@ use anyhow::{Context, Result, anyhow};
 
 /// Open a file, possibly compressed. Supports gzip and zstd.
 pub fn open_file_for_read<P: AsRef<Path>>(file: P) -> Box<dyn std::io::Read> {
-    if is_gzipped(file.as_ref()) {
-        Box::new(flate2::read::MultiGzDecoder::new(File::open(file.as_ref()).unwrap()))
-    } else {
-        Box::new(File::open(file.as_ref()).unwrap())
+    match detect_compression(file.as_ref()) {
+        Some(Compression::Gzip) => Box::new(flate2::read::MultiGzDecoder::new(File::open(file.as_ref()).unwrap())),
+        Some(Compression::Zstd) => {
+            let r = zstd::stream::read::Decoder::new(File::open(file.as_ref()).unwrap()).unwrap();
+            Box::new(r)
+        },
+        None => Box::new(File::open(file.as_ref()).unwrap()),
     }
 }
 
 /// Determine the file compression type. Supports gzip and zstd.
-fn is_gzipped<P: AsRef<Path>>(file: P) -> bool {
-    flate2::read::MultiGzDecoder::new(File::open(file.as_ref()).unwrap()).header().is_some()
+fn detect_compression<P: AsRef<Path>>(file: P) -> Option<Compression> {
+    if flate2::read::MultiGzDecoder::new(File::open(file.as_ref()).unwrap()).header().is_some() {
+        Some(Compression::Gzip)
+    } else if let Some(ext) = file.as_ref().extension() {
+        if ext == "zst" {
+            Some(Compression::Zstd)
+        } else {
+            None
+        }
+    } else {
+        None
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -60,7 +73,7 @@ pub fn open_file_for_write<P: AsRef<Path>>(
         None => Box::new(buffer),
         Some(Compression::Gzip) => Box::new(flate2::write::GzEncoder::new(buffer, flate2::Compression::new(compression_level.unwrap_or(6)))),
         Some(Compression::Zstd) => {
-            let mut zstd = zstd::stream::Encoder::new(buffer, compression_level.unwrap_or(3) as i32)?;
+            let mut zstd = zstd::stream::Encoder::new(buffer, compression_level.unwrap_or(9) as i32)?;
             zstd.multithread(8)?;
             Box::new(zstd.auto_finish())
         },
