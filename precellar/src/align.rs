@@ -1,15 +1,13 @@
 use crate::barcode::{BarcodeCorrector, Whitelist};
 use crate::seqspec::{Modality, RegionType, SeqSpec};
-use crate::io::open_file_for_read;
 use crate::qc::{AlignQC, Metrics};
 
 use bstr::BString;
 use indicatif::ProgressStyle;
 use std::sync::{Arc, Mutex};
 use std::collections::{HashMap, HashSet};
-use std::io::{BufRead, BufReader};
+use std::io::BufRead;
 use anyhow::{bail, Result};
-use multi_reader::MultiReader;
 use noodles::{bam, sam, fastq};
 use noodles::sam::alignment::{
     Record, record_buf::RecordBuf, record::data::field::tag::Tag,
@@ -189,7 +187,7 @@ impl<A: Alinger> FastqProcessor<A> {
         })
     }
 
-    pub fn gen_raw_fastq_records(&self) -> FastqRecords<BufReader<MultiReader<Box<(dyn std::io::Read + 'static)>, std::vec::IntoIter<Box<(dyn std::io::Read + 'static)>>>>> {
+    pub fn gen_raw_fastq_records(&self) -> FastqRecords<impl BufRead>  {
         let modality = self.modality();
         let fq_list: HashMap<_, _> = self.seqspec.modality(modality).unwrap()
             .iter_regions()
@@ -204,20 +202,17 @@ impl<A: Alinger> FastqProcessor<A> {
         let mut read_list = HashMap::new();
         self.seqspec.sequence_spec.get(modality).unwrap().iter()
             .for_each(|read| if fq_list.contains_key(&read.primer_id) {
-                read_list.entry(&read.primer_id).or_insert_with(Vec::new).push(read);
+                read_list.insert(&read.primer_id, read);
             });
-        let data = read_list.into_iter().map(|(id, reads)| {
-            let is_reverse = !reads[0].is_reverse();
+        let data = read_list.into_iter().map(|(id, read)| {
+            let is_reverse = read.is_reverse();
             let fq = fq_list.get(id).unwrap();
             let regions = if is_reverse {
                 fq.subregion_range_rev()
             } else {
                 fq.subregion_range()
             };
-            let readers: Vec<_> = reads.iter().map(|read| open_file_for_read(&read.id)).collect();
-            let readers = MultiReader::new(readers.into_iter());
-            let readers = BufReader::new(readers);
-            (fq.id.clone(), is_reverse, regions, readers)
+            (fq.id.clone(), is_reverse, regions, read.read_fastq())
         });
         FastqRecords::new(data)
     }
@@ -273,7 +268,7 @@ pub struct FastqRecords<R> {
     ids: Vec<String>,
     is_reverse: Vec<bool>,
     subregions: Vec<Vec<(RegionType, crate::seqspec::Range)>>,
-    records: Vec<fastq::Reader<R>>,
+    readers: Vec<fastq::Reader<R>>,
 }
 
 pub type Barcode = fastq::Record;
@@ -282,21 +277,21 @@ pub type UMI = fastq::Record;
 impl<R: BufRead> FastqRecords<R> {
     fn new<I>(iter: I) -> Self
     where
-        I: Iterator<Item = (String, bool, Vec<(RegionType, crate::seqspec::Range)>, R)>,
+        I: Iterator<Item = (String, bool, Vec<(RegionType, crate::seqspec::Range)>, fastq::Reader<R>)>,
     {
         let mut ids = Vec::new();
         let mut is_reverse = Vec::new();
         let mut subregions = Vec::new();
-        let mut records = Vec::new();
+        let mut readers = Vec::new();
         iter.for_each(|(f, s, sr, r)| {
             ids.push(f);
             is_reverse.push(s);
             subregions.push(sr.into_iter().filter(|x|
                 x.0 == RegionType::Barcode || x.0 == RegionType::CDNA || x.0 == RegionType::GDNA
             ).collect());
-            records.push(fastq::Reader::new(r));
+            readers.push(r);
         });
-        Self { ids, is_reverse, subregions, records }
+        Self { ids, is_reverse, subregions, readers }
     }
 
     fn chunk(self, chunk_size: usize) -> FastqRecordChunk<R> {
@@ -329,7 +324,7 @@ impl<R: BufRead> Iterator for FastqRecords<R> {
 
     fn next(&mut self) -> Option<Self::Item> {
         let mut id_without_record = Vec::new();
-        let records = self.records.iter_mut().enumerate().map(|(i, reader)| {
+        let records = self.readers.iter_mut().enumerate().map(|(i, reader)| {
             let mut record = fastq::Record::default();
             let s = reader.read_record(&mut record).expect("error reading fastq record");
             if s == 0 {
