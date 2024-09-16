@@ -4,6 +4,7 @@ use crate::io::open_file_for_read;
 use crate::qc::{AlignQC, Metrics};
 
 use bstr::BString;
+use indicatif::ProgressStyle;
 use std::sync::{Arc, Mutex};
 use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, BufReader};
@@ -90,6 +91,7 @@ impl<A: Alinger> FastqProcessor<A> {
     {
         info!("Counting barcodes...");
         let whitelist = self.count_barcodes().unwrap();
+        info!("Total barcodes: {}, Percent valid barcodes: {:.2}%", whitelist.total_count, whitelist.frac_valid_barcode() * 100.0);
 
         info!("Aligning reads...");
         let fq_records = self.gen_raw_fastq_records();
@@ -105,6 +107,11 @@ impl<A: Alinger> FastqProcessor<A> {
         );
         let align_qc = self.align_qc.get(self.modality()).unwrap().clone();
 
+        let style = ProgressStyle::with_template(
+            "[{elapsed}] {bar:40.cyan/blue} {human_pos:>7}/{human_len:7} records (eta: {eta})"
+        ).unwrap();
+        let progress_bar = indicatif::ProgressBar::new(whitelist.total_count as u64)
+            .with_style(style);
         fq_records.chunk(self.aligner.chunk_size()).map(move |data| if is_paired {
             let (barcodes, mut reads): (Vec<_>, Vec<_>) = data.into_iter()
                 .map(|(barcode, (read1, read2))| (barcode, (read1.unwrap(), read2.unwrap()))).unzip();
@@ -136,6 +143,7 @@ impl<A: Alinger> FastqProcessor<A> {
                 }
                 (ali1_, ali2_)
             }).collect::<Vec<_>>();
+            progress_bar.inc(results.len() as u64);
             Either::Right(results)
         } else {
             let (barcodes, mut reads): (Vec<_>, Vec<_>) = data.into_iter()
@@ -158,6 +166,7 @@ impl<A: Alinger> FastqProcessor<A> {
                 { align_qc.lock().unwrap().update(&ali, &header); }
                 ali
             }).collect::<Vec<_>>();
+            progress_bar.inc(results.len() as u64);
             Either::Left(results)
         })
     }
@@ -198,13 +207,17 @@ impl<A: Alinger> FastqProcessor<A> {
                 read_list.entry(&read.primer_id).or_insert_with(Vec::new).push(read);
             });
         let data = read_list.into_iter().map(|(id, reads)| {
-            let strand = reads[0].strand;
+            let is_reverse = !reads[0].is_reverse();
             let fq = fq_list.get(id).unwrap();
-            let regions = fq.subregion_range();
+            let regions = if is_reverse {
+                fq.subregion_range_rev()
+            } else {
+                fq.subregion_range()
+            };
             let readers: Vec<_> = reads.iter().map(|read| open_file_for_read(&read.id)).collect();
             let readers = MultiReader::new(readers.into_iter());
             let readers = BufReader::new(readers);
-            (fq.id.clone(), strand, regions, readers)
+            (fq.id.clone(), is_reverse, regions, readers)
         });
         FastqRecords::new(data)
     }
@@ -212,23 +225,28 @@ impl<A: Alinger> FastqProcessor<A> {
     fn count_barcodes(&mut self) -> Result<Whitelist> {
         let modality = self.modality();
         let mut whitelist = self.get_whitelist()?.unwrap();
-        let region = self.seqspec.modality(self.modality()).unwrap()
+        let region_with_barcode = self.seqspec.modality(self.modality()).unwrap()
             .iter_regions().find(|r|
                 r.region_type == RegionType::Fastq && r.iter_regions().any(|x| x.region_type == RegionType::Barcode)
             ).unwrap();
 
-        let readers = self.seqspec.get_read_by_primer_id(modality, &region.id)
-            .into_iter().map(|read| open_file_for_read(&read.id));
-        let range = region.subregion_range().find(|x| x.0 == RegionType::Barcode).unwrap().1;
-        fastq::Reader::new(BufReader::new(MultiReader::new(readers)))
-            .records().for_each(|record| {
-                let record = record.unwrap();
-                let n = record.sequence().len();
-                let slice = range.start..range.end.unwrap_or(n);
-                let barcode = record.sequence().get(slice.clone()).unwrap();
-                let barcode_qual = record.quality_scores().get(slice).unwrap();
-                whitelist.count_barcode(std::str::from_utf8(barcode).unwrap(), barcode_qual);
-            });
+        let sequence_read = self.seqspec.get_read_by_primer_id(modality, &region_with_barcode.id).unwrap();
+        let subregions = if sequence_read.is_reverse() {
+            region_with_barcode.subregion_range_rev()
+        } else {
+            region_with_barcode.subregion_range()
+        };
+        let range = subregions.into_iter().find(|x| x.0 == RegionType::Barcode).unwrap().1;
+        
+        sequence_read.read_fastq().records().for_each(|record| {
+            let mut record = record.unwrap();
+            let n = record.sequence().len();
+            record = slice_fastq_record(&record, range.start, range.end.unwrap_or(n));
+            if sequence_read.is_reverse() {
+                record = rev_compl_fastq_record(record);
+            }
+            whitelist.count_barcode(std::str::from_utf8(record.sequence()).unwrap(), record.quality_scores());
+        });
 
         self.metrics.entry(modality.to_string()).or_insert_with(Metrics::default)
             .insert("frac_q30_bases_barcode".to_string(), whitelist.frac_q30_bases());
@@ -253,7 +271,7 @@ impl<A: Alinger> FastqProcessor<A> {
 
 pub struct FastqRecords<R> {
     ids: Vec<String>,
-    strandness: Vec<bool>,
+    is_reverse: Vec<bool>,
     subregions: Vec<Vec<(RegionType, crate::seqspec::Range)>>,
     records: Vec<fastq::Reader<R>>,
 }
@@ -262,24 +280,23 @@ pub type Barcode = fastq::Record;
 pub type UMI = fastq::Record;
 
 impl<R: BufRead> FastqRecords<R> {
-    fn new<I, It>(iter: I) -> Self
+    fn new<I>(iter: I) -> Self
     where
-        I: Iterator<Item = (String, bool, It, R)>,
-        It: Iterator<Item = (RegionType, crate::seqspec::Range)>,
+        I: Iterator<Item = (String, bool, Vec<(RegionType, crate::seqspec::Range)>, R)>,
     {
         let mut ids = Vec::new();
-        let mut strandness = Vec::new();
+        let mut is_reverse = Vec::new();
         let mut subregions = Vec::new();
         let mut records = Vec::new();
         iter.for_each(|(f, s, sr, r)| {
             ids.push(f);
-            strandness.push(s);
+            is_reverse.push(s);
             subregions.push(sr.into_iter().filter(|x|
                 x.0 == RegionType::Barcode || x.0 == RegionType::CDNA || x.0 == RegionType::GDNA
             ).collect());
             records.push(fastq::Reader::new(r));
         });
-        Self { ids, strandness, subregions, records }
+        Self { ids, is_reverse, subregions, records }
     }
 
     fn chunk(self, chunk_size: usize) -> FastqRecordChunk<R> {
@@ -293,7 +310,7 @@ impl<R: BufRead> FastqRecords<R> {
             sr.iter().for_each(|(region_type, _)| {
                 match region_type {
                     RegionType::CDNA | RegionType::GDNA => {
-                        if self.strandness[i] {
+                        if self.is_reverse[i] {
                             read1 = true;
                         } else {
                             read2 = true;
@@ -335,14 +352,17 @@ impl<R: BufRead> Iterator for FastqRecords<R> {
             let record = r.as_ref().unwrap();
             self.subregions[i].iter().for_each(|(region_type, range)| {
                 let fq = slice_fastq_record(record, range.start, range.end.unwrap_or(record.sequence().len()));
+                let is_reverse = self.is_reverse[i];
                 match region_type {
-                    RegionType::Barcode => barcode = Some(fq),
-                    RegionType::CDNA | RegionType::GDNA => {
-                        if self.strandness[i] {
-                            read1 = Some(fq);
-                        } else {
-                            read2 = Some(fq);
-                        }
+                    RegionType::Barcode => if is_reverse {
+                        barcode = Some(rev_compl_fastq_record(fq));
+                    } else {
+                        barcode = Some(fq);
+                    },
+                    RegionType::CDNA | RegionType::GDNA => if is_reverse {
+                        read1 = Some(fq);
+                    } else {
+                        read2 = Some(fq);
                     },
                     _ => (),
                 }
@@ -406,6 +426,18 @@ fn slice_fastq_record(record: &fastq::Record, start: usize, end: usize) -> fastq
         &record.sequence()[start..end],
         record.quality_scores().get(start..end).unwrap(),
     )
+}
+
+fn rev_compl_fastq_record(mut record: fastq::Record) -> fastq::Record {
+    *record.quality_scores_mut() = record.quality_scores().iter().rev().copied().collect();
+    *record.sequence_mut() = record.sequence().iter().rev().map(|&x| match x {
+        b'A' => b'T',
+        b'T' => b'A',
+        b'C' => b'G',
+        b'G' => b'C',
+        _ => x,
+    }).collect();
+    record
 }
 
 pub struct NameCollatedRecords<'a, R> {

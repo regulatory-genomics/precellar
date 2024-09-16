@@ -6,7 +6,7 @@ edition = "2021"
 [dependencies]
 anyhow = "1.0"
 bed-utils = "0.4.1"
-bwa = { git = "https://github.com/regulatory-genomics/bwa-rust.git", rev = "6c2da03c579d8e9cc1e6cd0e9a56bb79ba23b587" }
+bwa = { git = "https://github.com/regulatory-genomics/bwa-rust.git", rev = "69d482501956039588f94ce9f87367d7ae8f19af" }
 bstr = "1.0"
 cached-path = "0.6"
 either = "1.13"
@@ -17,6 +17,7 @@ log = "0.4"
 lexical = "6.1"
 multi_reader = "0.1"
 noodles = { version = "0.80", features = ["core", "fastq", "bam", "sam", "async"] }
+indicatif = "0.17"
 rayon = "1.10"
 serde = "1.0"
 yaml-rust = "0.4"

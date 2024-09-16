@@ -9,8 +9,8 @@ pub struct Whitelist {
     whitelist_exists: bool,
     barcode_counts: HashMap<String, usize>,
     mismatch_count: usize,
-    total_count: usize,
-    total_base_count: u64,
+    pub(crate) total_count: usize,
+    pub(crate) total_base_count: u64,
     q30_base_count: u64,
     base_qual_sum: i64,
 }
@@ -78,6 +78,14 @@ impl Whitelist {
             0.0
         } else {
             self.q30_base_count as f64 / self.total_base_count as f64
+        }
+    }
+
+    pub fn frac_valid_barcode(&self) -> f64 {
+        if self.total_count <= 0 {
+            0.0
+        } else {
+            1.0 - (self.mismatch_count as f64 / self.total_count as f64)
         }
     }
 }

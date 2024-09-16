@@ -1,5 +1,6 @@
 use anyhow::{bail, Context, Result};
-use std::{collections::HashMap, io::BufRead, path::Path};
+use noodles::fastq;
+use std::{collections::HashMap, io::{BufRead, BufReader}, path::Path};
 use yaml_rust::{Yaml, YamlLoader};
 use cached_path::Cache;
 use itertools::Itertools;
@@ -84,8 +85,8 @@ impl SeqSpec {
         })
     }
 
-    pub fn get_read_by_primer_id(&self, modality: &str, primer_id: &str) -> Vec<&Read> {
-        self.sequence_spec.get(modality).unwrap().iter().filter(|x| x.primer_id == primer_id).collect()
+    pub fn get_read_by_primer_id(&self, modality: &str, primer_id: &str) -> Option<&Read> {
+        self.sequence_spec.get(modality).unwrap().iter().find(|x| x.primer_id == primer_id)
     }
 }
 
@@ -97,7 +98,20 @@ pub struct Read {
     pub primer_id: String,  // the primer_id should maps to the correct region id off
                         // of which the sequencing read is generated in the library_spec.
     pub length: Length,
-    pub strand: bool,
+    strand: bool,
+}
+
+impl Read {
+    pub fn read_fastq(&self) -> fastq::Reader<impl BufRead + '_> {
+        let reader = multi_reader::MultiReader::new(
+            self.id.split(',').map(|x| open_file_for_read(x.trim()))
+        );
+        fastq::Reader::new(BufReader::new(reader))
+    }
+
+    pub fn is_reverse(&self) -> bool {
+        !self.strand
+    }
 }
 
 impl TryFrom<&Yaml> for Read {
@@ -263,40 +277,64 @@ impl Region {
     }
 
     /// Return the start and end position of each subregion in a fastq region.
-    pub fn subregion_range(&self) -> impl Iterator<Item = (RegionType, Range)> + '_ {
+    pub fn subregion_range(&self) -> Vec<(RegionType, Range)> {
         if self.region_type != RegionType::Fastq {
             panic!("must be called on a fastq region");
         }
 
-        let regions = &self.sub_regions;
-        let len = regions.len();
-        let mut current_pos = 0;
-        let mut i = 0;
-
-        std::iter::from_fn(move || {
-            if i >= len {
-                return None;
-            }
-
-            let region = &regions[i];
-            let range = match region.length {
-                Length::Fixed(n) => {
-                    let r = Range {start: current_pos, end: Some(current_pos + n)};
-                    current_pos += n;
-                    r
-                }
-                Length::Range(_, _) => {
-                    if i != len - 1 {
-                        panic!("Variable length region must be the last region in a region list");
-                    } else {
-                        Range {start: current_pos, end: None}
-                    }
-                }
-            };
-            i += 1;
-            Some((region.region_type.clone(), range))
-        })
+        get_region_range(&self.sub_regions).collect()
     }
+
+    /// Return the start and end position of each subregion in a fastq region.
+    /// Make adjustments as if the fastq read is reverse complemented.
+    pub fn subregion_range_rev(&self) -> Vec<(RegionType, Range)> {
+        if self.region_type != RegionType::Fastq {
+            panic!("must be called on a fastq region");
+        }
+
+        let ranges = get_region_range(&self.sub_regions).collect::<Vec<_>>();
+        if ranges.len() <=1 {
+            ranges
+        } else {
+            let total_len = ranges.last().unwrap().1.end.unwrap();
+            ranges.into_iter().map(move |(region_type, range)| {
+                let start = total_len - range.end.unwrap();
+                let end = start + (range.end.unwrap() - range.start);
+                (region_type, Range {start, end: Some(end)})
+            }).collect()
+        }
+    }
+}
+
+/// Return the start and end position of each subregion in a fastq region.
+fn get_region_range(regions: &[Region]) -> impl Iterator<Item = (RegionType, Range)> + '_ {
+    let len = regions.len();
+    let mut current_pos = 0;
+    let mut i = 0;
+
+    std::iter::from_fn(move || {
+        if i >= len {
+            return None;
+        }
+
+        let region = &regions[i];
+        let range = match region.length {
+            Length::Fixed(n) => {
+                let r = Range {start: current_pos, end: Some(current_pos + n)};
+                current_pos += n;
+                r
+            }
+            Length::Range(_, _) => {
+                if i != len - 1 {
+                    panic!("Variable length region must be the last region in a region list");
+                } else {
+                    Range {start: current_pos, end: None}
+                }
+            }
+        };
+        i += 1;
+        Some((region.region_type.clone(), range))
+    })
 }
 
 #[cfg(test)]
@@ -308,7 +346,7 @@ mod tests {
         let spec = SeqSpec::from_path("tests/data/spec.yaml").unwrap();
 
         for fq in spec.modality("rna").unwrap().fastqs() {
-            println!("{:?}", fq.subregion_range().collect::<Vec<_>>());
+            println!("{:?}", fq.subregion_range());
         }
     }
 

@@ -15,7 +15,7 @@ sequence_protocol: Illumina
 sequence_kit: null
 sequence_spec:
 - !Read
-  read_id: tests/data/human_brain_3k/atac/L001_R1.fastq.gz
+  read_id: tests/data/human_brain_3k/atac/R1.fastq.gz
   name: Read 1
   modality: atac
   primer_id: Read_1
@@ -23,7 +23,7 @@ sequence_spec:
   max_len: 150
   strand: pos
 - !Read
-  read_id: tests/data/human_brain_3k/atac/L001_R2.fastq.gz
+  read_id: tests/data/human_brain_3k/atac/R2.fastq.gz
   name: Index
   modality: atac
   primer_id: Index_2
@@ -31,7 +31,7 @@ sequence_spec:
   max_len: 150
   strand: pos
 - !Read
-  read_id: tests/data/human_brain_3k/atac/L001_R3.fastq.gz
+  read_id: tests/data/human_brain_3k/atac/R3.fastq.gz
   name: Read 2
   modality: atac
   primer_id: Read_2

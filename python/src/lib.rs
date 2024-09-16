@@ -2,9 +2,10 @@ use std::{collections::HashMap, path::PathBuf, str::FromStr};
 
 use bwa::{AlignerOpts, BurrowsWheelerAligner, FMIndex, PairedEndStats};
 use either::Either;
+use log::info;
 use pyo3::prelude::*;
 use anyhow::Result;
-use noodles::sam::alignment::io::Write;
+use noodles::{bgzf, sam::alignment::io::Write};
 use noodles::bam;
 use itertools::Itertools;
 
@@ -75,8 +76,8 @@ fn align(
             anyhow::Ok(writer)
         }).transpose()?;
         let alignments = processor.gen_barcoded_alignments().map(|data| {
+            py.check_signals().unwrap();
             if let Some(writer) = &mut bam_writer {
-                py.check_signals().unwrap();
                 match data.as_ref() {
                     Either::Left(chunk) => chunk.iter().for_each(|x| writer.write_alignment_record(&header, x).unwrap()),
                     Either::Right(chunk) => chunk.iter().for_each(|(a, b)| {
@@ -94,6 +95,7 @@ fn align(
             open_file_for_write(output, compression, compression_level)
         }).transpose()?;
         if let Some(mut writer) = fragment_writer {
+            info!("Writing fragments to {}", output_fragment.as_ref().unwrap().to_string_lossy());
             let mut fragment_generator = FragmentGenerator::default();
             if let Some(dir) = temp_dir {
                 fragment_generator.set_temp_dir(dir)
@@ -140,8 +142,10 @@ fn make_fragment(
     n_jobs: usize,
 ) -> Result<HashMap<String, f64>> {
     let file = std::fs::File::open(input)?;
-    let mut reader = bam::io::Reader::new(file);
+    let decoder = bgzf::MultithreadedReader::with_worker_count(n_jobs.try_into().unwrap(), file);
+    let mut reader = bam::io::Reader::from(decoder);
     let header = reader.read_header()?;
+
 
     let mut fragment_qc = FragmentQC::default();
     let mut align_qc = AlignQC::default();
@@ -184,7 +188,9 @@ fn make_fragment(
 /// A Python module implemented in Rust.
 #[pymodule]
 fn precellar(m: &Bound<'_, PyModule>) -> PyResult<()> {
-    //pyo3_log::init();
+    env_logger::builder()
+        .filter_level(log::LevelFilter::Info)
+        .try_init().unwrap();
 
     m.add_function(wrap_pyfunction!(align, m)?)?;
     m.add_function(wrap_pyfunction!(make_fragment, m)?)?;
