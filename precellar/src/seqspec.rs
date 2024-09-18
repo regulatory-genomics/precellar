@@ -1,6 +1,6 @@
 use anyhow::{bail, Context, Result};
 use noodles::fastq;
-use std::{collections::HashMap, io::{BufRead, BufReader}, path::Path};
+use std::{collections::HashMap, io::{BufRead, BufReader}, path::{Path, PathBuf}};
 use yaml_rust::{Yaml, YamlLoader};
 use cached_path::Cache;
 use itertools::Itertools;
@@ -92,7 +92,7 @@ impl SeqSpec {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Read {
-    pub id: String,   // The file path
+    pub id: Vec<String>,   // The file paths of the sequencing reads from multiple lanes.
     pub name: String,
     pub modality: Modality,
     pub primer_id: String,  // the primer_id should maps to the correct region id off
@@ -102,10 +102,17 @@ pub struct Read {
 }
 
 impl Read {
-    pub fn read_fastq(&self) -> fastq::Reader<impl BufRead> {
-        let files: Vec<_> = self.id.split(',').map(|x| x.trim().to_string()).collect();
+    pub fn read_fastq<P: AsRef<Path>>(&self, base_dir: P) -> fastq::Reader<impl BufRead> {
         let reader = multi_reader::MultiReader::new(
-            files.into_iter().map(|x| open_file_for_read(x))
+            self.id.clone().into_iter().map(move |x| {
+                let mut path = PathBuf::from(x);
+                path = if path.is_absolute() {
+                    path
+                } else {
+                    base_dir.as_ref().join(path)
+                };
+                open_file_for_read(path)
+            })
         );
         fastq::Reader::new(BufReader::new(reader))
     }
@@ -119,7 +126,7 @@ impl TryFrom<&Yaml> for Read {
     type Error = anyhow::Error;
 
     fn try_from(yaml: &Yaml) -> Result<Self> {
-        let id = yaml["read_id"].as_str().unwrap().to_string();
+        let id = yaml["read_id"].as_str().unwrap().split(',').map(|x| x.trim().to_string()).collect();
         let name = yaml["name"].as_str().unwrap().to_string();
         let modality = yaml["modality"].as_str().unwrap().to_string();
         let primer_id = yaml["primer_id"].as_str().unwrap().to_string();

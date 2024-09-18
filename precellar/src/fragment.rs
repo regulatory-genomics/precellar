@@ -3,7 +3,6 @@ mod deduplicate;
 use deduplicate::{remove_duplicates, AlignmentInfo};
 use either::Either;
 use itertools::Itertools;
-use log::info;
 use noodles::sam::{alignment::{record::Flags, Record}, Header};
 use rayon::prelude::ParallelSliceMut;
 use serde::{Serialize, Deserialize};
@@ -133,7 +132,7 @@ impl FragmentGenerator {
         I: Iterator<Item = Either<Vec<R>, Vec<(R, R)>>> + 'a,
         R: Record + 'a,
     {
-        let data = records.flat_map(move |x| match x {
+        let data = records.flat_map(|x| match x {
             Either::Left(chunk) => Box::new(chunk.into_iter().flat_map(|r| if filter_read(&r, self.mapq) {
                 AlignmentInfo::from_read(&r, header).unwrap()
             } else {
@@ -147,7 +146,6 @@ impl FragmentGenerator {
                 })) as Box<dyn Iterator<Item = AlignmentInfo>>,
         });
 
-        info!("Sorting by cell barcode...");
         let sorted = sort_by_barcode(data, self.temp_dir.clone(), self.chunk_size);
         UniqueFragments {
             shift_left: self.shift_left,

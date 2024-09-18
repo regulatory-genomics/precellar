@@ -2,7 +2,6 @@ use std::{collections::HashMap, path::PathBuf, str::FromStr};
 
 use bwa::{AlignerOpts, BurrowsWheelerAligner, FMIndex, PairedEndStats};
 use either::Either;
-use log::info;
 use pyo3::prelude::*;
 use anyhow::Result;
 use noodles::{bgzf, sam::alignment::io::Write};
@@ -55,14 +54,16 @@ fn align(
 ) -> Result<HashMap<String, f64>> {
     assert!(output_bam.is_some() || output_fragment.is_some(), "either output_bam or output_fragment must be provided");
 
-    let spec = SeqSpec::from_path(seqspec).unwrap();
+    let spec = SeqSpec::from_path(&seqspec).unwrap();
     let aligner = BurrowsWheelerAligner::new(
         FMIndex::read(genome_index).unwrap(),
         AlignerOpts::default().set_n_threads(n_jobs),
         PairedEndStats::default()
     );
     let header = aligner.header();
-    let mut processor = FastqProcessor::new(spec, aligner).set_modality(modality);
+    let mut processor = FastqProcessor::new(spec, aligner).with_modality(modality)
+        .with_barcode_correct_prob(0.9)
+        .with_base_dir(seqspec.parent().unwrap());
     let mut fragment_qc = FragmentQC::default();
     mito_dna.into_iter().for_each(|x| {
         processor.add_mito_dna(&x);
@@ -95,7 +96,6 @@ fn align(
             open_file_for_write(output, compression, compression_level)
         }).transpose()?;
         if let Some(mut writer) = fragment_writer {
-            info!("Writing fragments to {}", output_fragment.as_ref().unwrap().to_string_lossy());
             let mut fragment_generator = FragmentGenerator::default();
             if let Some(dir) = temp_dir {
                 fragment_generator.set_temp_dir(dir)
