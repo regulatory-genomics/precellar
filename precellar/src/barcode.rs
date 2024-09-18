@@ -28,6 +28,7 @@ impl Whitelist {
         }
     }
 
+    /// Create a new whitelist from an iterator of strings.
     pub fn new<I: IntoIterator<Item = S>, S: ToString>(iter: I) -> Self {
         let mut whitelist = Self::empty();
         whitelist.whitelist_exists = true;
