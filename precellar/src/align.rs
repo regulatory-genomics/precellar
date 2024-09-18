@@ -4,6 +4,7 @@ use crate::qc::{AlignQC, Metrics};
 
 use bstr::BString;
 use indicatif::ProgressStyle;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::collections::{HashMap, HashSet};
 use std::io::BufRead;
@@ -49,17 +50,35 @@ impl Alinger for BurrowsWheelerAligner {
 }
 
 pub struct FastqProcessor<A> {
+    base_dir: PathBuf,
     seqspec: SeqSpec,
     aligner: A,
     current_modality: Option<String>,
     mito_dna: HashSet<usize>,
     metrics: HashMap<Modality, Metrics>,
     align_qc: HashMap<Modality, Arc<Mutex<AlignQC>>>,
+    barcode_correct_prob: f64,  // if the posterior probability of a correction
+                                // exceeds this threshold, the barcode will be corrected.
+                                // cellrange uses 0.975 for ATAC and 0.9 for multiome.
 }
 
 impl<A: Alinger> FastqProcessor<A> {
     pub fn new(seqspec: SeqSpec, aligner: A) -> Self {
-        Self { seqspec, aligner, current_modality: None, metrics: HashMap::new(), align_qc: HashMap::new(), mito_dna: HashSet::new() }
+        Self {
+            seqspec, aligner, current_modality: None, metrics: HashMap::new(),
+            align_qc: HashMap::new(), mito_dna: HashSet::new(), base_dir: PathBuf::from("./"),
+            barcode_correct_prob: 0.975,
+        }
+    }
+
+    pub fn with_base_dir<P: AsRef<Path>>(mut self, base_dir: P) -> Self {
+        self.base_dir = base_dir.as_ref().to_path_buf();
+        self
+    }
+
+    pub fn with_barcode_correct_prob(mut self, prob: f64) -> Self {
+        self.barcode_correct_prob = prob;
+        self
     }
 
     pub fn modality(&self) -> &str {
@@ -71,7 +90,7 @@ impl<A: Alinger> FastqProcessor<A> {
             .map(|x| self.mito_dna.insert(x));
     }
 
-    pub fn set_modality(mut self, modality: &str) -> Self {
+    pub fn with_modality(mut self, modality: &str) -> Self {
         self.current_modality = Some(modality.into());
         self
     }
@@ -89,12 +108,12 @@ impl<A: Alinger> FastqProcessor<A> {
     {
         info!("Counting barcodes...");
         let whitelist = self.count_barcodes().unwrap();
-        info!("Total barcodes: {}, Percent valid barcodes: {:.2}%", whitelist.total_count, whitelist.frac_valid_barcode() * 100.0);
+        info!("Found {} barcodes. {:.2}% of them have an exact match in whitelist", whitelist.total_count, whitelist.frac_exact_match() * 100.0);
 
         info!("Aligning reads...");
         let fq_records = self.gen_raw_fastq_records();
         let is_paired = fq_records.is_paired_end();
-        let corrector = BarcodeCorrector::default();
+        let corrector = BarcodeCorrector::default().with_bc_confidence_threshold(self.barcode_correct_prob);
         let header = self.aligner.header();
         self.align_qc.insert(
             self.modality().into(),
@@ -212,7 +231,7 @@ impl<A: Alinger> FastqProcessor<A> {
             } else {
                 fq.subregion_range()
             };
-            (fq.id.clone(), is_reverse, regions, read.read_fastq())
+            (fq.id.clone(), is_reverse, regions, read.read_fastq(self.base_dir.clone()))
         });
         FastqRecords::new(data)
     }
@@ -233,7 +252,7 @@ impl<A: Alinger> FastqProcessor<A> {
         };
         let range = subregions.into_iter().find(|x| x.0 == RegionType::Barcode).unwrap().1;
         
-        sequence_read.read_fastq().records().for_each(|record| {
+        sequence_read.read_fastq(&self.base_dir).records().for_each(|record| {
             let mut record = record.unwrap();
             let n = record.sequence().len();
             record = slice_fastq_record(&record, range.start, range.end.unwrap_or(n));
@@ -492,7 +511,7 @@ mod tests {
             PairedEndStats::default()
         );
         let mut processor = FastqProcessor::new(spec, aligner)
-            .set_modality("atac");
+            .with_modality("atac");
 
         processor.gen_barcoded_alignments().take(6).for_each(|x| {
             ()

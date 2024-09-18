@@ -81,7 +81,7 @@ impl Whitelist {
         }
     }
 
-    pub fn frac_valid_barcode(&self) -> f64 {
+    pub fn frac_exact_match(&self) -> f64 {
         if self.total_count <= 0 {
             0.0
         } else {
@@ -106,6 +106,13 @@ impl Default for BarcodeCorrector {
             max_expected_errors: f64::MAX,
             bc_confidence_threshold: 0.975,
         }
+    }
+}
+
+impl BarcodeCorrector {
+    pub fn with_bc_confidence_threshold(mut self, threshold: f64) -> Self {
+        self.bc_confidence_threshold = threshold;
+        self
     }
 }
 
