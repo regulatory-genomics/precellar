@@ -1,5 +1,6 @@
-use std::{collections::HashMap, path::PathBuf, str::FromStr};
+mod utils;
 
+use std::{collections::HashMap, path::PathBuf, str::FromStr};
 use bwa::{AlignerOpts, BurrowsWheelerAligner, FMIndex, PairedEndStats};
 use either::Either;
 use pyo3::prelude::*;
@@ -25,19 +26,19 @@ static GLOBAL: Jemalloc = Jemalloc;
 #[pyfunction]
 #[pyo3(
     signature = (
-        seqspec,
-        genome_index,
-        *,
-        modality,
-        output_bam=None,
-        output_fragment=None,
+        seqspec, genome_index, *,
+        modality, output_bam=None, output_fragment=None,
         mito_dna=vec!["chrM".to_owned(), "M".to_owned()],
-        compression=None,
-        compression_level=None,
-        temp_dir=None,
-        n_jobs=8,
+        shift_left=4, shift_right=-5,
+        compression=None, compression_level=None,
+        temp_dir=None, num_threads=8,
     ),
-    text_signature = "(seqspec, genome_index, *, modality, output_bam=None, output_fragment=None, n_jobs=8)",
+    text_signature = "(seqspec, genome_index, *,
+        modality, output_bam=None, output_fragment=None,
+        mito_dna=['chrM', 'M'],
+        shift_left=4, shift_right=-5,
+        compression=None, compression_level=None,
+        temp_dir=None, num_threads=8)",
 )]
 fn align(
     py: Python<'_>,
@@ -47,17 +48,19 @@ fn align(
     output_bam: Option<PathBuf>,
     output_fragment: Option<PathBuf>,
     mito_dna: Vec<String>,
+    shift_left: i64,
+    shift_right: i64,
     compression: Option<&str>,
     compression_level: Option<u32>,
     temp_dir: Option<PathBuf>,
-    n_jobs: usize,
+    num_threads: u32,
 ) -> Result<HashMap<String, f64>> {
     assert!(output_bam.is_some() || output_fragment.is_some(), "either output_bam or output_fragment must be provided");
 
     let spec = SeqSpec::from_path(&seqspec).unwrap();
     let aligner = BurrowsWheelerAligner::new(
         FMIndex::read(genome_index).unwrap(),
-        AlignerOpts::default().set_n_threads(n_jobs),
+        AlignerOpts::default().set_n_threads(num_threads as usize),
         PairedEndStats::default()
     );
     let header = aligner.header();
@@ -93,13 +96,15 @@ fn align(
         let fragment_writer = output_fragment.as_ref().map(|output| {
             let compression = compression.map(|x| Compression::from_str(x).unwrap())
                 .or(output.try_into().ok());
-            open_file_for_write(output, compression, compression_level)
+            open_file_for_write(output, compression, compression_level, num_threads)
         }).transpose()?;
         if let Some(mut writer) = fragment_writer {
             let mut fragment_generator = FragmentGenerator::default();
             if let Some(dir) = temp_dir {
-                fragment_generator.set_temp_dir(dir)
-            };
+                fragment_generator.set_temp_dir(dir);
+                fragment_generator.set_shift_left(shift_left);
+                fragment_generator.set_shift_right(shift_right);
+            }
             fragment_generator.gen_unique_fragments(&header, alignments).into_iter().for_each(|fragments| {
                 py.check_signals().unwrap();
                 fragments.into_iter().for_each(|frag| {
@@ -127,9 +132,9 @@ fn align(
         compression=None,
         compression_level=None,
         temp_dir=None,
-        n_jobs=8,
+        num_threads=8,
     ),
-    text_signature = "(seqspec, genome_index, *, modality, output_bam=None, output_fragment=None, n_jobs=8)",
+    text_signature = "(seqspec, genome_index, *, modality, output_bam=None, output_fragment=None, num_threads=8)",
 )]
 fn make_fragment(
     py: Python<'_>,
@@ -139,10 +144,10 @@ fn make_fragment(
     compression: Option<&str>,
     compression_level: Option<u32>,
     temp_dir: Option<PathBuf>,
-    n_jobs: usize,
+    num_threads: u32,
 ) -> Result<HashMap<String, f64>> {
     let file = std::fs::File::open(input)?;
-    let decoder = bgzf::MultithreadedReader::with_worker_count(n_jobs.try_into().unwrap(), file);
+    let decoder = bgzf::MultithreadedReader::with_worker_count((num_threads as usize).try_into().unwrap(), file);
     let mut reader = bam::io::Reader::from(decoder);
     let header = reader.read_header()?;
 
@@ -163,7 +168,7 @@ fn make_fragment(
 
     let compression = compression.map(|x| Compression::from_str(x).unwrap())
         .or((&output).try_into().ok());
-    let mut writer = open_file_for_write(output, compression, compression_level)?;
+    let mut writer = open_file_for_write(output, compression, compression_level, num_threads)?;
 
     let mut fragment_generator = FragmentGenerator::default();
     if let Some(dir) = temp_dir {
@@ -194,5 +199,7 @@ fn precellar(m: &Bound<'_, PyModule>) -> PyResult<()> {
 
     m.add_function(wrap_pyfunction!(align, m)?)?;
     m.add_function(wrap_pyfunction!(make_fragment, m)?)?;
+
+    utils::register_submodule(m)?;
     Ok(())
 }

@@ -126,6 +126,14 @@ impl FragmentGenerator {
         self.temp_dir = Some(temp_dir.into());
     }
 
+    pub fn set_shift_left(&mut self, shift_left: i64) {
+        self.shift_left = shift_left;
+    }
+
+    pub fn set_shift_right(&mut self, shift_right: i64) {
+        self.shift_right = shift_right;
+    }
+
     pub fn gen_unique_fragments<'a, I, R>(&'a self, header: &'a Header, records: I)
         -> UniqueFragments<impl Iterator<Item = AlignmentInfo> + 'a, impl FnMut(&AlignmentInfo) -> String + 'a>
     where
