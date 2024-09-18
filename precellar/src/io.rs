@@ -65,6 +65,7 @@ pub fn open_file_for_write<P: AsRef<Path>>(
     filename: P,
     compression: Option<Compression>,
     compression_level: Option<u32>,
+    num_threads: u32,
 ) -> Result<Box<dyn Write + Send>> {
     let buffer = BufWriter::new(
         File::create(&filename).with_context(|| format!("cannot create file: {}", filename.as_ref().display()))?
@@ -74,7 +75,7 @@ pub fn open_file_for_write<P: AsRef<Path>>(
         Some(Compression::Gzip) => Box::new(flate2::write::GzEncoder::new(buffer, flate2::Compression::new(compression_level.unwrap_or(6)))),
         Some(Compression::Zstd) => {
             let mut zstd = zstd::stream::Encoder::new(buffer, compression_level.unwrap_or(9) as i32)?;
-            zstd.multithread(8)?;
+            zstd.multithread(num_threads)?;
             Box::new(zstd.auto_finish())
         },
     };

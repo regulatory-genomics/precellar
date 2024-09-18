@@ -20,5 +20,6 @@ noodles = { version = "0.80", features = ["core", "fastq", "bam", "sam", "async"
 indicatif = "0.17"
 rayon = "1.10"
 serde = "1.0"
+regex = "1.6"
 yaml-rust = "0.4"
 zstd = { version = "0.13", features = ["zstdmt"] }
