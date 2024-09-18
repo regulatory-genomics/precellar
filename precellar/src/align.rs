@@ -238,7 +238,7 @@ impl<A: Alinger> FastqProcessor<A> {
 
     fn count_barcodes(&mut self) -> Result<Whitelist> {
         let modality = self.modality();
-        let mut whitelist = self.get_whitelist()?.unwrap();
+        let mut whitelist = self.get_whitelist()?;
         let region_with_barcode = self.seqspec.modality(self.modality()).unwrap()
             .iter_regions().find(|r|
                 r.region_type == RegionType::Fastq && r.iter_regions().any(|x| x.region_type == RegionType::Barcode)
@@ -268,7 +268,7 @@ impl<A: Alinger> FastqProcessor<A> {
         Ok(whitelist)
     }
 
-    fn get_whitelist(&self) -> Result<Option<Whitelist>> {
+    fn get_whitelist(&self) -> Result<Whitelist> {
         let regions: Vec<_> = self.seqspec.modality(self.modality()).unwrap()
             .iter_regions().filter(|r| r.region_type == RegionType::Barcode).collect();
         if regions.len() != 1 {
@@ -276,9 +276,9 @@ impl<A: Alinger> FastqProcessor<A> {
         }
         let region = regions[0];
         if region.sequence_type.as_str() == "onlist" {
-            Ok(Some(Whitelist::new(region.sequence_type.fetch_onlist()?)))
+            Ok(Whitelist::new(region.sequence_type.fetch_onlist()?))
         } else {
-            Ok(None)
+            Ok(Whitelist::empty())
         }
     }
 }

@@ -14,10 +14,10 @@ pub struct SeqSpec {
     pub version: String,
     pub id: String,
     pub name: String,
-    pub doi: String,
-    pub date: String,
-    pub description: String,
-    pub lib_struct: String,
+    pub doi: Option<String>,
+    pub date: Option<String>,
+    pub description: Option<String>,
+    pub lib_struct: Option<String>,
     pub library_protocol: Option<String>,
     pub library_kit: Option<String>,
     pub sequence_protocol: String,
@@ -33,10 +33,10 @@ impl TryFrom<&Yaml> for SeqSpec {
         let version = yaml["seqspec_version"].as_str().unwrap().to_string();
         let id = yaml["assay_id"].as_str().unwrap().to_string();
         let name = yaml["name"].as_str().unwrap().to_string();
-        let doi = yaml["doi"].as_str().unwrap().to_string();
-        let date = yaml["date"].as_str().unwrap().to_string();
-        let description = yaml["description"].as_str().unwrap().to_string();
-        let lib_struct = yaml["lib_struct"].as_str().unwrap().to_string();
+        let doi = yaml["doi"].as_str().map(|x| x.to_string());
+        let date = yaml["date"].as_str().map(|x| x.to_string());
+        let description = yaml["description"].as_str().map(|x| x.to_string());
+        let lib_struct = yaml["lib_struct"].as_str().map(|x| x.to_string());
         let library_protocol = yaml["library_protocol"].as_str().map(|x| x.to_string());
         let library_kit = yaml["library_kit"].as_str().map(|x| x.to_string());
         let sequence_protocol = yaml["sequence_protocol"].as_str().unwrap().to_string();
