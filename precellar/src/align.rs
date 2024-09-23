@@ -3,7 +3,7 @@ use crate::seqspec::{Modality, RegionType, SeqSpec};
 use crate::qc::{AlignQC, Metrics};
 
 use bstr::BString;
-use indicatif::ProgressStyle;
+use kdam::{tqdm, BarExt};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::collections::{HashMap, HashSet};
@@ -124,11 +124,7 @@ impl<A: Alinger> FastqProcessor<A> {
         );
         let align_qc = self.align_qc.get(self.modality()).unwrap().clone();
 
-        let style = ProgressStyle::with_template(
-            "[{elapsed}] {bar:40.cyan/blue} {human_pos:>7}/{human_len:7} records (eta: {eta})"
-        ).unwrap();
-        let progress_bar = indicatif::ProgressBar::new(whitelist.total_count as u64)
-            .with_style(style);
+        let mut progress_bar = tqdm!(total = whitelist.total_count);
         fq_records.chunk(self.aligner.chunk_size()).map(move |data| if is_paired {
             let (barcodes, mut reads): (Vec<_>, Vec<_>) = data.into_iter()
                 .map(|(barcode, (read1, read2))| (barcode, (read1.unwrap(), read2.unwrap()))).unzip();
@@ -160,7 +156,7 @@ impl<A: Alinger> FastqProcessor<A> {
                 }
                 (ali1_, ali2_)
             }).collect::<Vec<_>>();
-            progress_bar.inc(results.len() as u64);
+            progress_bar.update(results.len());
             Either::Right(results)
         } else {
             let (barcodes, mut reads): (Vec<_>, Vec<_>) = data.into_iter()
@@ -183,7 +179,7 @@ impl<A: Alinger> FastqProcessor<A> {
                 { align_qc.lock().unwrap().update(&ali, &header); }
                 ali
             }).collect::<Vec<_>>();
-            progress_bar.inc(results.len() as u64);
+            progress_bar.update(results.len());
             Either::Left(results)
         })
     }

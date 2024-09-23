@@ -7,11 +7,9 @@ methods.
 
 .. currentmodule:: precellar
 
-Backed AnnData objects
-~~~~~~~~~~~~~~~~~~~~~~
-
 .. autosummary::
     :toctree: _autosummary
 
     align
+    make_fragment
 
