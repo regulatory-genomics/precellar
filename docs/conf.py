@@ -121,7 +121,7 @@ html_theme_options = {
         "alt_text": "precellar",
     },
 
-    "github_url": "https://github.com/kaizhang/SnapATAC2",
+    "github_url": "https://github.com/regulatory-genomics/precellar",
     "external_links": [
     ],
     "header_links_before_dropdown": 6,
@@ -133,12 +133,12 @@ html_theme_options = {
 
     "switcher": {
         "version_match": switcher_version,
-        "json_url": "https://raw.githubusercontent.com/kaizhang/SnapATAC2/main/docs/_static/versions.json", 
+        "json_url": "https://raw.githubusercontent.com/regulatory-genomics/precellar/refs/heads/main/docs/_static/versions.json",
     },
 }
 
 commit = subprocess.check_output(['git', 'rev-parse', 'HEAD']).strip().decode('ascii')
-code_url = f"https://github.com/kaizhang/SnapATAC2/blob/{commit}"
+code_url = f"https://github.com/regulatory-genomics/precellar/blob/{commit}"
 
 # based on numpy doc/source/conf.py
 def linkcode_resolve(domain, info):

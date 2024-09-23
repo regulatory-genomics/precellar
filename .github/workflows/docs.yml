@@ -93,11 +93,11 @@ jobs:
         ref: 'gh-pages'
         path: 'gh-pages-folder'
 
-#    - name: Deploy (preferred version)
-#      uses: JamesIves/github-pages-deploy-action@v4
-#      with:
-#        single-commit: true
-#        branch: gh-pages
-#        folder: gh-pages-folder/version/${{ env.PREFERRED_VERSION }}
-#        clean: true
-#        clean-exclude: version
+    - name: Deploy (preferred version)
+      uses: JamesIves/github-pages-deploy-action@v4
+      with:
+        single-commit: true
+        branch: gh-pages
+        folder: gh-pages-folder/version/${{ env.PREFERRED_VERSION }}
+        clean: true
+        clean-exclude: version
