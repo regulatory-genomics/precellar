@@ -14,7 +14,7 @@ use noodles::sam::alignment::{
     Record, record_buf::RecordBuf, record::data::field::tag::Tag,
 };
 use noodles::sam::alignment::record_buf::data::field::value::Value;
-use bwa::BurrowsWheelerAligner;
+use bwa_mem2::BurrowsWheelerAligner;
 use log::info;
 use rayon::iter::{IndexedParallelIterator, IntoParallelIterator, ParallelIterator};
 use either::Either;
@@ -24,9 +24,9 @@ pub trait Alinger {
 
     fn header(&self) -> sam::Header;
 
-    fn align_reads(&self, records: &mut [fastq::Record]) -> impl ExactSizeIterator<Item = sam::Record>;
+    fn align_reads(&mut self, records: &mut [fastq::Record]) -> impl ExactSizeIterator<Item = sam::Record>;
 
-    fn align_read_pairs(&self, records: &mut [(fastq::Record, fastq::Record)]) ->
+    fn align_read_pairs(&mut self, records: &mut [(fastq::Record, fastq::Record)]) ->
         impl ExactSizeIterator<Item = (sam::Record, sam::Record)>;
 }
 
@@ -39,11 +39,11 @@ impl Alinger for BurrowsWheelerAligner {
         self.get_sam_header()
     }
 
-    fn align_reads(&self, records: &mut [fastq::Record]) -> impl ExactSizeIterator<Item = sam::Record> {
+    fn align_reads(&mut self, records: &mut [fastq::Record]) -> impl ExactSizeIterator<Item = sam::Record> {
         self.align_reads(records)
     }
 
-    fn align_read_pairs(&self, records: &mut [(fastq::Record, fastq::Record)]) ->
+    fn align_read_pairs(&mut self, records: &mut [(fastq::Record, fastq::Record)]) ->
         impl ExactSizeIterator<Item = (sam::Record, sam::Record)> {
         self.align_read_pairs(records)
     }
@@ -188,7 +188,7 @@ impl<A: Alinger> FastqProcessor<A> {
         })
     }
 
-    pub fn gen_raw_alignments(&self) -> 
+    pub fn gen_raw_alignments(&mut self) -> 
         impl Iterator<Item = Either<Vec<sam::Record>, Vec<(sam::Record, sam::Record)>>> + '_
     {
         let fq_records = self.gen_raw_fastq_records();
@@ -498,7 +498,7 @@ impl<'a, R: std::io::Read> Iterator for NameCollatedRecords<'a, R> {
 
 #[cfg(test)]
 mod tests {
-    use bwa::{AlignerOpts, FMIndex, PairedEndStats};
+    use bwa_mem2::{AlignerOpts, FMIndex, PairedEndStats};
 
     use super::*;
 

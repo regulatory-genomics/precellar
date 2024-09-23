@@ -1,0 +1,45 @@
+name: test-python-package
+
+on: [push, pull_request]
+
+jobs:
+  build-and-test:
+    outputs:
+      VERSION: ${{ steps.get-version.outputs.VERSION }}
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout code
+      uses: nschloe/action-cached-lfs-checkout@v1
+
+    - uses: actions/setup-python@v4
+      name: Install Python
+      with:
+          python-version: '3.10'
+
+    - uses: ./.github/actions/setup-rust
+      with:
+        cache: true
+
+    - name: Install dependencies
+      run: |
+        sudo pip install --upgrade pip
+        pip install --user pytest hypothesis==6.72.4 wheel
+
+    - name: Build wheel files
+      run: |
+        cd ${GITHUB_WORKSPACE}/python
+        mkdir ${GITHUB_WORKSPACE}/wheel_files
+        pip wheel . --wheel-dir ${GITHUB_WORKSPACE}/wheel_files
+
+    - name: Get precellar version
+      id: get-version
+      run: |
+        VERSION_NUMBER=$(python -c "import precellar;print(precellar.__version__)")
+        echo $VERSION_NUMBER
+        echo "VERSION=$VERSION_NUMBER" >> $GITHUB_OUTPUT
+
+    - name: Upload wheel files as artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: wheel-files
+        path: ./wheel_files/precellar*.whl

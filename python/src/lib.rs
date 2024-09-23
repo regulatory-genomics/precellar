@@ -1,7 +1,7 @@
 mod utils;
 
 use std::{collections::HashMap, path::PathBuf, str::FromStr};
-use bwa::{AlignerOpts, BurrowsWheelerAligner, FMIndex, PairedEndStats};
+use bwa_mem2::{AlignerOpts, BurrowsWheelerAligner, FMIndex, PairedEndStats};
 use either::Either;
 use pyo3::prelude::*;
 use anyhow::Result;
@@ -23,6 +23,41 @@ use tikv_jemallocator::Jemalloc;
 #[global_allocator]
 static GLOBAL: Jemalloc = Jemalloc;
 
+/// Align fastq reads to the reference genome and generate unique fragments.
+///
+/// Parameters
+/// ----------
+///
+/// seqspec: Path
+///     File path to the sequencing specification, see https://github.com/pachterlab/seqspec.
+/// genom_index: Path
+///     File path to the genome index.
+/// modality: str
+///     The modality of the sequencing data, e.g., "rna" or "atac".
+/// output_bam: Path | None
+///     File path to the output bam file. If None, the bam file will not be generated.
+/// output_fragment: Path | None
+///     File path to the output fragment file. If None, the fragment file will not be generated.
+/// mito_dna: list[str]
+///     List of mitochondrial DNA names.
+/// shift_left: int
+///     The number of bases to shift the left end of the fragment.
+/// shift_right: int
+///     The number of bases to shift the right end of the fragment.
+/// compression: str | None
+///     The compression algorithm to use for the output fragment file.
+///     If None, the compression algorithm will be inferred from the file extension.
+/// compression_level: int | None
+///     The compression level to use for the output fragment file.
+/// temp_dir: Path | None
+///     The temporary directory to use.
+/// num_threads: int
+///     The number of threads to use.
+/// 
+/// Returns
+/// -------
+/// dict
+///    A dictionary containing the QC metrics of the alignment and fragment generation.
 #[pyfunction]
 #[pyo3(
     signature = (
@@ -60,7 +95,7 @@ fn align(
     let spec = SeqSpec::from_path(&seqspec).unwrap();
     let aligner = BurrowsWheelerAligner::new(
         FMIndex::read(genome_index).unwrap(),
-        AlignerOpts::default().set_n_threads(num_threads as usize),
+        AlignerOpts::default().with_n_threads(num_threads as usize),
         PairedEndStats::default()
     );
     let header = aligner.header();
@@ -129,6 +164,7 @@ fn align(
         output,
         *,
         mito_dna=vec!["chrM".to_owned(), "M".to_owned()],
+        chunk_size=50000000,
         compression=None,
         compression_level=None,
         temp_dir=None,
@@ -141,6 +177,7 @@ fn make_fragment(
     input: PathBuf,
     output : PathBuf,
     mito_dna: Vec<String>,
+    chunk_size: usize,
     compression: Option<&str>,
     compression_level: Option<u32>,
     temp_dir: Option<PathBuf>,
@@ -163,7 +200,7 @@ fn make_fragment(
         align_qc.update(&x.0, &header);
         align_qc.update(&x.1, &header);
         x
-    }).chunks(5000000);
+    }).chunks(chunk_size);
     let alignments = chunks.into_iter().map(|chunk| Either::Right(chunk.collect_vec()));
 
     let compression = compression.map(|x| Compression::from_str(x).unwrap())
@@ -196,6 +233,8 @@ fn precellar(m: &Bound<'_, PyModule>) -> PyResult<()> {
     env_logger::builder()
         .filter_level(log::LevelFilter::Info)
         .try_init().unwrap();
+
+    m.add("__version__", env!("CARGO_PKG_VERSION"))?;
 
     m.add_function(wrap_pyfunction!(align, m)?)?;
     m.add_function(wrap_pyfunction!(make_fragment, m)?)?;
