@@ -1,0 +1,22 @@
+name: 'Setup Rust'
+description: 'Setup rust toolchain'
+inputs:
+  cache:
+    description: 'Cache'
+    required: false
+    default: false
+runs:
+  using: "composite"
+  steps: 
+    - name: Install Rust
+      uses: actions-rs/toolchain@v1
+      with:
+        profile: minimal
+        toolchain: stable
+        override: true
+
+    - name: Cache rust build
+      uses: Swatinem/rust-cache@v2
+      if: ${{ inputs.cache == 'true' }}
+      with:
+        workspaces: "precellar -> target"

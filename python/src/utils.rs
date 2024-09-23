@@ -7,19 +7,13 @@ use regex::Regex;
 
 #[pyfunction]
 #[pyo3(
-    signature = (
-        in_fq,
-        out_fq,
-        *,
-        regex,
-        out_barcode=None,
-        left_add=0,
-        right_add=0,
-        compression=None,
-        compression_level=None,
-        num_threads=8,
+    signature = (in_fq, out_fq,
+        *, regex, out_barcode=None, left_add=0, right_add=0,
+        compression=None, compression_level=None, num_threads=8,
     ),
-    text_signature = "(in_fq, out_fq, *, regex, out_barcode, left_add=0, right_add=0, compression=None, compression_level=None, num_threads=8)",
+    text_signature = "(in_fq, out_fq,
+        *, regex, out_barcode, left_add=0, right_add=0,
+        compression=None, compression_level=None, num_threads=8)",
 )]
 fn strip_barcode_from_fastq(
     py: Python<'_>,

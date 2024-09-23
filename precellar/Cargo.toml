@@ -6,7 +6,8 @@ edition = "2021"
 [dependencies]
 anyhow = "1.0"
 bed-utils = "0.5.1"
-bwa = { git = "https://github.com/regulatory-genomics/bwa-rust.git", rev = "69d482501956039588f94ce9f87367d7ae8f19af" }
+#bwa = { git = "https://github.com/regulatory-genomics/bwa-rust.git", rev = "69d482501956039588f94ce9f87367d7ae8f19af" }
+bwa-mem2 = { git = "https://github.com/regulatory-genomics/bwa-mem2-rust.git", rev = "27fdac5869958b82d8125be2d84ac2a51acd098c" }
 bstr = "1.0"
 cached-path = "0.6"
 either = "1.13"
