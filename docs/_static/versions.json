@@ -2,12 +2,12 @@
     {
         "name": "dev",
         "version": "dev",
-        "url": "https://kzhang.org/SnapATAC2/version/dev/"
+        "url": "https://lab.kaizhang.org/precellar/version/dev/"
     },
     {
         "name": "0.1 (stable)",
-        "version": "0.1",
+        "version": "dev",
         "preferred": true,
-        "url": "https://kzhang.org/SnapATAC2/version/dev/"
+        "url": "https://lab.kaizhang.org/precellar/version/dev/"
     }
 ]
