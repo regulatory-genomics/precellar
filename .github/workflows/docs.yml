@@ -42,7 +42,9 @@ jobs:
       run: pip install --user wheel_files/*.whl
 
     - name: Build doc
-      run: sphinx-build ${GITHUB_WORKSPACE}/docs _build/html
+      run: |
+        sphinx-build ${GITHUB_WORKSPACE}/docs _build/html
+        touch _build/html/.nojekyll
 
     - name: Get SnapATAC2 version
       id: get_version
