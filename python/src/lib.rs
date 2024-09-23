@@ -188,7 +188,6 @@ fn make_fragment(
     let mut reader = bam::io::Reader::from(decoder);
     let header = reader.read_header()?;
 
-
     let mut fragment_qc = FragmentQC::default();
     let mut align_qc = AlignQC::default();
     mito_dna.into_iter().for_each(|mito| {
