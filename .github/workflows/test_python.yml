@@ -31,6 +31,10 @@ jobs:
         mkdir ${GITHUB_WORKSPACE}/wheel_files
         pip wheel . --wheel-dir ${GITHUB_WORKSPACE}/wheel_files
 
+    - name: Test Python package
+      run: |
+        pip install --user ${GITHUB_WORKSPACE}/wheel_files/*.whl
+
     - name: Get precellar version
       id: get-version
       run: |
