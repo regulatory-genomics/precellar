@@ -13,7 +13,7 @@ use ::precellar::{
     align::{Alinger, FastqProcessor, NameCollatedRecords},
     fragment::FragmentGenerator,
     io::{open_file_for_write, Compression},
-    qc::{FragmentQC, Metrics, AlignQC}, seqspec::SeqSpec,
+    qc::{FragmentQC, Metrics, AlignQC}, seqspec::{Assay, Modality},
 };
 
 #[cfg(not(target_env = "msvc"))]
@@ -90,9 +90,11 @@ fn align(
     temp_dir: Option<PathBuf>,
     num_threads: u32,
 ) -> Result<HashMap<String, f64>> {
+    let modality = Modality::from_str(modality).unwrap();
+
     assert!(output_bam.is_some() || output_fragment.is_some(), "either output_bam or output_fragment must be provided");
 
-    let spec = SeqSpec::from_path(&seqspec).unwrap();
+    let spec = Assay::from_path(&seqspec).unwrap();
     let aligner = BurrowsWheelerAligner::new(
         FMIndex::read(genome_index).unwrap(),
         AlignerOpts::default().with_n_threads(num_threads as usize),
