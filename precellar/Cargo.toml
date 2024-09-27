@@ -20,7 +20,8 @@ multi_reader = "0.1"
 noodles = { version = "0.80", features = ["core", "fastq", "bam", "sam", "async"] }
 kdam = "0.5.2"
 rayon = "1.10"
+smallvec = "1.13"
 serde = "1.0"
+serde_yaml = "0.9"
 regex = "1.6"
-yaml-rust = "0.4"
 zstd = { version = "0.13", features = ["zstdmt"] }
