@@ -23,6 +23,24 @@ use tikv_jemallocator::Jemalloc;
 #[global_allocator]
 static GLOBAL: Jemalloc = Jemalloc;
 
+/// Create a genome index from a fasta file.
+/// 
+/// Parameters
+/// ----------
+/// 
+/// fasta: Path
+///    File path to the fasta file.
+/// genome_prefix: Path
+///   File path to the genome index.
+#[pyfunction]
+fn make_genome_index(
+    fasta: PathBuf,
+    genome_prefix: PathBuf,
+) -> Result<()> {
+    FMIndex::new(fasta, genome_prefix).unwrap();
+    Ok(())
+}
+
 /// Align fastq reads to the reference genome and generate unique fragments.
 ///
 /// Parameters
@@ -31,7 +49,7 @@ static GLOBAL: Jemalloc = Jemalloc;
 /// seqspec: Path
 ///     File path to the sequencing specification, see https://github.com/pachterlab/seqspec.
 /// genom_index: Path
-///     File path to the genome index.
+///     File path to the genome index. The genome index can be created by the `make_genome_index` function.
 /// modality: str
 ///     The modality of the sequencing data, e.g., "rna" or "atac".
 /// output_bam: Path | None
@@ -237,6 +255,7 @@ fn precellar(m: &Bound<'_, PyModule>) -> PyResult<()> {
 
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
 
+    m.add_function(wrap_pyfunction!(make_genome_index, m)?)?;
     m.add_function(wrap_pyfunction!(align, m)?)?;
     m.add_function(wrap_pyfunction!(make_fragment, m)?)?;
 

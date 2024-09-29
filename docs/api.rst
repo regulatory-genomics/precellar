@@ -10,6 +10,7 @@ methods.
 .. autosummary::
     :toctree: _autosummary
 
+    make_genome_index
     align
     make_fragment
 
