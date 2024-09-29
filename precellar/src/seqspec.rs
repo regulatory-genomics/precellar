@@ -1,5 +1,5 @@
 use log::warn;
-use serde::{Deserialize, Deserializer};
+use serde::{Deserialize, Deserializer, Serialize};
 use serde_yaml::{self, Value};
 use std::{fs, ops::Range, str::FromStr};
 use anyhow::{bail, Result};
@@ -9,7 +9,7 @@ use cached_path::Cache;
 
 use crate::io::open_file_for_read;
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Serialize, Debug)]
 pub struct Assay {
     pub seqspec_version: String,
     pub assay_id: String,
@@ -38,7 +38,8 @@ impl Assay {
         self.sequence_spec.as_ref().expect("sequence_spec is empty")
             .iter().filter_map(move |read| if read.modality == modality {
                 let region = self.get_region_by_modality(modality)?;
-                let index = read.get_index(region).expect("primer not found");
+                let index = read.get_index(region)
+                    .expect(&format!("Region: {} does not have Primer: {}", region.region_id, read.primer_id));
                 Some((read, index))
             } else {
                 None
@@ -59,7 +60,7 @@ impl Assay {
     }
 }
 
-#[derive(Deserialize, Debug, Copy, Clone, PartialEq, Eq, Hash)]
+#[derive(Deserialize, Serialize, Debug, Copy, Clone, PartialEq, Eq, Hash)]
 #[serde(rename_all = "lowercase")]
 pub enum Modality {
     Dna,
@@ -92,7 +93,7 @@ pub enum LibraryProtocol {
     Custom(Vec<ProtocolItem>),
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Serialize, Debug)]
 pub struct ProtocolItem {
     pub protocol_id: String,
     pub name: Option<String>,
@@ -117,13 +118,25 @@ impl<'de> Deserialize<'de> for LibraryProtocol {
     }
 }
 
+impl Serialize for LibraryProtocol {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::ser::Serializer
+    {
+        match self {
+            LibraryProtocol::Standard(s) => s.serialize(serializer),
+            LibraryProtocol::Custom(items) => items.serialize(serializer),
+        }
+    }
+}
+
 #[derive(Debug)]
 pub enum LibraryKit {
     Standard(String),
     Custom(Vec<KitItem>),
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Serialize, Debug)]
 pub struct KitItem {
     pub kit_id: String,
     pub name: Option<String>,
@@ -144,6 +157,18 @@ impl<'de> Deserialize<'de> for LibraryKit {
                 Ok(LibraryKit::Custom(items))
             }
             _ => Err(serde::de::Error::custom("invalid value")),
+        }
+    }
+}
+
+impl Serialize for LibraryKit {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::ser::Serializer
+    {
+        match self {
+            LibraryKit::Standard(s) => s.serialize(serializer),
+            LibraryKit::Custom(items) => items.serialize(serializer),
         }
     }
 }
@@ -172,6 +197,18 @@ impl <'de> Deserialize<'de> for SequenceProtocol {
     }
 }
 
+impl Serialize for SequenceProtocol {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::ser::Serializer
+    {
+        match self {
+            SequenceProtocol::Standard(s) => s.serialize(serializer),
+            SequenceProtocol::Custom(items) => items.serialize(serializer),
+        }
+    }
+}
+
 #[derive(Debug)]
 pub enum SequenceKit {
     Standard(String),
@@ -196,7 +233,19 @@ impl<'de> Deserialize<'de> for SequenceKit {
     }
 }
 
-#[derive(Deserialize, Debug)]
+impl Serialize for SequenceKit {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::ser::Serializer
+    {
+        match self {
+            SequenceKit::Standard(s) => s.serialize(serializer),
+            SequenceKit::Custom(items) => items.serialize(serializer),
+        }
+    }
+}
+
+#[derive(Deserialize, Serialize, Debug)]
 pub struct Read {
     read_id: String,
     pub name: Option<String>,
@@ -229,25 +278,25 @@ impl Read {
         let mut found_primer = false;
 
         let result = if self.is_reverse() {
-            self.components(
+            self.get_read_span(
                 region.regions.as_ref().unwrap().iter().rev()
                     .skip_while(|region| {
-                        let found = !(region.region_type.is_sequencing_primer() && region.region_id == self.primer_id);
+                        let found = region.region_type.is_sequencing_primer() && region.region_id == self.primer_id;
                         if found {
                             found_primer = true;
                         }
-                        found
+                        !found
                     }).skip(1)
             )
         } else {
-            self.components(
+            self.get_read_span(
                 region.regions.as_ref().unwrap().iter()
                     .skip_while(|region| {
-                        let found = !(region.region_type.is_sequencing_primer() && region.region_id == self.primer_id);
+                        let found = region.region_type.is_sequencing_primer() && region.region_id == self.primer_id;
                         if found {
                             found_primer = true;
                         }
-                        found
+                        !found
                     }).skip(1)
             )
         };
@@ -259,7 +308,8 @@ impl Read {
         }
     }
 
-    fn components<'a, I: Iterator<Item = &'a Region>>(&self, regions: I) -> Vec<(&'a Region, Range<u32>)> {
+    /// Get the regions of the read.
+    fn get_read_span<'a, I: Iterator<Item = &'a Region>>(&self, regions: I) -> Vec<(&'a Region, Range<u32>)> {
         let mut result = Vec::new();
         let read_len = self.max_len;
         let mut cur_pos = 0;
@@ -297,14 +347,14 @@ impl Read {
     }
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Serialize, Debug)]
 #[serde(rename_all = "lowercase")]
 pub enum Strand {
     Pos,
     Neg,
 }
 
-#[derive(Deserialize, Debug, Clone)]
+#[derive(Deserialize, Serialize, Debug, Clone)]
 pub struct File {
     pub file_id: String,
     pub filename: String,
@@ -336,7 +386,7 @@ impl File {
     }
 }
 
-#[derive(Deserialize, Debug, Copy, Clone)]
+#[derive(Deserialize, Serialize, Debug, Copy, Clone)]
 #[serde(rename_all = "lowercase")]
 pub enum UrlType {
     Local,
@@ -345,7 +395,7 @@ pub enum UrlType {
     Https,
 }
 
-#[derive(Deserialize, Debug, Clone)]
+#[derive(Deserialize, Serialize, Debug, Clone)]
 pub struct Region {
     pub region_id: String,
     pub region_type: RegionType,
@@ -364,7 +414,7 @@ impl Region {
     }
 }
 
-#[derive(Deserialize, Debug, Copy, Clone, PartialEq)]
+#[derive(Deserialize, Serialize, Debug, Copy, Clone, PartialEq)]
 #[serde(rename_all = "lowercase")]
 pub enum RegionType {
     Barcode,
@@ -443,7 +493,7 @@ impl RegionType {
     }
 }
 
-#[derive(Deserialize, Debug, Copy, Clone, PartialEq)]
+#[derive(Deserialize, Serialize, Debug, Copy, Clone, PartialEq)]
 #[serde(rename_all = "lowercase")]
 pub enum SequenceType {
     Fixed,  // sequence string is known and fixed in length and nucleotide composition
@@ -452,7 +502,7 @@ pub enum SequenceType {
     Joined,  // the sequence is created from nested regions and the regions property must contain Regions
 }
 
-#[derive(Deserialize, Debug, Clone)]
+#[derive(Deserialize, Serialize, Debug, Clone)]
 pub struct Onlist {
     pub file_id: String,
     pub filename: String,
@@ -473,7 +523,7 @@ impl Onlist {
     }
 }
 
-#[derive(Deserialize, Debug, Clone, Copy)]
+#[derive(Deserialize, Serialize, Debug, Clone, Copy)]
 #[serde(rename_all = "lowercase")]
 pub enum Location {
     Local,
@@ -503,8 +553,14 @@ mod tests {
         let yaml_str = fs::read_to_string("tests/data/spec.yaml").expect("Failed to read file");
 
         let assay: Assay = serde_yaml::from_str(&yaml_str).expect("Failed to parse YAML");
-        for x in assay.get_index_of(Modality::Protein) {
-            println!("{:?}", x);
+        for (read, regions) in assay.get_index_of(Modality::Rna) {
+            println!("{}: {:?}", read.read_id, regions.into_iter().map(|x| (x.0.region_type, x.1)).collect::<Vec<_>>());
+        }
+        for (read, regions) in assay.get_index_of(Modality::Atac) {
+            println!("{}: {:?}", read.read_id, regions.into_iter().map(|x| (x.0.region_type, x.1)).collect::<Vec<_>>());
+        }
+        for (read, regions) in assay.get_index_of(Modality::Protein) {
+            println!("{}: {:?}", read.read_id, regions.into_iter().map(|x| (x.0.region_type, x.1)).collect::<Vec<_>>());
         }
     }
 }
