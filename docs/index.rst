@@ -6,3 +6,4 @@ precellar: Single-cell genomics data preprocessing tools
    :hidden:
 
    api
+   tutorials/index
