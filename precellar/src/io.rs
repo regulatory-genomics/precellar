@@ -92,6 +92,13 @@ pub fn read_fastq<P: AsRef<Path>>(read: &seqspec::Read, base_dir: P) -> fastq::R
     fastq::Reader::new(BufReader::new(reader))
 }
 
+pub fn get_read_length<P: AsRef<Path>>(read: &seqspec::Read, base_dir: P) -> Result<usize> {
+    let mut reader = read_fastq(read, base_dir);
+    let mut record = fastq::Record::default();
+    reader.read_record(&mut record)?;
+    Ok(record.sequence().len())
+}
+
 pub fn read_onlist(onlist: &seqspec::Onlist) -> Result<Vec<String>> {
     let cache = Cache::new()?;
     let file = cache.cached_path(&onlist.url)?;

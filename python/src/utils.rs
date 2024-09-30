@@ -5,6 +5,39 @@ use anyhow::Result;
 use pyo3::prelude::*;
 use regex::Regex;
 
+/// Remove barcode from the read names of fastq records.
+/// 
+/// The old practice of storing barcodes in read names is not recommended. This
+/// function extracts barcodes from read names using regular expressions and
+/// writes them to a separate fastq file.
+/// 
+/// Parameters
+/// ----------
+/// in_fq: Path
+///     File path to the input fastq file.
+/// out_fq: Path
+///     File path to the output fastq file.
+/// regex: str
+///     Extract barcodes from read names of BAM records using regular expressions.
+///     Reguler expressions should contain exactly one capturing group 
+///     (Parentheses group the regex between them) that matches
+///     the barcodes. For example, `barcode_regex="(..:..:..:..):\\\\w+$"`
+///     extracts `bd:69:Y6:10` from
+///     `A01535:24:HW2MMDSX2:2:1359:8513:3458:bd:69:Y6:10:TGATAGGTTG`.
+///     You can test your regex on this website: https://regex101.com/.
+/// out_barcode: Path | None
+///     File path to the output fastq file containing the extracted barcodes.
+///     If None, the barcodes will not be written to a file.
+/// left_add: int
+///     Additional bases to strip from the left side of the barcode.
+/// right_add: int
+///     Additional bases to strip from the right side of the barcode.
+/// compression: str | None
+///     Compression algorithm to use. If None, the compression algorithm will be inferred from the file extension.
+/// compression_level: int | None
+///     Compression level to use.
+/// num_threads: int
+///     The number of threads to use.
 #[pyfunction]
 #[pyo3(
     signature = (in_fq, out_fq,

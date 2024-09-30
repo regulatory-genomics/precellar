@@ -216,7 +216,8 @@ impl<A: Alinger> FastqProcessor<A> {
         let mut whitelist = self.get_whitelist()?;
 
         let (read, index) = self.assay.get_index_of(modality).into_iter()
-            .find(|(_, index)| index.into_iter().any(|x| x.0.region_type.is_barcode())).unwrap();
+            .find(|(_, index)| index.into_iter().any(|x| x.0.region_type.is_barcode()))
+            .expect("No barcode region found");
         let range = index.into_iter().find(|x| x.0.region_type.is_barcode()).unwrap().1;
 
         crate::io::read_fastq(read, &self.base_dir).records().for_each(|record| {

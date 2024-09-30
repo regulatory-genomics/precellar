@@ -187,7 +187,7 @@ library_spec:
     regions: null
   - !Region
     parent_id: atac
-    region_id: gDNA
+    region_id: atac-gDNA
     region_type: gdna
     name: gDNA
     sequence_type: random
