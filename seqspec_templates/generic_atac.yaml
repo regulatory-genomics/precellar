@@ -1,0 +1,93 @@
+!Assay
+seqspec_version: 0.3.0
+assay_id: generic_atac
+name: generic ATAC
+doi: Not-Specified
+date: 15 September 2020
+description: Generic ATAC-seq
+modalities:
+- atac
+lib_struct: Not-Specified
+library_protocol: single-cell ATAC-seq (OBI:0002764)
+library_kit: Not-Specified
+sequence_protocol: Custom
+sequence_kit: Custom
+sequence_spec: []
+library_spec:
+- !Region
+  parent_id: null
+  region_id: atac
+  region_type: atac
+  name: ATAC
+  sequence_type: joined
+  sequence: AATGATACGGCGACCACCGAGATCTACACGCGATCGAGGACGGCAGATGTGTATAAGAGACAGXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXCACCGTCTCCGCCTCAGATGTGTATAAGAGACAGXXXXXXXXXXXXXXXXATCTCGTATGCCGTCTTCTGCTTG
+  min_len: 153
+  max_len: 1150
+  onlist: null
+  regions:
+  - !Region
+    parent_id: atac
+    region_id: atac-illumina_p5
+    region_type: illumina_p5
+    name: Illumina P5
+    sequence_type: fixed
+    sequence: AATGATACGGCGACCACCGAGATCTACAC
+    min_len: 29
+    max_len: 29
+    onlist: null
+    regions: null
+  - !Region
+    parent_id: atac
+    region_id: atac-read1
+    region_type: custom_primer
+    name: read 1
+    sequence_type: fixed
+    sequence: GCGATCGAGGACGGCAGATGTGTATAAGAGACAG
+    min_len: 34
+    max_len: 34
+    onlist: null
+    regions: null
+  - !Region
+    parent_id: atac
+    region_id: gDNA
+    region_type: gdna
+    name: gDNA
+    sequence_type: random
+    sequence: XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
+    min_len: 1
+    max_len: 1000
+    onlist: null
+    regions: null
+  - !Region
+    parent_id: atac
+    region_id: atac-read2
+    region_type: custom_primer
+    name: read 2
+    sequence_type: fixed
+    sequence: CACCGTCTCCGCCTCAGATGTGTATAAGAGACAG
+    min_len: 34
+    max_len: 34
+    onlist: null
+    regions: null
+  - !Region
+    parent_id: atac
+    region_id: atac-cell_barcode
+    region_type: barcode
+    name: R2 Cell Barcode
+    sequence_type: random
+    sequence: XXXXXXXXXXXXXXXXXXXXXX
+    min_len: 22
+    max_len: 22
+    onlist: null
+    regions: null
+  - !Region
+    parent_id: atac
+    region_id: atac-illumina_p7
+    region_type: illumina_p7
+    name: Illumina P7
+    sequence_type: fixed
+    sequence: ATCTCGTATGCCGTCTTCTGCTTG
+    min_len: 24
+    max_len: 24
+    onlist: null
+    regions: null
