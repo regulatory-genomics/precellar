@@ -3,13 +3,9 @@ use serde::{Deserialize, Deserializer, Serialize};
 use serde_yaml::{self, Value};
 use std::{fs, ops::Range, str::FromStr};
 use anyhow::{bail, Result};
-use noodles::fastq;
-use std::{io::{BufRead, BufReader}, path::{Path, PathBuf}};
-use cached_path::Cache;
+use std::path::Path;
 
-use crate::io::open_file_for_read;
-
-#[derive(Deserialize, Serialize, Debug)]
+#[derive(Deserialize, Serialize, Debug, Clone, PartialEq)]
 pub struct Assay {
     pub seqspec_version: String,
     pub assay_id: String,
@@ -25,6 +21,27 @@ pub struct Assay {
     pub sequence_kit: SequenceKit,
     pub sequence_spec: Option<Vec<Read>>,
     pub library_spec: Option<Vec<Region>>,
+}
+
+impl Default for Assay {
+    fn default() -> Self {
+        Self {
+            seqspec_version: "0.3.0".to_string(),
+            assay_id: "".to_string(),
+            name: "".to_string(),
+            doi: "".to_string(),
+            date: "".to_string(),
+            description: "".to_string(),
+            modalities: Vec::new(),
+            lib_struct: "".to_string(),
+            library_protocol: LibraryProtocol::Standard("Custom".to_string()),
+            library_kit: LibraryKit::Standard("Custom".to_string()),
+            sequence_protocol: SequenceProtocol::Standard("Custom".to_string()),
+            sequence_kit: SequenceKit::Standard("Custom".to_string()),
+            sequence_spec: None,
+            library_spec: None,
+        }
+    }
 }
 
 impl Assay {
@@ -87,13 +104,13 @@ impl FromStr for Modality {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum LibraryProtocol {
     Standard(String),
     Custom(Vec<ProtocolItem>),
 }
 
-#[derive(Deserialize, Serialize, Debug)]
+#[derive(Deserialize, Serialize, Clone, Debug, PartialEq)]
 pub struct ProtocolItem {
     pub protocol_id: String,
     pub name: Option<String>,
@@ -130,13 +147,13 @@ impl Serialize for LibraryProtocol {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum LibraryKit {
     Standard(String),
     Custom(Vec<KitItem>),
 }
 
-#[derive(Deserialize, Serialize, Debug)]
+#[derive(Deserialize, Serialize, Clone, Debug, PartialEq)]
 pub struct KitItem {
     pub kit_id: String,
     pub name: Option<String>,
@@ -173,7 +190,7 @@ impl Serialize for LibraryKit {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum SequenceProtocol {
     Custom(Vec<ProtocolItem>),
     Standard(String),
@@ -209,7 +226,7 @@ impl Serialize for SequenceProtocol {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Clone)]
 pub enum SequenceKit {
     Standard(String),
     Custom(Vec<KitItem>),
@@ -245,9 +262,9 @@ impl Serialize for SequenceKit {
     }
 }
 
-#[derive(Deserialize, Serialize, Debug)]
+#[derive(Deserialize, Serialize, Debug, Clone, PartialEq)]
 pub struct Read {
-    read_id: String,
+    pub read_id: String,
     pub name: Option<String>,
     pub modality: Modality,
     pub primer_id: String,
@@ -257,19 +274,22 @@ pub struct Read {
     pub files: Option<Vec<File>>,
 }
 
+impl Default for Read {
+    fn default() -> Self {
+        Self {
+            read_id: "".to_string(),
+            name: None,
+            modality: Modality::Dna,
+            primer_id: "".to_string(),
+            min_len: 0,
+            max_len: 0,
+            strand: Strand::Pos,
+            files: None,
+        }
+    }
+}
+
 impl Read {
-    pub fn id(&self) -> &str {
-        &self.read_id
-    }
-
-    pub fn read_fastq<P: AsRef<Path>>(&self, base_dir: P) -> fastq::Reader<impl BufRead> {
-        let base_dir = base_dir.as_ref().to_path_buf();
-        let reader = multi_reader::MultiReader::new(
-            self.files.clone().unwrap().into_iter().map(move |file| file.open(&base_dir))
-        );
-        fastq::Reader::new(BufReader::new(reader))
-    }
-
     fn get_index<'a>(&'a self, region: &'a Region) -> Option<Vec<(&'a Region, Range<u32>)>> {
         if region.sequence_type != SequenceType::Joined {
             return None;
@@ -347,14 +367,14 @@ impl Read {
     }
 }
 
-#[derive(Deserialize, Serialize, Debug)]
+#[derive(Deserialize, Serialize, Debug, Clone, PartialEq)]
 #[serde(rename_all = "lowercase")]
 pub enum Strand {
     Pos,
     Neg,
 }
 
-#[derive(Deserialize, Serialize, Debug, Clone)]
+#[derive(Deserialize, Serialize, Debug, Clone, PartialEq)]
 pub struct File {
     pub file_id: String,
     pub filename: String,
@@ -365,28 +385,7 @@ pub struct File {
     pub md5: String,
 }
 
-impl File {
-    pub fn open<P: AsRef<Path>>(&self, base_dir: P) -> Box<dyn std::io::Read> {
-        match self.urltype {
-            UrlType::Local => {
-                let mut path = PathBuf::from(&self.url);
-                path = if path.is_absolute() {
-                    path
-                } else {
-                    base_dir.as_ref().join(path)
-                };
-                Box::new(open_file_for_read(path))
-            }
-            _ => {
-                let cache = Cache::new().unwrap();
-                let file = cache.cached_path(&self.url).unwrap();
-                Box::new(open_file_for_read(file))
-            }
-        }
-    }
-}
-
-#[derive(Deserialize, Serialize, Debug, Copy, Clone)]
+#[derive(Deserialize, Serialize, Debug, Copy, Clone, PartialEq)]
 #[serde(rename_all = "lowercase")]
 pub enum UrlType {
     Local,
@@ -395,16 +394,33 @@ pub enum UrlType {
     Https,
 }
 
-#[derive(Deserialize, Serialize, Debug, Clone)]
+#[derive(Deserialize, Serialize, Debug, Clone, PartialEq)]
 pub struct Region {
     pub region_id: String,
     pub region_type: RegionType,
+    pub name: String,
     pub sequence_type: SequenceType,
     pub sequence: String,
     pub min_len: u32,
     pub max_len: u32,
     pub onlist: Option<Onlist>,
     pub regions: Option<Vec<Region>>,
+}
+
+impl Default for Region {
+    fn default() -> Self {
+        Self {
+            region_id: "".to_string(),
+            region_type: RegionType::Named,
+            name: "".to_string(),
+            sequence_type: SequenceType::Fixed,
+            sequence: "".to_string(),
+            min_len: 0,
+            max_len: 0,
+            onlist: None,
+            regions: None,
+        }
+    }
 }
 
 impl Region {
@@ -502,28 +518,19 @@ pub enum SequenceType {
     Joined,  // the sequence is created from nested regions and the regions property must contain Regions
 }
 
-#[derive(Deserialize, Serialize, Debug, Clone)]
+#[derive(Deserialize, Serialize, Debug, Clone, PartialEq)]
 pub struct Onlist {
     pub file_id: String,
     pub filename: String,
     pub filetype: String,
     pub filesize: u64,
-    url: String,
+    pub url: String,
     pub urltype: UrlType,
     pub location: Option<Location>,
     pub md5: String,
 }
 
-impl Onlist {
-    pub fn read(&self) -> Result<Vec<String>> {
-        let cache = Cache::new()?;
-        let file = cache.cached_path(&self.url)?;
-        let reader = std::io::BufReader::new(open_file_for_read(file));
-        Ok(reader.lines().map(|x| x.unwrap()).collect())
-    }
-}
-
-#[derive(Deserialize, Serialize, Debug, Clone, Copy)]
+#[derive(Deserialize, Serialize, Debug, Clone, Copy, PartialEq)]
 #[serde(rename_all = "lowercase")]
 pub enum Location {
     Local,
@@ -536,20 +543,26 @@ mod tests {
 
     #[test]
     fn test_parse() {
-        let protocol: LibraryProtocol = serde_yaml::from_str("10X").unwrap();
-        println!("{:?}", protocol);
+        let yaml_str = fs::read_to_string("tests/data/spec.yaml").expect("Failed to read file");
+        let assay: Assay = serde_yaml::from_str(&yaml_str).expect("Failed to parse YAML");
 
-        let protocol: LibraryProtocol = serde_yaml::from_str(
-            "- !LibProtocol
-            protocol_id: CG000338 Chromium Next GEM Multiome ATAC + Gene Expression Rev. D protocol (10x Genomics)
-            name: DogmaSeq-DIG
-            modality: rna"
-        ).unwrap();
-        println!("{:?}", protocol);
+        println!("{:?}", assay);
     }
 
     #[test]
-    fn test_parse_yaml() {
+    fn test_serialize() {
+        fn se_de(yaml_str: &str) {
+            let assay: Assay = serde_yaml::from_str(&yaml_str).expect("Failed to parse YAML");
+            let yaml_str_ = serde_yaml::to_string(&assay).unwrap();
+            let assay_ = serde_yaml::from_str(&yaml_str_).expect("Failed to parse YAML");
+            assert_eq!(assay, assay_);
+        }
+
+        se_de(&fs::read_to_string("tests/data/spec.yaml").expect("Failed to read file"));
+    }
+
+    #[test]
+    fn test_index() {
         let yaml_str = fs::read_to_string("tests/data/spec.yaml").expect("Failed to read file");
 
         let assay: Assay = serde_yaml::from_str(&yaml_str).expect("Failed to parse YAML");

@@ -1,5 +1,5 @@
 use crate::barcode::{BarcodeCorrector, Whitelist};
-use crate::seqspec::{Assay, Modality, Read, Region, RegionType, SequenceType};
+use seqspec::{Assay, Modality, Read, Region, RegionType, SequenceType};
 use crate::qc::{AlignQC, Metrics};
 
 use bstr::BString;
@@ -207,7 +207,7 @@ impl<A: Alinger> FastqProcessor<A> {
     pub fn gen_raw_fastq_records(&self) -> FastqRecords<impl BufRead> {
         let modality = self.modality();
         let data = self.assay.get_index_of(modality)
-            .map(|(read, regions)| (read, regions, read.read_fastq(self.base_dir.clone())));
+            .map(|(read, regions)| (read, regions, crate::io::read_fastq(read, self.base_dir.clone())));
         FastqRecords::new(data)
     }
 
@@ -219,7 +219,7 @@ impl<A: Alinger> FastqProcessor<A> {
             .find(|(_, index)| index.into_iter().any(|x| x.0.region_type.is_barcode())).unwrap();
         let range = index.into_iter().find(|x| x.0.region_type.is_barcode()).unwrap().1;
 
-        read.read_fastq(&self.base_dir).records().for_each(|record| {
+        crate::io::read_fastq(read, &self.base_dir).records().for_each(|record| {
             let mut record = record.unwrap();
             record = slice_fastq_record(&record, range.start as usize, range.end as usize);
             if read.is_reverse() {
@@ -242,7 +242,7 @@ impl<A: Alinger> FastqProcessor<A> {
         }
         let region = regions[0];
         if region.sequence_type == SequenceType::Onlist {
-            Ok(Whitelist::new(region.onlist.as_ref().unwrap().read()?))
+            Ok(Whitelist::new(crate::io::read_onlist(region.onlist.as_ref().unwrap())?))
         } else {
             Ok(Whitelist::empty())
         }
@@ -270,7 +270,7 @@ impl<R: BufRead> FastqRecords<R> {
     {
         let records = iter.map(|(read, regions, reader)|
             FastqRecord {
-                id: read.id().to_string(),
+                id: read.read_id.to_string(),
                 is_reverse: read.is_reverse(),
                 subregion: regions.into_iter().filter_map(|x| {
                     let region_type = x.0.region_type;

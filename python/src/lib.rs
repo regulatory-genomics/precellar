@@ -1,4 +1,5 @@
 mod utils;
+mod pyseqspec;
 
 use std::{collections::HashMap, path::PathBuf, str::FromStr};
 use bwa_mem2::{AlignerOpts, BurrowsWheelerAligner, FMIndex, PairedEndStats};
@@ -13,8 +14,10 @@ use ::precellar::{
     align::{Alinger, FastqProcessor, NameCollatedRecords},
     fragment::FragmentGenerator,
     io::{open_file_for_write, Compression},
-    qc::{FragmentQC, Metrics, AlignQC}, seqspec::{Assay, Modality},
+    qc::{FragmentQC, Metrics, AlignQC},
 };
+use pyseqspec::SeqSpec;
+use seqspec::{Assay, Modality};
 
 #[cfg(not(target_env = "msvc"))]
 use tikv_jemallocator::Jemalloc;
@@ -46,8 +49,9 @@ fn make_genome_index(
 /// Parameters
 /// ----------
 ///
-/// seqspec: Path
-///     File path to the sequencing specification, see https://github.com/pachterlab/seqspec.
+/// seqspec: SeqSpec | Path
+///     A SeqSpec object or file path to the yaml sequencing specification file, see
+///     https://github.com/pachterlab/seqspec.
 /// genom_index: Path
 ///     File path to the genome index. The genome index can be created by the `make_genome_index` function.
 /// modality: str
@@ -95,7 +99,7 @@ fn make_genome_index(
 )]
 fn align(
     py: Python<'_>,
-    seqspec: PathBuf,
+    seqspec: Bound<'_, PyAny>,
     genome_index: PathBuf,
     modality: &str,
     output_bam: Option<PathBuf>,
@@ -108,11 +112,23 @@ fn align(
     temp_dir: Option<PathBuf>,
     num_threads: u32,
 ) -> Result<HashMap<String, f64>> {
-    let modality = Modality::from_str(modality).unwrap();
-
     assert!(output_bam.is_some() || output_fragment.is_some(), "either output_bam or output_fragment must be provided");
 
-    let spec = Assay::from_path(&seqspec).unwrap();
+    let modality = Modality::from_str(modality).unwrap();
+    let spec;
+    let base_dir;
+    match seqspec.extract::<PathBuf>() {
+        Ok(p) => {
+            spec = Assay::from_path(&p).unwrap();
+            base_dir = p.parent().unwrap().to_path_buf();
+        },
+        _ => {
+            let s: PyRef<SeqSpec> = seqspec.extract()?;
+            spec = s.0.clone();
+            base_dir = ".".into();
+        }
+    }
+
     let aligner = BurrowsWheelerAligner::new(
         FMIndex::read(genome_index).unwrap(),
         AlignerOpts::default().with_n_threads(num_threads as usize),
@@ -121,7 +137,7 @@ fn align(
     let header = aligner.header();
     let mut processor = FastqProcessor::new(spec, aligner).with_modality(modality)
         .with_barcode_correct_prob(0.9)
-        .with_base_dir(seqspec.parent().unwrap());
+        .with_base_dir(base_dir);
     let mut fragment_qc = FragmentQC::default();
     mito_dna.into_iter().for_each(|x| {
         processor.add_mito_dna(&x);
@@ -254,6 +270,8 @@ fn precellar(m: &Bound<'_, PyModule>) -> PyResult<()> {
         .try_init().unwrap();
 
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
+
+    m.add_class::<pyseqspec::SeqSpec>().unwrap();
 
     m.add_function(wrap_pyfunction!(make_genome_index, m)?)?;
     m.add_function(wrap_pyfunction!(align, m)?)?;

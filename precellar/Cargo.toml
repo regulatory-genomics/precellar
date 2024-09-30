@@ -6,7 +6,6 @@ edition = "2021"
 [dependencies]
 anyhow = "1.0"
 bed-utils = "0.5.1"
-#bwa = { git = "https://github.com/regulatory-genomics/bwa-rust.git", rev = "69d482501956039588f94ce9f87367d7ae8f19af" }
 bwa-mem2 = { git = "https://github.com/regulatory-genomics/bwa-mem2-rust.git", rev = "07eda9b9c2815ae52b3fa30b01de0e19fae31fe0" }
 bstr = "1.0"
 cached-path = "0.6"
@@ -22,6 +21,6 @@ kdam = "0.5.2"
 rayon = "1.10"
 smallvec = "1.13"
 serde = "1.0"
-serde_yaml = "0.9"
+seqspec = { version = "0.1", workspace = true }
 regex = "1.6"
 zstd = { version = "0.13", features = ["zstdmt"] }
