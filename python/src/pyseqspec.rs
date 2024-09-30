@@ -4,6 +4,7 @@ use pyo3::prelude::*;
 use seqspec::{Assay, File, Modality, Read, Region, Strand, UrlType};
 use anyhow::Result;
 use termtree::Tree;
+use cached_path::Cache;
 
 /** A SeqSpec object.
     
@@ -17,7 +18,7 @@ use termtree::Tree;
     Parameters
     ----------
     path
-        Path to the AnnData file.
+        The local path or url to the seqspec file.
 
     See Also
     --------
@@ -32,7 +33,9 @@ impl SeqSpec {
     #[new]
     #[pyo3(signature = (path))] 
     pub fn new(path: &str) -> Result<Self> {
-        let assay = Assay::from_path(path)?;
+        let cache = Cache::new()?;
+        let file = cache.cached_path(path)?;
+        let assay = Assay::from_path(file)?;
         Ok(SeqSpec(assay))
     }
 
