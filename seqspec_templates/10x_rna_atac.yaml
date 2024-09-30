@@ -9,7 +9,7 @@ modalities:
 - rna
 - atac
 lib_struct: https://teichlab.github.io/scg_lib_structs/methods_html/10xChromium_multiome.html
-library_protocol: Any
+library_protocol: Custom
 library_kit: Illumina Truseq Dual Index
 sequence_protocol: Illumina NovaSeq 6000
 sequence_kit: NovaSeq 6000 v1.5
@@ -23,7 +23,7 @@ library_spec:
   sequence_type: joined
   sequence: AATGATACGGCGACCACCGAGATCTACACTCTTTCCCTACACGACGCTCTTCCGATCTNNNNNNNNNNNNNNNNXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXAGATCGGAAGAGCACACGTCTGAACTCCAGTCACNNNNNNNNATCTCGTATGCCGTCTTCTGCTTG
   min_len: 153
-  max_len: 250
+  max_len: 1150
   onlist: null
   regions:
   - !Region
@@ -86,7 +86,7 @@ library_spec:
     sequence_type: random
     sequence: XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
     min_len: 1
-    max_len: 98
+    max_len: 1000
     onlist: null
     regions: null
   - !Region
@@ -130,7 +130,7 @@ library_spec:
   sequence_type: joined
   sequence: AATGATACGGCGACCACCGAGATCTACACNNNNNNNNNNNNNNNNCGCGTCTGTCGTCGGCAGCGTCAGATGTGTATAAGAGACAGXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXCTGTCTCTTATACACATCTCCGAGCCCACGAGACNNNNNNNNATCTCGTATGCCGTCTTCTGCTTG
   min_len: 153
-  max_len: 250
+  max_len: 1150
   onlist: null
   regions:
   - !Region
@@ -193,7 +193,7 @@ library_spec:
     sequence_type: random
     sequence: XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
     min_len: 1
-    max_len: 98
+    max_len: 1000
     onlist: null
     regions: null
   - !Region
