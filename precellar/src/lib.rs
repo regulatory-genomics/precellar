@@ -1,4 +1,3 @@
-pub mod seqspec;
 pub mod barcode;
 pub mod align;
 pub mod fragment;

@@ -1,0 +1,7 @@
+[workspace]
+members = ["seqspec", "precellar", "python"]
+resolver = "2"
+
+[workspace.dependencies]
+seqspec = { version = "0.1", path = "seqspec" }
+precellar = { version = "0.1", path = "precellar" }
