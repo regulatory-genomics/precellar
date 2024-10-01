@@ -33,4 +33,4 @@ Utilities
 .. autosummary::
     :toctree: _autosummary
 
-    utils.strip_barcode_from_fastq
+    precellar.utils.strip_barcode_from_fastq
