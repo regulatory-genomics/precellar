@@ -12,7 +12,31 @@ library_protocol: single-cell ATAC-seq (OBI:0002764)
 library_kit: Not-Specified
 sequence_protocol: Custom
 sequence_kit: Custom
-sequence_spec: []
+sequence_spec:
+- !Read
+  read_id: R1
+  name: Read 1
+  modality: atac
+  primer_id: atac-read1
+  min_len: 1
+  max_len: 98
+  strand: pos
+- !Read
+  read_id: R2
+  name: Read 2
+  modality: atac
+  primer_id: atac-read2
+  min_len: 1
+  max_len: 98
+  strand: neg
+- !Read
+  read_id: I1
+  name: Index
+  modality: atac
+  primer_id: atac-read2
+  min_len: 22
+  max_len: 22
+  strand: pos
 library_spec:
 - !Region
   parent_id: null

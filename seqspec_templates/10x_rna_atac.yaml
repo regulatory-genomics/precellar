@@ -13,7 +13,63 @@ library_protocol: Custom
 library_kit: Illumina Truseq Dual Index
 sequence_protocol: Illumina NovaSeq 6000
 sequence_kit: NovaSeq 6000 v1.5
-sequence_spec: []
+sequence_spec:
+- !Read
+  read_id: rna-R1
+  name: RNA Read 1
+  modality: rna
+  primer_id: rna-truseq_read1
+  min_len: 28
+  max_len: 28
+  strand: pos
+- !Read
+  read_id: rna-I1
+  name: RNA Index 1 (i7 index)
+  modality: rna
+  primer_id: rna-truseq_read2
+  min_len: 8
+  max_len: 8
+  strand: pos
+- !Read
+  read_id: rna-R2
+  name: RNA Read 2
+  modality: rna
+  primer_id: rna-truseq_read2
+  min_len: 1
+  max_len: 98
+  strand: neg
+- !Read
+  read_id: atac-R1
+  name: ATAC Read 1
+  modality: atac
+  primer_id: atac-nextera_read1
+  min_len: 1
+  max_len: 98
+  strand: pos
+- !Read
+  read_id: atac-I1
+  name: ATAC Index 1 (i7 index)
+  modality: atac
+  primer_id: atac-nextera_read2
+  min_len: 8
+  max_len: 8
+  strand: pos
+- !Read
+  read_id: atac-I2
+  name: ATAC Index 2 (i5 index)
+  modality: atac
+  primer_id: atac-nextera_read1
+  min_len: 24
+  max_len: 24
+  strand: neg
+- !Read
+  read_id: atac-R2
+  name: ATAC Read 2
+  modality: atac
+  primer_id: atac-nextera_read2
+  min_len: 1
+  max_len: 98
+  strand: neg
 library_spec:
 - !Region
   parent_id: null
