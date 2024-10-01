@@ -485,7 +485,7 @@ mod tests {
             PairedEndStats::default()
         );
         let mut processor = FastqProcessor::new(spec, aligner)
-            .with_modality(Modality::Atac);
+            .with_modality(Modality::ATAC);
 
         processor.gen_barcoded_alignments().take(6).for_each(|x| {
             println!("{:?}", x);

@@ -77,27 +77,40 @@ impl Assay {
     }
 }
 
-#[derive(Deserialize, Serialize, Debug, Copy, Clone, PartialEq, Eq, Hash)]
+#[derive(Serialize, Debug, Copy, Clone, PartialEq, Eq, Hash)]
 #[serde(rename_all = "lowercase")]
 pub enum Modality {
-    Dna,
-    Rna,
+    DNA,
+    RNA,
     Tag,
     Protein,
-    Atac,
+    ATAC,
     Crispr,
+}
+
+impl<'de> Deserialize<'de> for Modality {
+    fn deserialize<D>(deserializer: D) -> Result<Modality, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = Value::deserialize(deserializer)?;
+        match value {
+            Value::String(s) => Modality::from_str(&s).map_err(serde::de::Error::custom),
+            _ => Err(serde::de::Error::custom(format!("invalid value: {:?}", value))),
+        }
+    }
 }
 
 impl FromStr for Modality {
     type Err = anyhow::Error;
 
     fn from_str(s: &str) -> Result<Self> {
-        match s {
-            "dna" => Ok(Modality::Dna),
-            "rna" => Ok(Modality::Rna),
+        match s.to_lowercase().as_str() {
+            "dna" => Ok(Modality::DNA),
+            "rna" => Ok(Modality::RNA),
             "tag" => Ok(Modality::Tag),
             "protein" => Ok(Modality::Protein),
-            "atac" => Ok(Modality::Atac),
+            "atac" => Ok(Modality::ATAC),
             "crispr" => Ok(Modality::Crispr),
             _ => bail!("Invalid modality: {}", s),
         }
@@ -130,7 +143,7 @@ impl<'de> Deserialize<'de> for LibraryProtocol {
                     .collect::<Vec<ProtocolItem>>();
                 Ok(LibraryProtocol::Custom(items))
             }
-            _ => Err(serde::de::Error::custom("invalid value")),
+            _ => Err(serde::de::Error::custom(format!("invalid value: {:?}", value))),
         }
     }
 }
@@ -173,7 +186,7 @@ impl<'de> Deserialize<'de> for LibraryKit {
                     .collect::<Vec<KitItem>>();
                 Ok(LibraryKit::Custom(items))
             }
-            _ => Err(serde::de::Error::custom("invalid value")),
+            _ => Err(serde::de::Error::custom(format!("invalid value: {:?}", value))),
         }
     }
 }
@@ -209,7 +222,7 @@ impl <'de> Deserialize<'de> for SequenceProtocol {
                     .collect::<Vec<ProtocolItem>>();
                 Ok(SequenceProtocol::Custom(items))
             }
-            _ => Err(serde::de::Error::custom("invalid value")),
+            _ => Err(serde::de::Error::custom(format!("invalid value: {:?}", value))),
         }
     }
 }
@@ -245,7 +258,7 @@ impl<'de> Deserialize<'de> for SequenceKit {
                     .collect::<Vec<KitItem>>();
                 Ok(SequenceKit::Custom(items))
             }
-            _ => Err(serde::de::Error::custom("invalid value")),
+            _ => Err(serde::de::Error::custom(format!("invalid value: {:?}", value))),
         }
     }
 }
@@ -279,7 +292,7 @@ impl Default for Read {
         Self {
             read_id: "".to_string(),
             name: None,
-            modality: Modality::Dna,
+            modality: Modality::DNA,
             primer_id: "".to_string(),
             min_len: 0,
             max_len: 0,
@@ -566,10 +579,10 @@ mod tests {
         let yaml_str = fs::read_to_string("tests/data/spec.yaml").expect("Failed to read file");
 
         let assay: Assay = serde_yaml::from_str(&yaml_str).expect("Failed to parse YAML");
-        for (read, regions) in assay.get_index_of(Modality::Rna) {
+        for (read, regions) in assay.get_index_of(Modality::RNA) {
             println!("{}: {:?}", read.read_id, regions.into_iter().map(|x| (x.0.region_type, x.1)).collect::<Vec<_>>());
         }
-        for (read, regions) in assay.get_index_of(Modality::Atac) {
+        for (read, regions) in assay.get_index_of(Modality::ATAC) {
             println!("{}: {:?}", read.read_id, regions.into_iter().map(|x| (x.0.region_type, x.1)).collect::<Vec<_>>());
         }
         for (read, regions) in assay.get_index_of(Modality::Protein) {

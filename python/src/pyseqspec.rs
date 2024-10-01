@@ -44,61 +44,77 @@ impl SeqSpec {
         Ok(SeqSpec(assay))
     }
 
-    /// Add a fastq file containing reads to the AnnData object.
+    /// Update read information in the SeqSpec object.
+    /// 
+    /// This method updates the read information in the SeqSpec object.
+    /// If the read does not exist, it will be created.
     ///
     /// Parameters
     /// ----------
     /// read_id: str
     ///     The id of the read.
-    /// modality: str
+    /// modality: str | None
     ///    The modality of the read.
-    /// primer_id: str
+    /// primer_id: str | None
     ///   The id of the primer.
-    /// is_reverse: bool
+    /// is_reverse: bool | None
     ///   Whether the read is reverse.
-    /// fastq: Path | list[Path]
+    /// fastq: Path | list[Path] | None
     ///    The path to the fastq file containing the reads.
-    /// min_len: int
+    /// min_len: int | None
     ///   The minimum length of the read. If not provided, the minimum length is inferred from the fastq file.
-    /// max_len: int
+    /// max_len: int | None
     ///   The maximum length of the read. If not provided, the maximum length is inferred from the fastq file.
     #[pyo3(
-        signature = (read_id, *, modality, primer_id, is_reverse, fastq, min_len=None, max_len=None),
-        text_signature = "($self, read_id, *, modality, primer_id, is_reverse, fastq, min_len=None, max_len=None)",
+        signature = (read_id, *, modality=None, primer_id=None, is_reverse=None, fastq=None, min_len=None, max_len=None),
+        text_signature = "($self, read_id, *, modality=None, primer_id=None, is_reverse=None, fastq=None, min_len=None, max_len=None)",
     )]
-    pub fn add_read(
+    pub fn update_read(
         &mut self,
         read_id: &str,
-        modality: &str,
-        primer_id: &str,
-        is_reverse: bool,
-        fastq: Bound<'_, PyAny>,
+        modality: Option<&str>,
+        primer_id: Option<&str>,
+        is_reverse: Option<bool>,
+        fastq: Option<Bound<'_, PyAny>>,
         min_len: Option<usize>,
         max_len: Option<usize>,
     ) -> Result<()> {
-        let fastq = if fastq.is_instance_of::<pyo3::types::PyList>() {
-            fastq.extract::<Vec<String>>()?
+        let mut all_reads = self.0.sequence_spec.take().unwrap_or(Vec::new());
+        let mut read_exist = false;
+        let mut read_buffer = Read::default();
+        read_buffer.read_id = read_id.to_string();
+        let read = if let Some(r) = all_reads.iter_mut().find(|r| r.read_id == read_id) {
+            read_exist = true;
+            r
         } else {
-            vec![fastq.extract::<String>()?]
+            &mut read_buffer
         };
-
-        let assay = &mut self.0;
-
-        let mut reads = assay.sequence_spec.take().unwrap_or(Vec::new());
-        reads = reads.into_iter().filter(|r| r.read_id != read_id).collect();
-
-        let mut read = Read::default();
-        if is_reverse {
-            read.strand = Strand::Neg;
-        } else {
-            read.strand = Strand::Pos;
+        if !read_exist {
+            assert!(modality.is_some(), "modality must be provided for a new read");
+            assert!(primer_id.is_some(), "primer_id must be provided for a new read");
+            assert!(is_reverse.is_some(), "is_reverse must be provided for a new read");
         }
-        read.read_id = read_id.to_string();
-        read.modality = Modality::from_str(modality)?;
-        read.primer_id = primer_id.to_string();
-        read.files = Some(fastq.into_iter().map(|path| make_file_path(&path)).collect::<Result<Vec<File>>>()?);
 
-        if min_len.is_none() || max_len.is_none() {
+        if let Some(rev) = is_reverse {
+            read.strand = if rev { Strand::Neg } else { Strand::Pos };
+        }
+        if let Some(modality) = modality {
+            read.modality = Modality::from_str(modality)?;
+        }
+        if let Some(primer_id) = primer_id {
+            read.primer_id = primer_id.to_string();
+        }
+        if let Some(fastq) = fastq {
+            let fastq = if fastq.is_instance_of::<pyo3::types::PyList>() {
+                fastq.extract::<Vec<String>>()?
+            } else {
+                vec![fastq.extract::<String>()?]
+            };
+            read.files = Some(fastq.into_iter().map(|path| make_file_path(&path)).collect::<Result<Vec<File>>>()?);
+        }
+
+
+        if (min_len.is_none() || max_len.is_none()) && read.files.is_some() {
             let len = precellar::io::get_read_length(&read, "./")?;
             read.min_len = min_len.unwrap_or(len) as u32;
             read.max_len = max_len.unwrap_or(len) as u32;
@@ -107,8 +123,23 @@ impl SeqSpec {
             read.max_len = max_len.unwrap() as u32;
         }
 
-        reads.push(read);
-        assay.sequence_spec = Some(reads);
+        if !read_exist {
+            all_reads.push(read_buffer);
+        }
+        self.0.sequence_spec = Some(all_reads);
+
+        Ok(())
+    }
+
+    /// Delete a read from the SeqSpec object.
+    #[pyo3(signature = (read_id), text_signature = "($self, read_id)")]
+    pub fn delete_read(&mut self, read_id: &str) -> Result<()> {
+        let reads = self.0.sequence_spec.take();
+        if let Some(r) = reads {
+            self.0.sequence_spec = Some(
+                r.into_iter().filter(|r| r.read_id != read_id).collect::<Vec<_>>()
+            );
+        }
         Ok(())
     }
 
