@@ -206,8 +206,14 @@ impl<A: Alinger> FastqProcessor<A> {
 
     pub fn gen_raw_fastq_records(&self) -> FastqRecords<impl BufRead> {
         let modality = self.modality();
-        let data = self.assay.get_index_of(modality)
-            .map(|(read, regions)| (read, regions, crate::io::read_fastq(read, self.base_dir.clone())));
+        let data = self.assay.get_index_of(modality).filter_map(|(read, regions)| {
+            let regions: Vec<_> = regions.into_iter().filter(|x| x.0.region_type.is_target()).collect();
+            if regions.is_empty() {
+                None
+            } else {
+                Some((read, regions, crate::io::read_fastq(read, self.base_dir.clone()).unwrap()))
+            }
+        });
         FastqRecords::new(data)
     }
 
@@ -220,7 +226,7 @@ impl<A: Alinger> FastqProcessor<A> {
             .expect("No barcode region found");
         let range = index.into_iter().find(|x| x.0.region_type.is_barcode()).unwrap().1;
 
-        crate::io::read_fastq(read, &self.base_dir).records().for_each(|record| {
+        crate::io::read_fastq(read, &self.base_dir).unwrap().records().for_each(|record| {
             let mut record = record.unwrap();
             record = slice_fastq_record(&record, range.start as usize, range.end as usize);
             if read.is_reverse() {
@@ -273,14 +279,7 @@ impl<R: BufRead> FastqRecords<R> {
             FastqRecord {
                 id: read.read_id.to_string(),
                 is_reverse: read.is_reverse(),
-                subregion: regions.into_iter().filter_map(|x| {
-                    let region_type = x.0.region_type;
-                    if region_type.is_barcode() || region_type.is_dna() {
-                        Some((region_type, x.1))
-                    } else {
-                        None
-                    }
-                }).collect(),
+                subregion: regions.into_iter().map(|x| (x.0.region_type, x.1)).collect(),
                 reader,
                 min_len: read.min_len as usize,
                 max_len: read.max_len as usize,
