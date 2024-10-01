@@ -7,6 +7,8 @@ import os
 import subprocess
 
 import precellar
+from precellar import utils
+sys.modules['precellar.utils'] = utils
 
 # -- Software version --------------------------------------------------------
 

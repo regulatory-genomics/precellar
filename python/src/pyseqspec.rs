@@ -1,10 +1,15 @@
-use std::{collections::HashMap, path::PathBuf, str::FromStr};
+use std::path::PathBuf;
+use std::{collections::HashMap, str::FromStr};
 
+use tokio::io::AsyncWriteExt;
+use futures_util::StreamExt;
 use pyo3::prelude::*;
+use reqwest::header::{HeaderMap, CONTENT_DISPOSITION};
 use seqspec::{Assay, File, Modality, Read, Region, Strand, UrlType};
 use anyhow::Result;
 use termtree::Tree;
 use cached_path::Cache;
+use url::Url;
 
 /** A SeqSpec object.
     
@@ -72,9 +77,9 @@ impl SeqSpec {
         max_len: Option<usize>,
     ) -> Result<()> {
         let fastq = if fastq.is_instance_of::<pyo3::types::PyList>() {
-            fastq.extract::<Vec<PathBuf>>()?
+            fastq.extract::<Vec<String>>()?
         } else {
-            vec![fastq.extract::<PathBuf>()?]
+            vec![fastq.extract::<String>()?]
         };
 
         let assay = &mut self.0;
@@ -91,7 +96,7 @@ impl SeqSpec {
         read.read_id = read_id.to_string();
         read.modality = Modality::from_str(modality)?;
         read.primer_id = primer_id.to_string();
-        read.files = Some(fastq.into_iter().map(|path| make_file_path(path)).collect::<Result<Vec<File>>>()?);
+        read.files = Some(fastq.into_iter().map(|path| make_file_path(&path)).collect::<Result<Vec<File>>>()?);
 
         if min_len.is_none() || max_len.is_none() {
             let len = precellar::io::get_read_length(&read, "./")?;
@@ -179,7 +184,10 @@ fn format_read(read: &Read) -> String {
     }
 }
 
-fn make_file_path(path: PathBuf) -> Result<File> {
+fn make_file_path(path: &str) -> Result<File> {
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+
+    let path = runtime.block_on(download_file(path))?;
     let file = std::fs::File::open(&path)?;
     Ok(File {
         file_id: path.file_name().unwrap().to_str().unwrap().to_string(),
@@ -190,4 +198,48 @@ fn make_file_path(path: PathBuf) -> Result<File> {
         urltype: UrlType::Local,
         md5: "0".to_string(),
     })
+}
+ 
+async fn download_file(url: &str) -> Result<PathBuf> {
+    if !is_url(url) {
+        return Ok(PathBuf::from_str(url)?)
+    }
+
+    let response = reqwest::get(url).await?;
+    let filename = get_filename(&response.headers(), url);
+
+    let mut file = tokio::fs::File::create(&filename).await?;
+    let mut stream = response.bytes_stream();
+
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk?;
+        file.write_all(&chunk).await?;
+    }
+
+    Ok(PathBuf::from_str(&filename)?)
+}
+
+// Function to extract filename from headers or URL
+fn get_filename(headers: &HeaderMap, url: &str) -> String {
+    // Try to get the filename from the 'Content-Disposition' header
+    if let Some(content_disposition) = headers.get(CONTENT_DISPOSITION) {
+        if let Ok(disposition) = content_disposition.to_str() {
+            if let Some(filename) = disposition.split("filename=").nth(1) {
+                return filename.trim_matches('"').to_string();
+            }
+        }
+    }
+
+    // Fallback to extracting the filename from the URL
+    let parsed_url = url::Url::parse(url).expect("Invalid URL");
+    parsed_url
+        .path_segments()
+        .and_then(|segments| segments.last())
+        .unwrap_or("downloaded_file")
+        .to_string()
+}
+
+// Check if the input is a valid URL
+fn is_url(input: &str) -> bool {
+    Url::parse(input).map(|url| url.has_host()).is_ok()
 }
