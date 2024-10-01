@@ -14,8 +14,6 @@ SeqSpec
     :toctree: _autosummary
 
     SeqSpec
-    SeqSpec.add_read
-    SeqSpec.to_yaml
 
 Core functions
 ~~~~~~~~~~~~~~
@@ -33,4 +31,4 @@ Utilities
 .. autosummary::
     :toctree: _autosummary
 
-    precellar.utils.strip_barcode_from_fastq
+    utils.strip_barcode_from_fastq
