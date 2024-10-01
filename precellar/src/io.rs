@@ -84,16 +84,19 @@ pub fn open_file_for_write<P: AsRef<Path>>(
     Ok(writer)
 }
 
-pub fn read_fastq<P: AsRef<Path>>(read: &seqspec::Read, base_dir: P) -> fastq::Reader<impl BufRead> {
+pub fn read_fastq<P: AsRef<Path>>(read: &seqspec::Read, base_dir: P) -> Option<fastq::Reader<impl BufRead>> {
+    if read.files.is_none() {
+        return None;
+    }
     let base_dir = base_dir.as_ref().to_path_buf();
     let reader = multi_reader::MultiReader::new(
         read.files.clone().unwrap().into_iter().map(move |file| open_file(&file, &base_dir))
     );
-    fastq::Reader::new(BufReader::new(reader))
+    Some(fastq::Reader::new(BufReader::new(reader)))
 }
 
 pub fn get_read_length<P: AsRef<Path>>(read: &seqspec::Read, base_dir: P) -> Result<usize> {
-    let mut reader = read_fastq(read, base_dir);
+    let mut reader = read_fastq(read, base_dir).unwrap();
     let mut record = fastq::Record::default();
     reader.read_record(&mut record)?;
     Ok(record.sequence().len())

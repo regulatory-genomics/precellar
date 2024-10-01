@@ -489,6 +489,11 @@ pub enum RegionType {
 }
 
 impl RegionType {
+    /// Either a barcode, UMI, or DNA/cDNA region.
+    pub fn is_target(&self) -> bool {
+        self.is_barcode() || self.is_umi() || self.is_dna()
+    }
+
     pub fn is_barcode(&self) -> bool {
         match self {
             RegionType::Barcode => true,
