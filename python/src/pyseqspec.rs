@@ -79,11 +79,11 @@ impl SeqSpec {
         min_len: Option<usize>,
         max_len: Option<usize>,
     ) -> Result<()> {
-        let mut all_reads = self.0.sequence_spec.take().unwrap_or(Vec::new());
+        let all_reads = &mut self.0.sequence_spec;
         let mut read_exist = false;
         let mut read_buffer = Read::default();
         read_buffer.read_id = read_id.to_string();
-        let read = if let Some(r) = all_reads.iter_mut().find(|r| r.read_id == read_id) {
+        let read = if let Some(r) = all_reads.as_mut().map(|r| r.iter_mut().find(|r| r.read_id == read_id)).flatten() {
             read_exist = true;
             r
         } else {
@@ -124,9 +124,12 @@ impl SeqSpec {
         }
 
         if !read_exist {
-            all_reads.push(read_buffer);
+            if let Some(r) = all_reads.as_mut() {
+                r.push(read_buffer);
+            } else {
+                all_reads.replace(vec![read_buffer]);
+            }
         }
-        self.0.sequence_spec = Some(all_reads);
 
         Ok(())
     }
@@ -208,11 +211,9 @@ fn format_read(read: &Read) -> String {
     } else {
         format!("{}-{}", read.min_len, read.max_len)
     };
-    if read.is_reverse() {
-        format!("↑{}({})", read.read_id, len)
-    } else {
-        format!("↓{}({})", read.read_id, len)
-    }
+    let orientation = if read.is_reverse() { "↑" } else { "↓" };
+    let has_files = if read.files.as_ref().map(|x| !x.is_empty()).unwrap_or(false) { "✓" } else { "✗" };
+    format!("{}{}({}){}", orientation, read.read_id, len, has_files)
 }
 
 fn make_file_path(path: &str) -> Result<File> {
