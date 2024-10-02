@@ -47,3 +47,7 @@ jobs:
       with:
         name: wheel-files
         path: ./wheel_files/precellar*.whl
+
+  build-wheel:
+    needs: build-and-test
+    uses: kaizhang/SnapATAC2/.github/workflows/wheels.yml@main
