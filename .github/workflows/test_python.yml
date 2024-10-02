@@ -50,4 +50,4 @@ jobs:
 
   build-wheel:
     needs: build-and-test
-    uses: kaizhang/SnapATAC2/.github/workflows/wheels.yml@main
+    uses: regulatory-genomics/precellar/.github/workflows/wheels.yml@main
