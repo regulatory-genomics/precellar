@@ -5,5 +5,6 @@ precellar: Single-cell genomics data preprocessing tools
    :maxdepth: 3
    :hidden:
 
-   api
+   install
    tutorials/index
+   api

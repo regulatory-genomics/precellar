@@ -51,3 +51,20 @@ jobs:
   build-wheel:
     needs: build-and-test
     uses: regulatory-genomics/precellar/.github/workflows/wheels.yml@main
+
+  publish:
+    needs: build-wheel
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+    if: ${{ startsWith(github.ref, 'refs/tags') }}
+    steps:
+    - name: Download wheel files
+      uses: actions/download-artifact@v4
+      with:
+        path: dist
+        pattern: precellar-*
+        merge-multiple: true
+
+    - name: Publish to PyPI
+      uses: pypa/gh-action-pypi-publish@v1.8.14
