@@ -1,0 +1,68 @@
+name: nightly-run
+
+on:
+  schedule:
+    - cron: '0 0 * * *' # Runs every day at midnight
+
+jobs:
+  check-for-new-commits:
+    runs-on: ubuntu-latest
+    outputs:
+      NEW_COMMITS: ${{ steps.check-commits.outputs.NEW_COMMITS }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Get latest commit SHA
+        id: get-latest-commit-sha
+        run: echo "LATEST_COMMIT_SHA=$(git rev-parse HEAD)" >> $GITHUB_ENV
+
+      - name: Check last run
+        id: check-commits
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          latest_run_commit_sha=$(curl --silent --header "Authorization: token $GITHUB_TOKEN" \
+              "https://api.github.com/repos/$GITHUB_REPOSITORY/actions/workflows/nightly.yml/runs?status=success&&per_page=1" \
+              | jq -r '.workflow_runs | first | .head_sha')
+          echo "Latest completed run was on commit: $latest_run_commit_sha"
+          echo "Current commit is: $LATEST_COMMIT_SHA"
+          if [ "$latest_run_commit_sha" != "$LATEST_COMMIT_SHA" ]; then
+            echo "NEW_COMMITS=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "NEW_COMMITS=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  build-wheel:
+    needs: check-for-new-commits
+    if : ${{ needs.check-for-new-commits.outputs.NEW_COMMITS == 'true' }}
+    uses: kaizhang/SnapATAC2/.github/workflows/wheels.yml@main
+
+  publish:
+    needs: build-wheel
+    runs-on: ubuntu-latest
+    steps:
+    - name: Download wheel files
+      uses: actions/download-artifact@v4
+      with:
+        path: dist
+        pattern: precellar-*
+        merge-multiple: true
+
+    - name: Delete Release
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      run: |
+        if gh release view nightly > /dev/null 2>&1; then
+          gh release delete nightly -y --cleanup-tag
+        fi
+
+    - name: Create nightly release
+      uses: ncipollo/release-action@v1
+      with:
+        allowUpdates: true
+        tag: nightly
+        name: Nightly Release
+        prerelease: true
+        removeArtifacts: true
+        artifacts: "dist/*.whl,dist/*.tar.gz"
