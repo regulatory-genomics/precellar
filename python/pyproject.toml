@@ -4,12 +4,26 @@ build-backend = "maturin"
 
 [project]
 name = "precellar"
-requires-python = ">=3.8"
+authors = [
+    {name = "Kai Zhang", email = "zhangkai33@westlake.edu.cn"}
+]
+description = "precellar: Single-cell epigenomics preprocessing toolkit"
+readme = "README.md"
+license = {file = "LICENSE"}
 classifiers = [
     "Programming Language :: Rust",
     "Programming Language :: Python :: Implementation :: CPython",
     "Programming Language :: Python :: Implementation :: PyPy",
 ]
+requires-python = ">=3.9, <3.13"
 dynamic = ["version"]
+
 [tool.maturin]
 features = ["pyo3/extension-module"]
+
+[project.urls]
+Homepage = "https://lab.kaizhang.org/precellar/"
+Documentation = "https://lab.kaizhang.org/precellar/"
+Repository = "https://github.com/regulatory-genomics/precellar"
+Issues = "https://github.com/regulatory-genomics/precellar/issues"
+Changelog = "https://lab.kaizhang.org/precellar/version/dev/changelog.html"
