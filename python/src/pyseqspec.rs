@@ -88,14 +88,8 @@ impl SeqSpec {
 
     /// Delete a read from the SeqSpec object.
     #[pyo3(signature = (read_id), text_signature = "($self, read_id)")]
-    pub fn delete_read(&mut self, read_id: &str) -> Result<()> {
-        let reads = self.0.sequence_spec.take();
-        if let Some(r) = reads {
-            self.0.sequence_spec = Some(
-                r.into_iter().filter(|r| r.read_id != read_id).collect::<Vec<_>>()
-            );
-        }
-        Ok(())
+    pub fn delete_read(&mut self, read_id: &str) {
+        self.0.delete_read(read_id);
     }
 
     /*
@@ -120,17 +114,13 @@ impl SeqSpec {
     fn __repr__(&self) -> String {
         let assay = &self.0;
         let mut read_list = HashMap::new();
-        if let Some(reads) = assay.sequence_spec.as_ref() {
-            for read in reads {
-                read_list.entry(read.primer_id.clone()).or_insert(Vec::new()).push(read);
-            }
+        for read in assay.sequence_spec.values() {
+            read_list.entry(read.primer_id.clone()).or_insert(Vec::new()).push(read);
         }
 
         let tree = Tree::new("".to_string()).with_leaves(
-            assay.library_spec.as_ref()
-                .unwrap_or(&Vec::new()).iter()
-                .map(|region| build_tree(region, &read_list))
-            );
+            assay.library_spec.iter().map(|region| build_tree(region, &read_list))
+        );
         format!("{}", tree)
     }
 

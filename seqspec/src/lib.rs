@@ -1,11 +1,13 @@
+mod read;
+mod region;
 pub mod utils;
 
-use cached_path::Cache;
-use log::{debug, warn};
-use noodles::fastq;
+pub use read::{Read, File, UrlType, Strand};
+pub use region::{Region, RegionType, SequenceType, Onlist};
+
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_yaml::{self, Value};
-use std::{fs, io::{BufRead, BufReader}, ops::Range, path::PathBuf, str::FromStr};
+use std::{fs, ops::Range, str::FromStr};
 use anyhow::{bail, Result};
 use std::path::Path;
 
@@ -23,29 +25,8 @@ pub struct Assay {
     pub library_kit: LibraryKit,
     pub sequence_protocol: SequenceProtocol,
     pub sequence_kit: SequenceKit,
-    pub sequence_spec: Option<Vec<Read>>,
-    pub library_spec: Option<Vec<Region>>,
-}
-
-impl Default for Assay {
-    fn default() -> Self {
-        Self {
-            seqspec_version: "0.3.0".to_string(),
-            assay_id: "".to_string(),
-            name: "".to_string(),
-            doi: "".to_string(),
-            date: "".to_string(),
-            description: "".to_string(),
-            modalities: Vec::new(),
-            lib_struct: "".to_string(),
-            library_protocol: LibraryProtocol::Standard("Custom".to_string()),
-            library_kit: LibraryKit::Standard("Custom".to_string()),
-            sequence_protocol: SequenceProtocol::Standard("Custom".to_string()),
-            sequence_kit: SequenceKit::Standard("Custom".to_string()),
-            sequence_spec: None,
-            library_spec: None,
-        }
-    }
+    pub sequence_spec: read::Sequences,
+    pub library_spec: Vec<Region>,
 }
 
 impl Assay {
@@ -69,12 +50,14 @@ impl Assay {
         let mut read_exist = false;
         let mut read_buffer = Read::default();
         read_buffer.read_id = read_id.to_string();
-        let read = if let Some(r) = all_reads.as_mut().map(|r| r.iter_mut().find(|r| r.read_id == read_id)).flatten() {
+
+        let read = if let Some(r) = all_reads.get_mut(read_id) {
             read_exist = true;
             r
         } else {
             &mut read_buffer
         };
+
         if !read_exist {
             assert!(modality.is_some(), "modality must be provided for a new read");
             assert!(primer_id.is_some(), "primer_id must be provided for a new read");
@@ -104,37 +87,35 @@ impl Assay {
         }
 
         if !read_exist {
-            if let Some(r) = all_reads.as_mut() {
-                r.push(read_buffer);
-            } else {
-                all_reads.replace(vec![read_buffer]);
-            }
+            all_reads.insert(read_buffer.read_id.clone(), read_buffer);
         }
 
         Ok(())
     }
 
+    pub fn delete_read(&mut self, read_id: &str) -> Option<Read> {
+        self.sequence_spec.shift_remove(read_id)
+    }
+
     /// Get the index of atomic regions of each read in the sequence spec.
     pub fn get_index_of(&self, modality: Modality) -> impl Iterator<Item = (&Read, Vec<(&Region, Range<u32>)>)> {
-        self.sequence_spec.as_ref().expect("sequence_spec is empty")
-            .iter().filter_map(move |read| if read.modality == modality {
-                let region = self.get_region_by_modality(modality)?;
-                let index = read.get_index(region)
-                    .expect(&format!("Region: {} does not have Primer: {}", region.region_id, read.primer_id));
-                Some((read, index))
-            } else {
-                None
-            })
+        self.sequence_spec.values().filter_map(move |read| if read.modality == modality {
+            let region = self.get_region_by_modality(modality)?;
+            let index = read.get_index(region)
+                .expect(&format!("Region: {} does not have Primer: {}", region.region_id, read.primer_id));
+            Some((read, index))
+        } else {
+            None
+        })
     }
 
     pub fn iter_reads(&self, modality: Modality) -> impl Iterator<Item = &Read> {
-        self.sequence_spec.as_ref().expect("sequence_spec is empty").iter()
-            .filter(move |read| read.modality == modality)
+        self.sequence_spec.values().filter(move |read| read.modality == modality)
     }
 
     /// Get the top-level region for a given modality, i.e., the region that contains all other regions.
     pub fn get_region_by_modality(&self, modality: Modality) -> Option<&Region> {
-        self.library_spec.as_ref()?.iter().find(|region| {
+        self.library_spec.iter().find(|region| {
             region.sequence_type == SequenceType::Joined &&
                 region.region_type == RegionType::Modality(modality)
         })
@@ -339,361 +320,15 @@ impl Serialize for SequenceKit {
     }
 }
 
-#[derive(Deserialize, Serialize, Debug, Clone, PartialEq)]
-pub struct Read {
-    pub read_id: String,
-    pub name: Option<String>,
-    pub modality: Modality,
-    pub primer_id: String,
-    pub min_len: u32,
-    pub max_len: u32,
-    pub strand: Strand,
-    pub files: Option<Vec<File>>,
-}
-
-impl Default for Read {
-    fn default() -> Self {
-        Self {
-            read_id: "".to_string(),
-            name: None,
-            modality: Modality::DNA,
-            primer_id: "".to_string(),
-            min_len: 0,
-            max_len: 0,
-            strand: Strand::Pos,
-            files: None,
-        }
-    }
-}
-
-impl Read {
-    pub fn open<P: AsRef<Path>>(&self, base_dir: P) -> Option<fastq::Reader<impl BufRead>> {
-        let files = self.files.clone().unwrap_or(Vec::new())
-            .into_iter().filter(|file| file.filetype == "fastq").collect::<Vec<_>>();
-        if files.is_empty() {
-            return None;
-        }
-        let base_dir = base_dir.as_ref().to_path_buf();
-        let reader = multi_reader::MultiReader::new(
-            files.into_iter().map(move |file| file.open(&base_dir))
-        );
-        Some(fastq::Reader::new(BufReader::new(reader)))
-    }
-
-    pub fn actual_len<P: AsRef<Path>>(&self, base_dir: P) -> Result<usize> {
-        let mut reader = self.open(base_dir).unwrap();
-        let mut record = fastq::Record::default();
-        reader.read_record(&mut record)?;
-        Ok(record.sequence().len())
-    }
-
-    fn get_index<'a>(&'a self, region: &'a Region) -> Option<Vec<(&'a Region, Range<u32>)>> {
-        if region.sequence_type != SequenceType::Joined {
-            return None;
-        }
-
-        let mut found_primer = false;
-
-        let result = if self.is_reverse() {
-            self.get_read_span(
-                region.regions.as_ref().unwrap().iter().rev()
-                    .skip_while(|region| {
-                        let found = region.region_type.is_sequencing_primer() && region.region_id == self.primer_id;
-                        if found {
-                            found_primer = true;
-                        }
-                        !found
-                    }).skip(1)
-            )
-        } else {
-            self.get_read_span(
-                region.regions.as_ref().unwrap().iter()
-                    .skip_while(|region| {
-                        let found = region.region_type.is_sequencing_primer() && region.region_id == self.primer_id;
-                        if found {
-                            found_primer = true;
-                        }
-                        !found
-                    }).skip(1)
-            )
-        };
-        
-        if found_primer {
-            Some(result)
-        } else {
-            None
-        }
-    }
-
-    /// Get the regions of the read.
-    fn get_read_span<'a, I: Iterator<Item = &'a Region>>(&self, regions: I) -> Vec<(&'a Region, Range<u32>)> {
-        let mut result = Vec::new();
-        let read_len = self.max_len;
-        let mut cur_pos = 0;
-        for region in regions {
-            if region.min_len == region.max_len {
-                let end = (cur_pos + region.min_len).min(read_len);
-                result.push((region, cur_pos..end));
-                if end == read_len {
-                    break;
-                }
-                cur_pos = end;
-            } else if cur_pos + region.min_len >= read_len {
-                result.push((region, cur_pos..read_len));
-                break;
-            } else if cur_pos + region.max_len < read_len {
-                warn!("Read ({}) length exceeds maximum length of the variable-length region (insertion), \
-                    truncating the reads to the maximum length of the region. \
-                    If this is not the desired behavior, please adjust the region lengths.", self.read_id);
-                result.push((region, cur_pos..cur_pos + region.max_len));
-                break;
-            } else {
-                debug!("Reads ({}) may contain additional bases downstream of the variable-length region, e.g., adapter sequences.", self.read_id);
-                result.push((region, cur_pos..read_len));
-                break;
-            }
-        }
-        result
-    }
-
-    pub fn is_reverse(&self) -> bool {
-        match self.strand {
-            Strand::Neg => true,
-            Strand::Pos => false,
-        }
-    }
-}
-
-#[derive(Deserialize, Serialize, Debug, Clone, PartialEq)]
-#[serde(rename_all = "lowercase")]
-pub enum Strand {
-    Pos,
-    Neg,
-}
-
-#[derive(Deserialize, Serialize, Debug, Clone, PartialEq)]
-pub struct File {
-    pub file_id: String,
-    pub filename: String,
-    pub filetype: String,
-    pub filesize: u64,
-    pub url: String,
-    pub urltype: UrlType,
-    pub md5: String,
-}
-
-impl File {
-    pub fn from_fastq<P: AsRef<Path>>(path: P) -> Result<Self> {
-        let file = std::fs::File::open(&path)?;
-        let filename = path.as_ref().file_name().unwrap().to_str().unwrap();
-        Ok(File {
-            file_id: filename.to_string(),
-            filename: filename.to_string(),
-            filetype: "fastq".to_string(),
-            filesize: file.metadata()?.len(),
-            url: path.as_ref().to_str().unwrap().to_string(),
-            urltype: UrlType::Local,
-            md5: "0".to_string(),
-        })
-    }
-
-    /// Open the file for reading.
-    /// If the file is remote, it will be downloaded to the cache directory.
-    /// If the file is local, it will be opened directly.
-    /// The base_dir is used to resolve relative paths.
-    pub fn open<P: AsRef<Path>>(&self, base_dir: P) -> Box<dyn std::io::Read> {
-        match self.urltype {
-            UrlType::Local => {
-                let mut path = PathBuf::from(&self.url);
-                path = if path.is_absolute() {
-                    path
-                } else {
-                    base_dir.as_ref().join(path)
-                };
-                Box::new(utils::open_file_for_read(path))
-            }
-            _ => {
-                let cache = Cache::new().unwrap();
-                let file = cache.cached_path(&self.url).unwrap();
-                Box::new(utils::open_file_for_read(file))
-            }
-        }
-    }
-}
-
-#[derive(Deserialize, Serialize, Debug, Copy, Clone, PartialEq)]
-#[serde(rename_all = "lowercase")]
-pub enum UrlType {
-    Local,
-    Ftp,
-    Http,
-    Https,
-}
-
-#[derive(Deserialize, Serialize, Debug, Clone, PartialEq)]
-pub struct Region {
-    pub region_id: String,
-    pub region_type: RegionType,
-    pub name: String,
-    pub sequence_type: SequenceType,
-    pub sequence: String,
-    pub min_len: u32,
-    pub max_len: u32,
-    pub onlist: Option<Onlist>,
-    pub regions: Option<Vec<Region>>,
-}
-
-impl Default for Region {
-    fn default() -> Self {
-        Self {
-            region_id: "".to_string(),
-            region_type: RegionType::Named,
-            name: "".to_string(),
-            sequence_type: SequenceType::Fixed,
-            sequence: "".to_string(),
-            min_len: 0,
-            max_len: 0,
-            onlist: None,
-            regions: None,
-        }
-    }
-}
-
-impl Region {
-    /// Return an iterator over all regions in the region tree.
-    pub fn iter_regions(&self) -> impl Iterator<Item = &Region> {
-        self.regions.as_ref().unwrap().iter()
-    }
-}
-
-#[derive(Deserialize, Serialize, Debug, Copy, Clone, PartialEq)]
-#[serde(rename_all = "lowercase")]
-pub enum RegionType {
-    Barcode,
-    Cdna,
-    #[serde(rename = "custom_primer")]
-    CustomPrimer,
-    Fastq,
-    FastqLink,
-    Gdna,
-    Hic,
-    #[serde(rename = "illumina_p5")]
-    IlluminaP5,
-    #[serde(rename = "illumina_p7")]
-    IlluminaP7,
-    Index5,
-    Index7,
-    Linker,
-    Me1,
-    Me2,
-    Methyl,
-    Named,
-    #[serde(rename = "nextera_read1")]
-    NexteraRead1,
-    #[serde(rename = "nextera_read2")]
-    NexteraRead2,
-    #[serde(rename = "poly_a")]
-    PolyA,
-    #[serde(rename = "poly_g")]
-    PolyG,
-    #[serde(rename = "poly_t")]
-    PolyT,
-    #[serde(rename = "poly_c")]
-    PolyC,
-    S5,
-    S7,
-    #[serde(rename = "truseq_read1")]
-    TruseqRead1,
-    #[serde(rename = "truseq_read2")]
-    TruseqRead2,
-    Umi,
-    #[serde(untagged)]
-    Modality(Modality),
-}
-
-impl RegionType {
-    /// Either a barcode, UMI, or DNA/cDNA region.
-    pub fn is_target(&self) -> bool {
-        self.is_barcode() || self.is_umi() || self.is_dna()
-    }
-
-    pub fn is_barcode(&self) -> bool {
-        match self {
-            RegionType::Barcode => true,
-            _ => false,
-        }
-    }
-
-    pub fn is_umi(&self) -> bool {
-        match self {
-            RegionType::Umi => true,
-            _ => false,
-        }
-    }
-
-    /// Check if the region contains genomic sequences.
-    pub fn is_dna(&self) -> bool {
-        match self {
-            RegionType::Gdna | RegionType::Cdna => true,
-            _ => false,
-        }
-    }
-
-    pub fn is_sequencing_primer(&self) -> bool {
-        match self {
-            RegionType::CustomPrimer |
-                RegionType::TruseqRead1 | RegionType::TruseqRead2 |
-                RegionType::NexteraRead1 | RegionType::NexteraRead2 |
-                RegionType::IlluminaP5 | RegionType::IlluminaP7 => true,
-            _ => false,
-        }
-    }
-}
-
-#[derive(Deserialize, Serialize, Debug, Copy, Clone, PartialEq)]
-#[serde(rename_all = "lowercase")]
-pub enum SequenceType {
-    Fixed,  // sequence string is known and fixed in length and nucleotide composition
-    Random,  // the sequence is not known a-priori
-    Onlist,  // the sequence is derived from an onlist
-    Joined,  // the sequence is created from nested regions and the regions property must contain Regions
-}
-
-#[derive(Deserialize, Serialize, Debug, Clone, PartialEq)]
-pub struct Onlist {
-    pub file_id: String,
-    pub filename: String,
-    pub filetype: String,
-    pub filesize: u64,
-    pub url: String,
-    pub urltype: UrlType,
-    pub location: Option<Location>,
-    pub md5: String,
-}
-
-impl Onlist {
-    pub fn read(&self) -> Result<Vec<String>> {
-        let cache = Cache::new()?;
-        let file = cache.cached_path(&self.url)?;
-        let reader = std::io::BufReader::new(utils::open_file_for_read(file));
-        Ok(reader.lines().map(|x| x.unwrap()).collect())
-    }
-}
-
-#[derive(Deserialize, Serialize, Debug, Clone, Copy, PartialEq)]
-#[serde(rename_all = "lowercase")]
-pub enum Location {
-    Local,
-    Remote,
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    
+    const YAML_FILE: &str = "../seqspec_templates/10x_rna_atac.yaml";
 
     #[test]
     fn test_parse() {
-        let yaml_str = fs::read_to_string("tests/data/spec.yaml").expect("Failed to read file");
+        let yaml_str = fs::read_to_string(YAML_FILE).expect("Failed to read file");
         let assay: Assay = serde_yaml::from_str(&yaml_str).expect("Failed to parse YAML");
 
         println!("{:?}", assay);
@@ -708,12 +343,12 @@ mod tests {
             assert_eq!(assay, assay_);
         }
 
-        se_de(&fs::read_to_string("tests/data/spec.yaml").expect("Failed to read file"));
+        se_de(&fs::read_to_string(YAML_FILE).expect("Failed to read file"));
     }
 
     #[test]
     fn test_index() {
-        let yaml_str = fs::read_to_string("tests/data/spec.yaml").expect("Failed to read file");
+        let yaml_str = fs::read_to_string(YAML_FILE).expect("Failed to read file");
 
         let assay: Assay = serde_yaml::from_str(&yaml_str).expect("Failed to parse YAML");
         for (read, regions) in assay.get_index_of(Modality::RNA) {
