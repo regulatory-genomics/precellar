@@ -211,7 +211,7 @@ impl<A: Alinger> FastqProcessor<A> {
             if regions.is_empty() {
                 None
             } else {
-                Some((read, regions, crate::io::read_fastq(read, self.base_dir.clone()).unwrap()))
+                Some((read, regions, read.open(self.base_dir.clone()).unwrap()))
             }
         });
         FastqRecords::new(data)
@@ -226,7 +226,7 @@ impl<A: Alinger> FastqProcessor<A> {
             .expect("No barcode region found");
         let range = index.into_iter().find(|x| x.0.region_type.is_barcode()).unwrap().1;
 
-        crate::io::read_fastq(read, &self.base_dir).unwrap().records().for_each(|record| {
+        read.open(&self.base_dir).unwrap().records().for_each(|record| {
             let mut record = record.unwrap();
             record = slice_fastq_record(&record, range.start as usize, range.end as usize);
             if read.is_reverse() {
@@ -249,7 +249,7 @@ impl<A: Alinger> FastqProcessor<A> {
         }
         let region = regions[0];
         if region.sequence_type == SequenceType::Onlist {
-            Ok(Whitelist::new(crate::io::read_onlist(region.onlist.as_ref().unwrap())?))
+            Ok(Whitelist::new(region.onlist.as_ref().unwrap().read()?))
         } else {
             Ok(Whitelist::empty())
         }

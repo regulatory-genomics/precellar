@@ -14,7 +14,6 @@ bwa-mem2 = { git = "https://github.com/regulatory-genomics/bwa-mem2-rust.git", r
 bstr = "1.0"
 cached-path = "0.6"
 either = "1.13"
-futures-util = "0.3"
 itertools = "0.13"
 noodles = { version = "0.80", features = ["core", "fastq", "bam", "sam", "bgzf"] }
 seqspec = { version = "0.1", workspace = true }
@@ -22,11 +21,8 @@ serde_yaml = "0.9"
 termtree = "0.5"
 precellar = { version = "0.1", workspace = true }
 regex = "1.6"
-tokio = { version = "1.40", features = ["rt-multi-thread"] }
 log = "0.4"
 env_logger = "0.11"
-reqwest = { version = "0.12", features = ["blocking", "stream"] }
-url = "2.5"
 
 [dependencies.pyo3]
 version = "0.22.3"

@@ -1,5 +1,6 @@
 use std::{io::{BufReader, BufWriter}, path::PathBuf, str::FromStr};
-use precellar::{io::{open_file_for_read, open_file_for_write, Compression}, utils::strip_barcode_from_read_name};
+use precellar::utils::strip_barcode_from_read_name;
+use seqspec::utils::{open_file_for_read, open_file_for_write, Compression};
 use noodles::fastq::{self, Reader, io::Writer};
 use anyhow::Result;
 use pyo3::prelude::*;

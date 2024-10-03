@@ -1,7 +1,11 @@
-use log::warn;
+pub mod utils;
+
+use cached_path::Cache;
+use log::{debug, warn};
+use noodles::fastq;
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_yaml::{self, Value};
-use std::{fs, ops::Range, str::FromStr};
+use std::{fs, io::{BufRead, BufReader}, ops::Range, path::PathBuf, str::FromStr};
 use anyhow::{bail, Result};
 use std::path::Path;
 
@@ -48,6 +52,66 @@ impl Assay {
     pub fn from_path<P: AsRef<Path>>(path: P) -> Result<Self> {
         let yaml_str = fs::read_to_string(path)?;
         Ok(serde_yaml::from_str(&yaml_str)?)
+    }
+
+    /// Update read information. If the read does not exist, it will be created.
+    pub fn update_read<P: AsRef<Path>>(
+        &mut self,
+        read_id: &str,
+        modality: Option<&str>,
+        primer_id: Option<&str>,
+        is_reverse: Option<bool>,
+        fastqs: Option<&[P]>,
+        min_len: Option<usize>,
+        max_len: Option<usize>,
+    ) -> Result<()> {
+        let all_reads = &mut self.sequence_spec;
+        let mut read_exist = false;
+        let mut read_buffer = Read::default();
+        read_buffer.read_id = read_id.to_string();
+        let read = if let Some(r) = all_reads.as_mut().map(|r| r.iter_mut().find(|r| r.read_id == read_id)).flatten() {
+            read_exist = true;
+            r
+        } else {
+            &mut read_buffer
+        };
+        if !read_exist {
+            assert!(modality.is_some(), "modality must be provided for a new read");
+            assert!(primer_id.is_some(), "primer_id must be provided for a new read");
+            assert!(is_reverse.is_some(), "is_reverse must be provided for a new read");
+        }
+
+        if let Some(rev) = is_reverse {
+            read.strand = if rev { Strand::Neg } else { Strand::Pos };
+        }
+        if let Some(modality) = modality {
+            read.modality = Modality::from_str(modality)?;
+        }
+        if let Some(primer_id) = primer_id {
+            read.primer_id = primer_id.to_string();
+        }
+        if let Some(fastq) = fastqs {
+            read.files = Some(fastq.iter().map(|path| File::from_fastq(path)).collect::<Result<Vec<File>>>()?);
+        }
+
+        if (min_len.is_none() || max_len.is_none()) && read.files.is_some() {
+            let len = read.actual_len("./")?;
+            read.min_len = min_len.unwrap_or(len) as u32;
+            read.max_len = max_len.unwrap_or(len) as u32;
+        } else {
+            read.min_len = min_len.unwrap() as u32;
+            read.max_len = max_len.unwrap() as u32;
+        }
+
+        if !read_exist {
+            if let Some(r) = all_reads.as_mut() {
+                r.push(read_buffer);
+            } else {
+                all_reads.replace(vec![read_buffer]);
+            }
+        }
+
+        Ok(())
     }
 
     /// Get the index of atomic regions of each read in the sequence spec.
@@ -303,6 +367,26 @@ impl Default for Read {
 }
 
 impl Read {
+    pub fn open<P: AsRef<Path>>(&self, base_dir: P) -> Option<fastq::Reader<impl BufRead>> {
+        let files = self.files.clone().unwrap_or(Vec::new())
+            .into_iter().filter(|file| file.filetype == "fastq").collect::<Vec<_>>();
+        if files.is_empty() {
+            return None;
+        }
+        let base_dir = base_dir.as_ref().to_path_buf();
+        let reader = multi_reader::MultiReader::new(
+            files.into_iter().map(move |file| file.open(&base_dir))
+        );
+        Some(fastq::Reader::new(BufReader::new(reader)))
+    }
+
+    pub fn actual_len<P: AsRef<Path>>(&self, base_dir: P) -> Result<usize> {
+        let mut reader = self.open(base_dir).unwrap();
+        let mut record = fastq::Record::default();
+        reader.read_record(&mut record)?;
+        Ok(record.sequence().len())
+    }
+
     fn get_index<'a>(&'a self, region: &'a Region) -> Option<Vec<(&'a Region, Range<u32>)>> {
         if region.sequence_type != SequenceType::Joined {
             return None;
@@ -364,7 +448,7 @@ impl Read {
                 result.push((region, cur_pos..cur_pos + region.max_len));
                 break;
             } else {
-                warn!("Reads ({}) may contain additional bases downstream of the variable-length region, e.g., adapter sequences.", self.read_id);
+                debug!("Reads ({}) may contain additional bases downstream of the variable-length region, e.g., adapter sequences.", self.read_id);
                 result.push((region, cur_pos..read_len));
                 break;
             }
@@ -396,6 +480,45 @@ pub struct File {
     pub url: String,
     pub urltype: UrlType,
     pub md5: String,
+}
+
+impl File {
+    pub fn from_fastq<P: AsRef<Path>>(path: P) -> Result<Self> {
+        let file = std::fs::File::open(&path)?;
+        let filename = path.as_ref().file_name().unwrap().to_str().unwrap();
+        Ok(File {
+            file_id: filename.to_string(),
+            filename: filename.to_string(),
+            filetype: "fastq".to_string(),
+            filesize: file.metadata()?.len(),
+            url: path.as_ref().to_str().unwrap().to_string(),
+            urltype: UrlType::Local,
+            md5: "0".to_string(),
+        })
+    }
+
+    /// Open the file for reading.
+    /// If the file is remote, it will be downloaded to the cache directory.
+    /// If the file is local, it will be opened directly.
+    /// The base_dir is used to resolve relative paths.
+    pub fn open<P: AsRef<Path>>(&self, base_dir: P) -> Box<dyn std::io::Read> {
+        match self.urltype {
+            UrlType::Local => {
+                let mut path = PathBuf::from(&self.url);
+                path = if path.is_absolute() {
+                    path
+                } else {
+                    base_dir.as_ref().join(path)
+                };
+                Box::new(utils::open_file_for_read(path))
+            }
+            _ => {
+                let cache = Cache::new().unwrap();
+                let file = cache.cached_path(&self.url).unwrap();
+                Box::new(utils::open_file_for_read(file))
+            }
+        }
+    }
 }
 
 #[derive(Deserialize, Serialize, Debug, Copy, Clone, PartialEq)]
@@ -546,6 +669,15 @@ pub struct Onlist {
     pub urltype: UrlType,
     pub location: Option<Location>,
     pub md5: String,
+}
+
+impl Onlist {
+    pub fn read(&self) -> Result<Vec<String>> {
+        let cache = Cache::new()?;
+        let file = cache.cached_path(&self.url)?;
+        let reader = std::io::BufReader::new(utils::open_file_for_read(file));
+        Ok(reader.lines().map(|x| x.unwrap()).collect())
+    }
 }
 
 #[derive(Deserialize, Serialize, Debug, Clone, Copy, PartialEq)]

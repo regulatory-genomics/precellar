@@ -1,7 +1,5 @@
-use std::{fs::File, io::{BufRead, BufReader, BufWriter, Write}, path::{Path, PathBuf}, str::FromStr};
+use std::{fs::File, io::{BufWriter, Write}, path::{Path, PathBuf}, str::FromStr};
 use anyhow::{Context, Result, anyhow};
-use noodles::fastq;
-use cached_path::Cache;
 
 /// Open a file, possibly compressed. Supports gzip and zstd.
 pub fn open_file_for_read<P: AsRef<Path>>(file: P) -> Box<dyn std::io::Read> {
@@ -82,48 +80,4 @@ pub fn open_file_for_write<P: AsRef<Path>>(
         },
     };
     Ok(writer)
-}
-
-pub fn read_fastq<P: AsRef<Path>>(read: &seqspec::Read, base_dir: P) -> Option<fastq::Reader<impl BufRead>> {
-    if read.files.is_none() {
-        return None;
-    }
-    let base_dir = base_dir.as_ref().to_path_buf();
-    let reader = multi_reader::MultiReader::new(
-        read.files.clone().unwrap().into_iter().map(move |file| open_file(&file, &base_dir))
-    );
-    Some(fastq::Reader::new(BufReader::new(reader)))
-}
-
-pub fn get_read_length<P: AsRef<Path>>(read: &seqspec::Read, base_dir: P) -> Result<usize> {
-    let mut reader = read_fastq(read, base_dir).unwrap();
-    let mut record = fastq::Record::default();
-    reader.read_record(&mut record)?;
-    Ok(record.sequence().len())
-}
-
-pub fn read_onlist(onlist: &seqspec::Onlist) -> Result<Vec<String>> {
-    let cache = Cache::new()?;
-    let file = cache.cached_path(&onlist.url)?;
-    let reader = std::io::BufReader::new(open_file_for_read(file));
-    Ok(reader.lines().map(|x| x.unwrap()).collect())
-}
-
-fn open_file<P: AsRef<Path>>(file: &seqspec::File, base_dir: P) -> Box<dyn std::io::Read> {
-    match file.urltype {
-        seqspec::UrlType::Local => {
-            let mut path = PathBuf::from(&file.url);
-            path = if path.is_absolute() {
-                path
-            } else {
-                base_dir.as_ref().join(path)
-            };
-            Box::new(open_file_for_read(path))
-        }
-        _ => {
-            let cache = Cache::new().unwrap();
-            let file = cache.cached_path(&file.url).unwrap();
-            Box::new(open_file_for_read(file))
-        }
-    }
 }

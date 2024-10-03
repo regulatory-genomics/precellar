@@ -13,11 +13,10 @@ use itertools::Itertools;
 use ::precellar::{
     align::{Alinger, FastqProcessor, NameCollatedRecords},
     fragment::FragmentGenerator,
-    io::{open_file_for_write, Compression},
     qc::{FragmentQC, Metrics, AlignQC},
 };
 use pyseqspec::SeqSpec;
-use seqspec::{Assay, Modality};
+use seqspec::{Assay, Modality, utils::{open_file_for_write, Compression}};
 
 #[cfg(not(target_env = "msvc"))]
 use tikv_jemallocator::Jemalloc;

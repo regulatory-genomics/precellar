@@ -1,15 +1,10 @@
-use std::path::PathBuf;
-use std::{collections::HashMap, str::FromStr};
+use std::collections::HashMap;
 
-use tokio::io::AsyncWriteExt;
-use futures_util::StreamExt;
 use pyo3::prelude::*;
-use reqwest::header::{HeaderMap, CONTENT_DISPOSITION};
-use seqspec::{Assay, File, Modality, Read, Region, Strand, UrlType};
+use seqspec::{Assay, Read, Region};
 use anyhow::Result;
 use termtree::Tree;
 use cached_path::Cache;
-use url::Url;
 
 /** A SeqSpec object.
     
@@ -79,59 +74,16 @@ impl SeqSpec {
         min_len: Option<usize>,
         max_len: Option<usize>,
     ) -> Result<()> {
-        let all_reads = &mut self.0.sequence_spec;
-        let mut read_exist = false;
-        let mut read_buffer = Read::default();
-        read_buffer.read_id = read_id.to_string();
-        let read = if let Some(r) = all_reads.as_mut().map(|r| r.iter_mut().find(|r| r.read_id == read_id)).flatten() {
-            read_exist = true;
-            r
+        let fastqs = fastq.map(|f| if f.is_instance_of::<pyo3::types::PyList>() {
+            f.extract::<Vec<String>>().unwrap()
         } else {
-            &mut read_buffer
-        };
-        if !read_exist {
-            assert!(modality.is_some(), "modality must be provided for a new read");
-            assert!(primer_id.is_some(), "primer_id must be provided for a new read");
-            assert!(is_reverse.is_some(), "is_reverse must be provided for a new read");
-        }
+            vec![f.extract::<String>().unwrap()]
+        });
 
-        if let Some(rev) = is_reverse {
-            read.strand = if rev { Strand::Neg } else { Strand::Pos };
-        }
-        if let Some(modality) = modality {
-            read.modality = Modality::from_str(modality)?;
-        }
-        if let Some(primer_id) = primer_id {
-            read.primer_id = primer_id.to_string();
-        }
-        if let Some(fastq) = fastq {
-            let fastq = if fastq.is_instance_of::<pyo3::types::PyList>() {
-                fastq.extract::<Vec<String>>()?
-            } else {
-                vec![fastq.extract::<String>()?]
-            };
-            read.files = Some(fastq.into_iter().map(|path| make_file_path(&path)).collect::<Result<Vec<File>>>()?);
-        }
-
-
-        if (min_len.is_none() || max_len.is_none()) && read.files.is_some() {
-            let len = precellar::io::get_read_length(&read, "./")?;
-            read.min_len = min_len.unwrap_or(len) as u32;
-            read.max_len = max_len.unwrap_or(len) as u32;
-        } else {
-            read.min_len = min_len.unwrap() as u32;
-            read.max_len = max_len.unwrap() as u32;
-        }
-
-        if !read_exist {
-            if let Some(r) = all_reads.as_mut() {
-                r.push(read_buffer);
-            } else {
-                all_reads.replace(vec![read_buffer]);
-            }
-        }
-
-        Ok(())
+        self.0.update_read(
+            read_id, modality, primer_id, is_reverse,
+            fastqs.as_ref().map(|x| x.as_slice()), min_len, max_len,
+        )
     }
 
     /// Delete a read from the SeqSpec object.
@@ -214,64 +166,4 @@ fn format_read(read: &Read) -> String {
     let orientation = if read.is_reverse() { "↑" } else { "↓" };
     let has_files = if read.files.as_ref().map(|x| !x.is_empty()).unwrap_or(false) { "✓" } else { "✗" };
     format!("{}{}({}){}", orientation, read.read_id, len, has_files)
-}
-
-fn make_file_path(path: &str) -> Result<File> {
-    let runtime = tokio::runtime::Runtime::new().unwrap();
-
-    let path = runtime.block_on(download_file(path))?;
-    let file = std::fs::File::open(&path)?;
-    Ok(File {
-        file_id: path.file_name().unwrap().to_str().unwrap().to_string(),
-        filename: path.file_name().unwrap().to_str().unwrap().to_string(),
-        filetype: "fastq".to_string(),
-        filesize: file.metadata()?.len(),
-        url: path.to_str().unwrap().to_string(),
-        urltype: UrlType::Local,
-        md5: "0".to_string(),
-    })
-}
- 
-async fn download_file(url: &str) -> Result<PathBuf> {
-    if !is_url(url) {
-        return Ok(PathBuf::from_str(url)?)
-    }
-
-    let response = reqwest::get(url).await?;
-    let filename = get_filename(&response.headers(), url);
-
-    let mut file = tokio::fs::File::create(&filename).await?;
-    let mut stream = response.bytes_stream();
-
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk?;
-        file.write_all(&chunk).await?;
-    }
-
-    Ok(PathBuf::from_str(&filename)?)
-}
-
-// Function to extract filename from headers or URL
-fn get_filename(headers: &HeaderMap, url: &str) -> String {
-    // Try to get the filename from the 'Content-Disposition' header
-    if let Some(content_disposition) = headers.get(CONTENT_DISPOSITION) {
-        if let Ok(disposition) = content_disposition.to_str() {
-            if let Some(filename) = disposition.split("filename=").nth(1) {
-                return filename.trim_matches('"').to_string();
-            }
-        }
-    }
-
-    // Fallback to extracting the filename from the URL
-    let parsed_url = url::Url::parse(url).expect("Invalid URL");
-    parsed_url
-        .path_segments()
-        .and_then(|segments| segments.last())
-        .unwrap_or("downloaded_file")
-        .to_string()
-}
-
-// Check if the input is a valid URL
-fn is_url(input: &str) -> bool {
-    Url::parse(input).map(|url| url.has_host()).is_ok()
 }
