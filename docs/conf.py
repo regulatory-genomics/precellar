@@ -20,7 +20,7 @@ version = re.sub(r'([-\.]dev\d+).*?$', r'\1', version)
 release = precellar.__version__
 
 # pyData/Sphinx-Theme version switcher
-if ".dev" in version:
+if "dev" in version:
     switcher_version = "dev"
 else:
     switcher_version = f"{version}"
@@ -51,7 +51,6 @@ extensions = [
     "sphinx.ext.coverage",
     "sphinx.ext.mathjax",
     "sphinx.ext.napoleon",
-    "sphinx.ext.linkcode",
     "sphinx_autodoc_typehints",
     "sphinx_plotly_directive",
 ]
