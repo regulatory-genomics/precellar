@@ -12,9 +12,9 @@ sys.modules['precellar.utils'] = utils
 
 # -- Software version --------------------------------------------------------
 
-# The short X.Y version (including .devXXXX, rcX, b1 suffixes if present)
-version = re.sub(r'(\d+\.\d+)\.\d+(.*)', r'\1\2', precellar.__version__)
-version = re.sub(r'(\.dev\d+).*?$', r'\1', version)
+# The short X.Y version (including .devXXXX, -devXXXX, rcX, b1 suffixes if present)
+version = re.sub(r'(\d+\.\d+)\.\d+([-\.].*)?', r'\1\2', precellar.__version__)
+version = re.sub(r'([-\.]dev\d+).*?$', r'\1', version)
 
 # The full version, including alpha/beta/rc tags.
 release = precellar.__version__
@@ -138,62 +138,3 @@ html_theme_options = {
         "json_url": "https://raw.githubusercontent.com/regulatory-genomics/precellar/refs/heads/main/docs/_static/versions.json",
     },
 }
-
-commit = subprocess.check_output(['git', 'rev-parse', 'HEAD']).strip().decode('ascii')
-code_url = f"https://github.com/regulatory-genomics/precellar/blob/{commit}"
-
-# based on numpy doc/source/conf.py
-def linkcode_resolve(domain, info):
-    """
-    Determine the URL corresponding to Python object
-    """
-    import inspect
-
-    if domain != "py":
-        return None
-
-    modname = info["module"]
-    fullname = info["fullname"]
-
-    submod = sys.modules.get(modname)
-    if submod is None:
-        return None
-
-    obj = submod
-    for part in fullname.split("."):
-        try:
-            with warnings.catch_warnings():
-                # Accessing deprecated objects will generate noisy warnings
-                warnings.simplefilter("ignore", FutureWarning)
-                obj = getattr(obj, part)
-        except AttributeError:
-            return None
-
-    try:
-        fn = inspect.getsourcefile(inspect.unwrap(obj))
-    except TypeError:
-        try:  # property
-            fn = inspect.getsourcefile(inspect.unwrap(obj.fget))
-        except (AttributeError, TypeError):
-            fn = None
-    if not fn:
-        return None
-
-    try:
-        source, lineno = inspect.getsourcelines(obj)
-    except TypeError:
-        try:  # property
-            source, lineno = inspect.getsourcelines(obj.fget)
-        except (AttributeError, TypeError):
-            lineno = None
-    except OSError:
-        lineno = None
-
-    if lineno:
-        linespec = f"#L{lineno}-L{lineno + len(source) - 1}"
-    else:
-        linespec = ""
-
-    fn = os.path.relpath(fn, start=os.path.dirname(snapatac2.__file__))
-
-    return f"{code_url}/snapatac2-python/python/snapatac2/{fn}{linespec}"
