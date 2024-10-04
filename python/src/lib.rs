@@ -15,8 +15,8 @@ use ::precellar::{
     fragment::FragmentGenerator,
     qc::{FragmentQC, Metrics, AlignQC},
 };
-use pyseqspec::SeqSpec;
-use seqspec::{Assay, Modality, utils::{open_file_for_write, Compression}};
+use pyseqspec::Assay;
+use seqspec::{Modality, utils::{open_file_for_write, Compression}};
 
 #[cfg(not(target_env = "msvc"))]
 use tikv_jemallocator::Jemalloc;
@@ -118,11 +118,11 @@ fn align(
     let base_dir;
     match seqspec.extract::<PathBuf>() {
         Ok(p) => {
-            spec = Assay::from_path(&p).unwrap();
+            spec = seqspec::Assay::from_path(&p).unwrap();
             base_dir = p.parent().unwrap().to_path_buf();
         },
         _ => {
-            let s: PyRef<SeqSpec> = seqspec.extract()?;
+            let s: PyRef<Assay> = seqspec.extract()?;
             spec = s.0.clone();
             base_dir = ".".into();
         }
@@ -270,7 +270,7 @@ fn precellar(m: &Bound<'_, PyModule>) -> PyResult<()> {
 
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
 
-    m.add_class::<pyseqspec::SeqSpec>().unwrap();
+    m.add_class::<pyseqspec::Assay>().unwrap();
 
     m.add_function(wrap_pyfunction!(make_genome_index, m)?)?;
     m.add_function(wrap_pyfunction!(align, m)?)?;

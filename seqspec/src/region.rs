@@ -2,9 +2,87 @@ use crate::Modality;
 use crate::read::UrlType;
 
 use cached_path::Cache;
+use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
-use std::io::BufRead;
+use std::{io::BufRead, sync::Arc};
 use anyhow::Result;
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct LibSpec {
+    modalities: IndexMap<Modality, Arc<Region>>,
+    region_map: IndexMap<String, Arc<Region>>,
+    parent_map: IndexMap<String, Arc<Region>>,
+}
+
+impl Serialize for LibSpec {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        self.region_map.values().collect::<Vec<_>>().serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for LibSpec {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let regions = Vec::<Region>::deserialize(deserializer)?;
+        Ok(LibSpec::new(regions))
+    }
+}
+
+impl LibSpec {
+    pub fn new<I: IntoIterator<Item = Region>>(regions: I) -> Self {
+        let mut modalities = IndexMap::new();
+        let mut region_map = IndexMap::new();
+        let mut parent_map = IndexMap::new();
+        for region in regions {
+            let region = Arc::new(region);
+            if region_map.insert(region.region_id.clone(), region.clone()).is_some() {
+                panic!("Duplicate region id: {}", region.region_id);
+            }
+            if let RegionType::Modality(modality) = region.region_type {
+                if modalities.insert(modality, region.clone()).is_some() {
+                    panic!("Duplicate modality: {:?}", modality);
+                }
+            }
+            for subregion in region.subregions.iter() {
+                parent_map.insert(subregion.region_id.clone(), region.clone());
+            }
+        }
+        Self { modalities, region_map, parent_map }
+    }
+
+    /// Iterate over all regions with modality type in the library.
+    pub fn modalities(&self) -> impl Iterator<Item = &Arc<Region>> {
+        self.modalities.values()
+    }
+
+    /// Iterate over all regions in the library.
+    pub fn regions(&self) -> impl Iterator<Item = &Arc<Region>> {
+        self.region_map.values()
+    }
+
+    pub fn get_modality(&self, modality: &Modality) -> Option<&Arc<Region>> {
+        self.modalities.get(modality)
+    }
+
+    pub fn get_modality_mut(&mut self, modality: &Modality) -> Option<&mut Arc<Region>> {
+        self.modalities.get_mut(modality)
+    }
+
+    pub fn get(&self, region_id: &str) -> Option<&Arc<Region>> {
+        self.region_map.get(region_id)
+    }
+
+    pub fn get_mut(&mut self, region_id: &str) -> Option<&mut Arc<Region>> {
+        self.region_map.get_mut(region_id)
+    }
+
+    pub fn get_parent(&self, region_id: &str) -> Option<&Arc<Region>> {
+        self.parent_map.get(region_id)
+    }
+
+    pub fn get_parent_mut(&mut self, region_id: &str) -> Option<&mut Arc<Region>> {
+        self.parent_map.get_mut(region_id)
+    }
+}
 
 #[derive(Deserialize, Serialize, Debug, Clone, PartialEq)]
 pub struct Region {
@@ -16,29 +94,28 @@ pub struct Region {
     pub min_len: u32,
     pub max_len: u32,
     pub onlist: Option<Onlist>,
-    pub regions: Option<Vec<Region>>,
+    #[serde(rename = "regions", deserialize_with = "deserialize_regions")]
+    pub subregions: Vec<Arc<Region>>,
 }
 
-impl Default for Region {
-    fn default() -> Self {
-        Self {
-            region_id: "".to_string(),
-            region_type: RegionType::Named,
-            name: "".to_string(),
-            sequence_type: SequenceType::Fixed,
-            sequence: "".to_string(),
-            min_len: 0,
-            max_len: 0,
-            onlist: None,
-            regions: None,
+impl Region {
+    pub fn is_fixed_length(&self) -> bool {
+        if self.min_len == self.max_len {
+            true
+        } else {
+            false
         }
     }
 }
 
-impl Region {
-    /// Return an iterator over all regions in the region tree.
-    pub fn iter_regions(&self) -> impl Iterator<Item = &Region> {
-        self.regions.as_ref().unwrap().iter()
+fn deserialize_regions<'de, D>(deserializer: D) -> Result<Vec<Arc<Region>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    if let Some(regions) = Option::<Vec::<Region>>::deserialize(deserializer)? {
+        Ok(regions.into_iter().map(Arc::new).collect())
+    } else {
+        Ok(Vec::new())
     }
 }
 
@@ -162,4 +239,3 @@ pub enum Location {
     Local,
     Remote,
 }
-

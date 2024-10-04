@@ -1,17 +1,17 @@
 use std::collections::HashMap;
 
 use pyo3::prelude::*;
-use seqspec::{Assay, Read, Region};
+use seqspec::{Read, Region};
 use anyhow::Result;
 use termtree::Tree;
 use cached_path::Cache;
 
-/** A SeqSpec object.
+/** A Assay object.
     
-    A SeqSpec object is used to annotate sequencing libraries produced by genomics assays.
+    A Assay object is used to annotate sequencing libraries produced by genomics assays.
     Genomic library structure depends on both the assay and sequencer (and kits) used to
     generate and bind the assay-specific construct to the sequencing adapters to generate
-    a sequencing library. SeqSpec is specific to both a genomics assay and sequencer
+    a sequencing library. Assay is specific to both a genomics assay and sequencer
     and provides a standardized format for describing the structure of sequencing
     libraries and the resulting sequencing reads. See https://github.com/pachterlab/seqspec for more details.
 
@@ -26,17 +26,17 @@ use cached_path::Cache;
 */
 #[pyclass]
 #[repr(transparent)]
-pub struct SeqSpec(pub(crate) Assay);
+pub struct Assay(pub(crate) seqspec::Assay);
 
 #[pymethods]
-impl SeqSpec {
+impl Assay {
     #[new]
     #[pyo3(signature = (path))] 
     pub fn new(path: &str) -> Result<Self> {
         let cache = Cache::new()?;
         let file = cache.cached_path(path)?;
-        let assay = Assay::from_path(file)?;
-        Ok(SeqSpec(assay))
+        let assay = seqspec::Assay::from_path(file)?;
+        Ok(Assay(assay))
     }
 
     /// Update read information in the SeqSpec object.
@@ -119,7 +119,7 @@ impl SeqSpec {
         }
 
         let tree = Tree::new("".to_string()).with_leaves(
-            assay.library_spec.iter().map(|region| build_tree(region, &read_list))
+            assay.library_spec.modalities().map(|region| build_tree(region, &read_list))
         );
         format!("{}", tree)
     }
@@ -143,8 +143,7 @@ fn build_tree(region: &Region, read_list: &HashMap<String, Vec<&Read>>) -> Tree<
         format!("{}({})", id, len)
     };
     Tree::new(label)
-        .with_leaves(region.regions.as_ref().unwrap_or(&Vec::new())
-        .iter().map(|child| build_tree(child, read_list)))
+        .with_leaves(region.subregions.iter().map(|child| build_tree(child, read_list)))
 }
 
 fn format_read(read: &Read) -> String {

@@ -1,5 +1,5 @@
 use crate::barcode::{BarcodeCorrector, Whitelist};
-use seqspec::{Assay, Modality, Read, Region, RegionType, SequenceType};
+use seqspec::{Assay, Modality, Read, RegionType, SequenceType};
 use crate::qc::{AlignQC, Metrics};
 
 use bstr::BString;
@@ -206,8 +206,8 @@ impl<A: Alinger> FastqProcessor<A> {
 
     pub fn gen_raw_fastq_records(&self) -> FastqRecords<impl BufRead> {
         let modality = self.modality();
-        let data = self.assay.get_index_of(modality).filter_map(|(read, regions)| {
-            let regions: Vec<_> = regions.into_iter().filter(|x| x.0.region_type.is_target()).collect();
+        let data = self.assay.get_index_by_modality(modality).filter_map(|(read, index)| {
+            let regions: Vec<_> = index.index.into_iter().filter(|x| x.1.is_target()).collect();
             if regions.is_empty() {
                 None
             } else {
@@ -221,10 +221,10 @@ impl<A: Alinger> FastqProcessor<A> {
         let modality = self.modality();
         let mut whitelist = self.get_whitelist()?;
 
-        let (read, index) = self.assay.get_index_of(modality).into_iter()
-            .find(|(_, index)| index.into_iter().any(|x| x.0.region_type.is_barcode()))
+        let (read, index) = self.assay.get_index_by_modality(modality).into_iter()
+            .find(|(_, index)| index.index.iter().any(|x| x.1.is_barcode()))
             .expect("No barcode region found");
-        let range = index.into_iter().find(|x| x.0.region_type.is_barcode()).unwrap().1;
+        let range = index.index.into_iter().find(|x| x.1.is_barcode()).unwrap().2;
 
         read.open(&self.base_dir).unwrap().records().for_each(|record| {
             let mut record = record.unwrap();
@@ -242,8 +242,8 @@ impl<A: Alinger> FastqProcessor<A> {
     }
 
     fn get_whitelist(&self) -> Result<Whitelist> {
-        let regions: Vec<_> = self.assay.get_region_by_modality(self.modality()).unwrap()
-            .iter_regions().filter(|r| r.region_type.is_barcode()).collect();
+        let regions: Vec<_> = self.assay.library_spec.get_modality(&self.modality()).unwrap()
+            .subregions.iter().filter(|r| r.region_type.is_barcode()).collect();
         if regions.len() != 1 {
             bail!("Expecting exactly one barcode region, found {}", regions.len());
         }
@@ -273,13 +273,13 @@ pub type UMI = fastq::Record;
 impl<R: BufRead> FastqRecords<R> {
     fn new<'a, I>(iter: I) -> Self
     where
-        I: Iterator<Item = (&'a Read, Vec<(&'a Region, Range<u32>)>, fastq::Reader<R>)>,
+        I: Iterator<Item = (&'a Read, Vec<(String, RegionType, Range<u32>)>, fastq::Reader<R>)>,
     {
         let records = iter.map(|(read, regions, reader)|
             FastqRecord {
                 id: read.read_id.to_string(),
                 is_reverse: read.is_reverse(),
-                subregion: regions.into_iter().map(|x| (x.0.region_type, x.1)).collect(),
+                subregion: regions.into_iter().map(|x| (x.1, x.2)).collect(),
                 reader,
                 min_len: read.min_len as usize,
                 max_len: read.max_len as usize,

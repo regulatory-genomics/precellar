@@ -2,13 +2,16 @@ mod read;
 mod region;
 pub mod utils;
 
+use log::warn;
+use read::{ReadSpan, RegionIndex};
 pub use read::{Read, File, UrlType, Strand};
+use region::LibSpec;
 pub use region::{Region, RegionType, SequenceType, Onlist};
 
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_yaml::{self, Value};
-use std::{fs, ops::Range, str::FromStr};
-use anyhow::{bail, Result};
+use std::{fs, str::FromStr};
+use anyhow::{bail, anyhow, Result};
 use std::path::Path;
 
 #[derive(Deserialize, Serialize, Debug, Clone, PartialEq)]
@@ -25,8 +28,8 @@ pub struct Assay {
     pub library_kit: LibraryKit,
     pub sequence_protocol: SequenceProtocol,
     pub sequence_kit: SequenceKit,
-    pub sequence_spec: read::Sequences,
-    pub library_spec: Vec<Region>,
+    pub sequence_spec: read::SeqSpec,
+    pub library_spec: LibSpec,
 }
 
 impl Assay {
@@ -46,49 +49,39 @@ impl Assay {
         min_len: Option<usize>,
         max_len: Option<usize>,
     ) -> Result<()> {
-        let all_reads = &mut self.sequence_spec;
-        let mut read_exist = false;
-        let mut read_buffer = Read::default();
-        read_buffer.read_id = read_id.to_string();
-
-        let read = if let Some(r) = all_reads.get_mut(read_id) {
-            read_exist = true;
-            r
+        let mut read_buffer = if let Some(r) = self.sequence_spec.get(read_id) {
+            r.clone()
         } else {
-            &mut read_buffer
-        };
-
-        if !read_exist {
             assert!(modality.is_some(), "modality must be provided for a new read");
             assert!(primer_id.is_some(), "primer_id must be provided for a new read");
             assert!(is_reverse.is_some(), "is_reverse must be provided for a new read");
-        }
+            Read { read_id: read_id.to_string(), ..Default::default() }
+        };
 
         if let Some(rev) = is_reverse {
-            read.strand = if rev { Strand::Neg } else { Strand::Pos };
+            read_buffer.strand = if rev { Strand::Neg } else { Strand::Pos };
         }
         if let Some(modality) = modality {
-            read.modality = Modality::from_str(modality)?;
+            read_buffer.modality = Modality::from_str(modality)?;
         }
         if let Some(primer_id) = primer_id {
-            read.primer_id = primer_id.to_string();
+            read_buffer.primer_id = primer_id.to_string();
         }
         if let Some(fastq) = fastqs {
-            read.files = Some(fastq.iter().map(|path| File::from_fastq(path)).collect::<Result<Vec<File>>>()?);
+            read_buffer.files = Some(fastq.iter().map(|path| File::from_fastq(path)).collect::<Result<Vec<File>>>()?);
         }
 
-        if (min_len.is_none() || max_len.is_none()) && read.files.is_some() {
-            let len = read.actual_len("./")?;
-            read.min_len = min_len.unwrap_or(len) as u32;
-            read.max_len = max_len.unwrap_or(len) as u32;
+        if (min_len.is_none() || max_len.is_none()) && read_buffer.files.is_some() {
+            let len = read_buffer.actual_len("./")?;
+            read_buffer.min_len = min_len.unwrap_or(len) as u32;
+            read_buffer.max_len = max_len.unwrap_or(len) as u32;
         } else {
-            read.min_len = min_len.unwrap() as u32;
-            read.max_len = max_len.unwrap() as u32;
+            read_buffer.min_len = min_len.unwrap() as u32;
+            read_buffer.max_len = max_len.unwrap() as u32;
         }
 
-        if !read_exist {
-            all_reads.insert(read_buffer.read_id.clone(), read_buffer);
-        }
+        self.validate_reads(&read_buffer)?;
+        self.sequence_spec.insert(read_id.to_string(), read_buffer);
 
         Ok(())
     }
@@ -98,27 +91,49 @@ impl Assay {
     }
 
     /// Get the index of atomic regions of each read in the sequence spec.
-    pub fn get_index_of(&self, modality: Modality) -> impl Iterator<Item = (&Read, Vec<(&Region, Range<u32>)>)> {
+    pub fn get_index_by_modality(&self, modality: Modality) -> impl Iterator<Item = (&Read, RegionIndex)> {
         self.sequence_spec.values().filter_map(move |read| if read.modality == modality {
-            let region = self.get_region_by_modality(modality)?;
-            let index = read.get_index(region)
-                .expect(&format!("Region: {} does not have Primer: {}", region.region_id, read.primer_id));
+            let index = self.get_index(&read.read_id)
+                .expect(&format!("Cannot find index for Read: {}", read.read_id));
             Some((read, index))
         } else {
             None
         })
     }
 
+    /// Get the index of atomic regions of a read in the sequence spec.
+    pub fn get_index(&self, read_id: &str) -> Option<RegionIndex> {
+        let read = self.sequence_spec.get(read_id)?;
+        let region = self.library_spec.get_parent(&read.primer_id)?;
+        read.get_index(region)
+    }
+
     pub fn iter_reads(&self, modality: Modality) -> impl Iterator<Item = &Read> {
         self.sequence_spec.values().filter(move |read| read.modality == modality)
     }
 
-    /// Get the top-level region for a given modality, i.e., the region that contains all other regions.
-    pub fn get_region_by_modality(&self, modality: Modality) -> Option<&Region> {
-        self.library_spec.iter().find(|region| {
-            region.sequence_type == SequenceType::Joined &&
-                region.region_type == RegionType::Modality(modality)
-        })
+    pub fn validate_reads(&self, read: &Read) -> Result<()> {
+        let region = self.library_spec.get_parent(&read.primer_id)
+            .ok_or_else(|| anyhow!("Primer not found: {}", read.primer_id))?;
+        // Check if the primer exists
+        if let Some(index) = read.get_index(region) {
+            match index.readlen_info {
+                ReadSpan::Covered | ReadSpan::Span(_) => {},
+                ReadSpan::NotEnough => {
+                    warn!("'{}' does not cover the region", read.read_id);
+                },
+                ReadSpan::MayReadThrough(id) => {
+                    warn!("'{}' may read through and contain sequences from: '{}'", read.read_id, id);
+                },
+                ReadSpan::ReadThrough(id) => {
+                    warn!("'{}' length exceeds maximum length of the variable-length region (insertion), \
+                    truncating the reads to the maximum length of the region. \
+                    Read reads through and contains sequences from: '{}'.
+                    If this is not the desired behavior, please adjust the region lengths.", read.read_id, id);
+                }
+            }
+        }
+        Ok(())
     }
 }
 
@@ -351,14 +366,14 @@ mod tests {
         let yaml_str = fs::read_to_string(YAML_FILE).expect("Failed to read file");
 
         let assay: Assay = serde_yaml::from_str(&yaml_str).expect("Failed to parse YAML");
-        for (read, regions) in assay.get_index_of(Modality::RNA) {
-            println!("{}: {:?}", read.read_id, regions.into_iter().map(|x| (x.0.region_type, x.1)).collect::<Vec<_>>());
+        for (read, index) in assay.get_index_by_modality(Modality::RNA) {
+            println!("{}: {:?}", read.read_id, index.index.into_iter().map(|x| (x.1, x.2)).collect::<Vec<_>>());
         }
-        for (read, regions) in assay.get_index_of(Modality::ATAC) {
-            println!("{}: {:?}", read.read_id, regions.into_iter().map(|x| (x.0.region_type, x.1)).collect::<Vec<_>>());
+        for (read, index) in assay.get_index_by_modality(Modality::ATAC) {
+            println!("{}: {:?}", read.read_id, index.index.into_iter().map(|x| (x.1, x.2)).collect::<Vec<_>>());
         }
-        for (read, regions) in assay.get_index_of(Modality::Protein) {
-            println!("{}: {:?}", read.read_id, regions.into_iter().map(|x| (x.0.region_type, x.1)).collect::<Vec<_>>());
+        for (read, index) in assay.get_index_by_modality(Modality::Protein) {
+            println!("{}: {:?}", read.read_id, index.index.into_iter().map(|x| (x.1, x.2)).collect::<Vec<_>>());
         }
     }
 }

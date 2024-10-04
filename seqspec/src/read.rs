@@ -1,20 +1,20 @@
-use crate::Modality;
+use crate::{Modality, RegionType};
 use crate::region::{Region, SequenceType};
 
 use cached_path::Cache;
-use log::{debug, warn};
 use noodles::fastq;
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize, Serializer};
 use std::ops::{Deref, DerefMut};
+use std::sync::Arc;
 use std::{io::{BufRead, BufReader}, ops::Range, path::PathBuf};
 use anyhow::Result;
 use std::path::Path;
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct Sequences(IndexMap<String, Read>);
+pub struct SeqSpec(IndexMap<String, Read>);
 
-impl Deref for Sequences {
+impl Deref for SeqSpec {
     type Target = IndexMap<String, Read>;
 
     fn deref(&self) -> &Self::Target {
@@ -22,19 +22,19 @@ impl Deref for Sequences {
     }
 }
 
-impl DerefMut for Sequences {
+impl DerefMut for SeqSpec {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.0
     }
 }
 
-impl Serialize for Sequences {
+impl Serialize for SeqSpec{
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         self.0.values().collect::<Vec<_>>().serialize(serializer)
     }
 }
 
-impl<'de> Deserialize<'de> for Sequences {
+impl<'de> Deserialize<'de> for SeqSpec {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let reads = Vec::<Read>::deserialize(deserializer)?;
         let mut sequences = IndexMap::new();
@@ -44,7 +44,7 @@ impl<'de> Deserialize<'de> for Sequences {
                 return Err(serde::de::Error::custom(format!("Duplicate read id: {}", &read_id)));
             }
         }
-        Ok(Sequences(sequences))
+        Ok(Self(sequences))
     }
 }
 
@@ -96,7 +96,7 @@ impl Read {
         Ok(record.sequence().len())
     }
 
-    pub(crate) fn get_index<'a>(&'a self, region: &'a Region) -> Option<Vec<(&'a Region, Range<u32>)>> {
+    pub(crate) fn get_index<'a>(&'a self, region: &'a Region) -> Option<RegionIndex> {
         if region.sequence_type != SequenceType::Joined {
             return None;
         }
@@ -105,7 +105,7 @@ impl Read {
 
         let result = if self.is_reverse() {
             self.get_read_span(
-                region.regions.as_ref().unwrap().iter().rev()
+                region.subregions.iter().rev()
                     .skip_while(|region| {
                         let found = region.region_type.is_sequencing_primer() && region.region_id == self.primer_id;
                         if found {
@@ -116,7 +116,7 @@ impl Read {
             )
         } else {
             self.get_read_span(
-                region.regions.as_ref().unwrap().iter()
+                region.subregions.iter()
                     .skip_while(|region| {
                         let found = region.region_type.is_sequencing_primer() && region.region_id == self.primer_id;
                         if found {
@@ -135,34 +135,48 @@ impl Read {
     }
 
     /// Get the regions of the read.
-    fn get_read_span<'a, I: Iterator<Item = &'a Region>>(&self, regions: I) -> Vec<(&'a Region, Range<u32>)> {
-        let mut result = Vec::new();
+    fn get_read_span<'a, I>(&self, mut regions: I) -> RegionIndex
+    where
+        I: Iterator<Item = &'a Arc<Region>>,
+    {
+        let mut index = Vec::new();
         let read_len = self.max_len;
         let mut cur_pos = 0;
-        for region in regions {
-            if region.min_len == region.max_len {
-                let end = (cur_pos + region.min_len).min(read_len);
-                result.push((region, cur_pos..end));
-                if end == read_len {
+        let mut readlen_info = ReadSpan::Covered;
+        while let Some(region) = regions.next() {
+            let region_id = region.region_id.clone();
+            let region_type = region.region_type;
+            if region.is_fixed_length() {  // Fixed-length region
+                let end = cur_pos + region.min_len;
+                if end >= read_len {
+                    index.push((region_id, region_type, cur_pos..read_len));
+                    if end > read_len {
+                        readlen_info = ReadSpan::NotEnough;
+                    }
                     break;
+                } else {
+                    index.push((region_id, region_type, cur_pos..end));
+                    cur_pos = end;
                 }
-                cur_pos = end;
-            } else if cur_pos + region.min_len >= read_len {
-                result.push((region, cur_pos..read_len));
+            } else if cur_pos + region.min_len >= read_len {  // Variable-length region and read is shorter
+                index.push((region_id, region_type, cur_pos..read_len));
+                readlen_info = ReadSpan::Span((read_len - cur_pos) as usize);
                 break;
-            } else if cur_pos + region.max_len < read_len {
-                warn!("Read ({}) length exceeds maximum length of the variable-length region (insertion), \
-                    truncating the reads to the maximum length of the region. \
-                    If this is not the desired behavior, please adjust the region lengths.", self.read_id);
-                result.push((region, cur_pos..cur_pos + region.max_len));
+            } else if cur_pos + region.max_len < read_len {  // Variable-length region and read is longer than max length
+                index.push((region_id, region_type, cur_pos..cur_pos + region.max_len));
+                if let Some(next_region) = regions.next() {
+                    readlen_info = ReadSpan::ReadThrough(next_region.region_id.clone());
+                }
                 break;
-            } else {
-                debug!("Reads ({}) may contain additional bases downstream of the variable-length region, e.g., adapter sequences.", self.read_id);
-                result.push((region, cur_pos..read_len));
+            } else {  // Variable-length region and read is within the length range
+                index.push((region_id, region_type, cur_pos..read_len));
+                if let Some(next_region) = regions.next() {
+                    readlen_info = ReadSpan::MayReadThrough(next_region.region_id.clone());
+                }
                 break;
             }
         }
-        result
+        RegionIndex { index, readlen_info }
     }
 
     pub fn is_reverse(&self) -> bool {
@@ -173,14 +187,27 @@ impl Read {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct RegionIndex {
+    pub index: Vec<(String, RegionType, Range<u32>)>,
+    pub readlen_info: ReadSpan,
+}
+
+#[derive(Debug, Clone)]
+pub enum ReadSpan {
+    Covered,  // The read is fully contained within the target region
+    Span(usize),  // The read spans the target region
+    NotEnough,  // Read is too short to reach the target region
+    ReadThrough(String),  // Read is longer than the target region
+    MayReadThrough(String),  // Read may be longer than the target region
+}
+
 #[derive(Deserialize, Serialize, Debug, Clone, PartialEq)]
 #[serde(rename_all = "lowercase")]
 pub enum Strand {
     Pos,
     Neg,
 }
-
-
 
 #[derive(Deserialize, Serialize, Debug, Clone, PartialEq)]
 pub struct File {
