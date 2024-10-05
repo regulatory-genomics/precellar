@@ -5,6 +5,7 @@ use cached_path::Cache;
 use noodles::fastq;
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize, Serializer};
+use std::collections::HashSet;
 use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
 use std::{io::{BufRead, BufReader}, ops::Range, path::PathBuf};
@@ -202,7 +203,7 @@ pub enum ReadSpan {
     MayReadThrough(String),  // Read may be longer than the target region
 }
 
-#[derive(Deserialize, Serialize, Debug, Clone, PartialEq)]
+#[derive(Deserialize, Serialize, Debug, Copy, Clone, PartialEq)]
 #[serde(rename_all = "lowercase")]
 pub enum Strand {
     Pos,
@@ -266,4 +267,84 @@ pub enum UrlType {
     Ftp,
     Http,
     Https,
+}
+
+pub(crate) struct ReadValidator<'a> {
+    region: &'a Region,
+    range: Option<Range<usize>>,
+    n_total: usize,
+    n_matched: usize,
+    onlist: Option<HashSet<String>>,
+    strand: Strand,
+}
+
+impl<'a> ReadValidator<'a> {
+    pub fn id(&self) -> &str {
+        &self.region.region_id
+    }
+
+    pub fn new(region: &'a Region) -> Self {
+        let onlist = if let Some(onlist) = &region.onlist {
+            Some(onlist.read().unwrap())
+        } else if region.sequence_type == SequenceType::Fixed {
+            Some(HashSet::from([region.sequence.clone()]))
+        } else {
+            None
+        };
+        Self {
+            region,
+            range: None,
+            n_total: 0,
+            n_matched: 0,
+            onlist,
+            strand: Strand::Pos,
+        }
+    }
+
+    pub fn with_range(mut self, range: Range<usize>) -> Self {
+        self.range = Some(range);
+        self
+    }
+
+    pub fn with_strand(mut self, strand: Strand) -> Self {
+        self.strand = strand;
+        self
+    }
+
+    pub fn frac_matched(&self) -> f64 {
+        self.n_matched as f64 / self.n_total as f64
+    }
+
+    pub fn validate(&mut self, seq: &[u8]) -> Result<()> {
+        self.n_total += 1;
+        let seq = if let Some(range) = &self.range {
+            &seq[range.clone()]
+        } else {
+            seq
+        };
+        if seq.len() < self.region.min_len as usize {
+            return Err(anyhow::anyhow!("Sequence too short: {}", seq.len()));
+        }
+        if seq.len() > self.region.max_len as usize {
+            return Err(anyhow::anyhow!("Sequence too long: {}", seq.len()));
+        }
+        if let Some(onlist) = &self.onlist {
+            match self.strand {
+                Strand::Neg => {
+                    let seq = crate::utils::rev_compl(seq);
+                    if onlist.contains(std::str::from_utf8(&seq)?) {
+                        self.n_matched += 1;
+                    }
+                },
+                Strand::Pos => {
+                    if onlist.contains(std::str::from_utf8(seq)?) {
+                        self.n_matched += 1;
+                    }
+                },
+            }
+        } else {
+            self.n_matched += 1;
+        }
+        Ok(())
+    }
 }

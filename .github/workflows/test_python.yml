@@ -50,6 +50,7 @@ jobs:
 
   build-wheel:
     needs: build-and-test
+    if: ${{ startsWith(github.ref, 'refs/tags/') || contains(github.event.head_commit.message, '[wheel]') }}
     uses: regulatory-genomics/precellar/.github/workflows/wheels.yml@main
 
   publish:

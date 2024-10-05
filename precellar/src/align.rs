@@ -207,7 +207,8 @@ impl<A: Alinger> FastqProcessor<A> {
     pub fn gen_raw_fastq_records(&self) -> FastqRecords<impl BufRead> {
         let modality = self.modality();
         let data = self.assay.get_index_by_modality(modality).filter_map(|(read, index)| {
-            let regions: Vec<_> = index.index.into_iter().filter(|x| x.1.is_target()).collect();
+            let regions: Vec<_> = index.index.into_iter()
+                .filter(|x| x.1.is_barcode() || x.1.is_target()).collect();
             if regions.is_empty() {
                 None
             } else {
@@ -296,7 +297,7 @@ impl<R: BufRead> FastqRecords<R> {
         let mut read1 = false;
         let mut read2 = false;
         self.0.iter().for_each(|x| {
-            x.subregion.iter().for_each(|(region_type, _)| if region_type.is_dna() {
+            x.subregion.iter().for_each(|(region_type, _)| if region_type.is_target() {
                 if x.is_reverse {
                     read1 = true;
                 } else {
@@ -346,7 +347,7 @@ impl<R: BufRead> Iterator for FastqRecords<R> {
                     } else {
                         barcode = Some(fq);
                     }
-                } else if region_type.is_dna() {
+                } else if region_type.is_target() {
                     if is_reverse {
                         read1 = Some(fq);
                     } else {

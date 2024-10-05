@@ -81,3 +81,13 @@ pub fn open_file_for_write<P: AsRef<Path>>(
     };
     Ok(writer)
 }
+
+pub fn rev_compl(seq: &[u8]) -> Vec<u8> {
+    seq.iter().rev().map(|&x| match x {
+        b'A' => b'T',
+        b'T' => b'A',
+        b'C' => b'G',
+        b'G' => b'C',
+        _ => x,
+    }).collect()
+}

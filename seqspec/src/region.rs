@@ -4,49 +4,56 @@ use crate::read::UrlType;
 use cached_path::Cache;
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
-use std::{io::BufRead, sync::Arc};
+use std::{collections::{HashMap, HashSet}, io::BufRead, sync::Arc};
 use anyhow::Result;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct LibSpec {
     modalities: IndexMap<Modality, Arc<Region>>,
-    region_map: IndexMap<String, Arc<Region>>,
-    parent_map: IndexMap<String, Arc<Region>>,
+    parent_map: HashMap<String, Arc<Region>>,
+    region_map: HashMap<String, Arc<Region>>,
 }
 
 impl Serialize for LibSpec {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        self.region_map.values().collect::<Vec<_>>().serialize(serializer)
+        self.modalities.values().collect::<Vec<_>>().serialize(serializer)
     }
 }
 
 impl<'de> Deserialize<'de> for LibSpec {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let regions = Vec::<Region>::deserialize(deserializer)?;
-        Ok(LibSpec::new(regions))
+        Ok(LibSpec::new(regions).unwrap())
     }
 }
 
 impl LibSpec {
-    pub fn new<I: IntoIterator<Item = Region>>(regions: I) -> Self {
+    /// Create a new library specification from top-level regions. The only allowed
+    /// region types are modality types.
+    pub fn new<I: IntoIterator<Item = Region>>(regions: I) -> Result<Self> {
         let mut modalities = IndexMap::new();
-        let mut region_map = IndexMap::new();
-        let mut parent_map = IndexMap::new();
+        let mut region_map = HashMap::new();
+        let mut parent_map = HashMap::new();
         for region in regions {
-            let region = Arc::new(region);
-            if region_map.insert(region.region_id.clone(), region.clone()).is_some() {
-                panic!("Duplicate region id: {}", region.region_id);
-            }
             if let RegionType::Modality(modality) = region.region_type {
+                let region = Arc::new(region);
                 if modalities.insert(modality, region.clone()).is_some() {
-                    panic!("Duplicate modality: {:?}", modality);
+                    return Err(anyhow::anyhow!("Duplicate modality: {:?}", modality));
                 }
-            }
-            for subregion in region.subregions.iter() {
-                parent_map.insert(subregion.region_id.clone(), region.clone());
-            }
+                if region_map.insert(region.region_id.clone(), region.clone()).is_some() {
+                    return Err(anyhow::anyhow!("Duplicate region id: {}", region.region_id));
+                }
+                for subregion in region.subregions.iter() {
+                    if region_map.insert(subregion.region_id.clone(), subregion.clone()).is_some() {
+                        return Err(anyhow::anyhow!("Duplicate region id: {}", subregion.region_id));
+                    }
+                    parent_map.insert(subregion.region_id.clone(), region.clone());
+                }
+            } else {
+                return Err(anyhow::anyhow!("Top-level regions must be modalities"));
+            };
         }
-        Self { modalities, region_map, parent_map }
+        Ok(Self { modalities, region_map, parent_map })
     }
 
     /// Iterate over all regions with modality type in the library.
@@ -165,9 +172,11 @@ pub enum RegionType {
 }
 
 impl RegionType {
-    /// Either a barcode, UMI, or DNA/cDNA region.
-    pub fn is_target(&self) -> bool {
-        self.is_barcode() || self.is_umi() || self.is_dna()
+    pub fn is_modality(&self) -> bool {
+        match self {
+            RegionType::Modality(_) => true,
+            _ => false,
+        }
     }
 
     pub fn is_barcode(&self) -> bool {
@@ -184,8 +193,8 @@ impl RegionType {
         }
     }
 
-    /// Check if the region contains genomic sequences.
-    pub fn is_dna(&self) -> bool {
+    /// Check if the region contains region of interest (insertion).
+    pub fn is_target(&self) -> bool {
         match self {
             RegionType::Gdna | RegionType::Cdna => true,
             _ => false,
@@ -225,7 +234,7 @@ pub struct Onlist {
 }
 
 impl Onlist {
-    pub fn read(&self) -> Result<Vec<String>> {
+    pub fn read(&self) -> Result<HashSet<String>> {
         let cache = Cache::new()?;
         let file = cache.cached_path(&self.url)?;
         let reader = std::io::BufReader::new(crate::utils::open_file_for_read(file));

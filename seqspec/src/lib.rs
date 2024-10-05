@@ -5,6 +5,7 @@ pub mod utils;
 use log::warn;
 use read::{ReadSpan, RegionIndex};
 pub use read::{Read, File, UrlType, Strand};
+use read::ReadValidator;
 use region::LibSpec;
 pub use region::{Region, RegionType, SequenceType, Onlist};
 
@@ -130,6 +131,30 @@ impl Assay {
                     truncating the reads to the maximum length of the region. \
                     Read reads through and contains sequences from: '{}'.
                     If this is not the desired behavior, please adjust the region lengths.", read.read_id, id);
+                }
+            }
+            let mut validators: Vec<_> = index.index.iter().map(|(region_id, _, range)| {
+                let region = self.library_spec.get(region_id).unwrap();
+                ReadValidator::new(region)
+                    .with_range(range.start as usize ..range.end as usize)
+                    .with_strand(read.strand)
+            }).collect();
+
+            read.open("./").unwrap().records().take(500).try_for_each(|record| {
+                let record = record?;
+                for validator in &mut validators {
+                    validator.validate(record.sequence())?;
+                }
+                anyhow::Ok(())
+            })?;
+            for validator in validators {
+                let percent_matched = validator.frac_matched() * 100.0;
+                if percent_matched < 5.0 {
+                    bail!("Read '{}' failed validation for region '{}'. \
+                    Percentage of matched bases: {:.2}%", read.read_id, validator.id(), percent_matched);
+                } else if percent_matched < 50.0 {
+                    warn!("Read '{}' has low percentage of matched bases for region '{}'. \
+                    Percentage of matched bases: {:.2}%", read.read_id, validator.id(), percent_matched);
                 }
             }
         }
