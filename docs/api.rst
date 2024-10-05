@@ -13,7 +13,7 @@ SeqSpec
 .. autosummary::
     :toctree: _autosummary
 
-    SeqSpec
+    Assay
 
 Core functions
 ~~~~~~~~~~~~~~

@@ -14,10 +14,11 @@ pub fn open_file_for_read<P: AsRef<Path>>(file: P) -> Box<dyn std::io::Read> {
 }
 
 /// Determine the file compression type. Supports gzip and zstd.
-fn detect_compression<P: AsRef<Path>>(file: P) -> Option<Compression> {
-    if flate2::read::MultiGzDecoder::new(File::open(file.as_ref()).unwrap()).header().is_some() {
+fn detect_compression<P: AsRef<Path>>(path: P) -> Option<Compression> {
+    let file = File::open(path.as_ref()).with_context(|| format!("cannot open file: {:?}", path.as_ref())).unwrap();
+    if flate2::read::MultiGzDecoder::new(file).header().is_some() {
         Some(Compression::Gzip)
-    } else if let Some(ext) = file.as_ref().extension() {
+    } else if let Some(ext) = path.as_ref().extension() {
         if ext == "zst" {
             Some(Compression::Zstd)
         } else {
@@ -90,4 +91,86 @@ pub fn rev_compl(seq: &[u8]) -> Vec<u8> {
         b'G' => b'C',
         _ => x,
     }).collect()
+}
+
+pub fn normalize_path<P1: AsRef<Path>, P2: AsRef<Path>>(work_dir: P1, path: P2) -> Result<PathBuf> {
+    let path = path.as_ref();
+    let result = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        work_dir.as_ref().join(path)
+    };
+    result.canonicalize().with_context(|| format!("Failed to normalize path: {:?}", &result))
+}
+
+pub fn unnormalize_path<P1: AsRef<Path>, P2: AsRef<Path>>(work_dir: P1, path: P2) -> Result<PathBuf> {
+    let work_dir = work_dir.as_ref().canonicalize()?;
+    let path = path.as_ref().canonicalize()?;
+    Ok(relative_path(work_dir.as_path(), path.as_path()))
+}
+
+fn relative_path(from: &Path, to: &Path) -> PathBuf {
+    let mut from_iter = from.components();
+    let mut to_iter = to.components();
+    let mut result = PathBuf::new();
+
+    let mut fr;
+    let mut to;
+    loop {
+        fr = from_iter.next();
+        to = to_iter.next();
+        if !(fr == to && fr.is_some()) {
+            break;
+        }
+    }
+
+    if fr.is_some() {
+        // Now, calculate the path to "go up" from `from` to the common ancestor
+        result.push("..");
+        for _ in from_iter {
+            result.push("..");
+        }
+    }
+
+    // Append the remaining part of `to`
+    if let Some(to) = to {
+        result.push(to);
+        for t in to_iter {
+            result.push(t);
+        }
+    }
+
+    result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_relative_path() {
+        let from = Path::new("/a/b/c");
+        let to = Path::new("/a/b/d/e");
+        assert_eq!(relative_path(from, to), PathBuf::from("../d/e"));
+
+        let from = Path::new("/a/b/c");
+        let to = Path::new("/a/b/c/d");
+        assert_eq!(relative_path(from, to), PathBuf::from("d"));
+
+        let from = Path::new("/a/b/c");
+        let to = Path::new("/a/b/c/d/e");
+        assert_eq!(relative_path(from, to), PathBuf::from("d/e"));
+
+        let from = Path::new("/a/b/c");
+        let to = Path::new("/a/b");
+        assert_eq!(relative_path(from, to), PathBuf::from(".."));
+
+        let from = Path::new("/a/b/c");
+        let to = Path::new("/a");
+        assert_eq!(relative_path(from, to), PathBuf::from("../.."));
+
+        let from = Path::new("/a/b/c");
+        let to = Path::new("/a/b/c");
+        assert_eq!(relative_path(from, to), PathBuf::from(""));
+    }
 }

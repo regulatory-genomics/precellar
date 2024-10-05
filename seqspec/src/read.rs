@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize, Serializer};
 use std::collections::HashSet;
 use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
-use std::{io::{BufRead, BufReader}, ops::Range, path::PathBuf};
+use std::{io::{BufRead, BufReader}, ops::Range};
 use anyhow::Result;
 use std::path::Path;
 
@@ -77,21 +77,20 @@ impl Default for Read {
 }
 
 impl Read {
-    pub fn open<P: AsRef<Path>>(&self, base_dir: P) -> Option<fastq::Reader<impl BufRead>> {
+    pub fn open(&self) -> Option<fastq::Reader<impl BufRead>> {
         let files = self.files.clone().unwrap_or(Vec::new())
             .into_iter().filter(|file| file.filetype == "fastq").collect::<Vec<_>>();
         if files.is_empty() {
             return None;
         }
-        let base_dir = base_dir.as_ref().to_path_buf();
         let reader = multi_reader::MultiReader::new(
-            files.into_iter().map(move |file| file.open(&base_dir))
+            files.into_iter().map(move |file| file.open())
         );
         Some(fastq::Reader::new(BufReader::new(reader)))
     }
 
-    pub fn actual_len<P: AsRef<Path>>(&self, base_dir: P) -> Result<usize> {
-        let mut reader = self.open(base_dir).unwrap();
+    pub fn actual_len(&self) -> Result<usize> {
+        let mut reader = self.open().unwrap();
         let mut record = fastq::Record::default();
         reader.read_record(&mut record)?;
         Ok(record.sequence().len())
@@ -236,20 +235,30 @@ impl File {
         })
     }
 
+    pub(crate) fn normalize_path<P: AsRef<Path>>(&mut self, work_dir: P) -> Result<()> {
+        if self.urltype == UrlType::Local {
+            self.url = crate::utils::normalize_path(work_dir, &mut self.url)?
+                .to_str().unwrap().to_owned();
+        }
+        Ok(())
+    }
+
+    pub(crate) fn unnormalize_path<P: AsRef<Path>>(&mut self, work_dir: P) -> Result<()> {
+        if self.urltype == UrlType::Local {
+            self.url = crate::utils::unnormalize_path(work_dir, &mut self.url)?
+                .to_str().unwrap().to_owned();
+        }
+        Ok(())
+    }
+
     /// Open the file for reading.
     /// If the file is remote, it will be downloaded to the cache directory.
     /// If the file is local, it will be opened directly.
     /// The base_dir is used to resolve relative paths.
-    pub fn open<P: AsRef<Path>>(&self, base_dir: P) -> Box<dyn std::io::Read> {
+    pub fn open(&self) -> Box<dyn std::io::Read> {
         match self.urltype {
             UrlType::Local => {
-                let mut path = PathBuf::from(&self.url);
-                path = if path.is_absolute() {
-                    path
-                } else {
-                    base_dir.as_ref().join(path)
-                };
-                Box::new(crate::utils::open_file_for_read(path))
+                Box::new(crate::utils::open_file_for_read(&self.url))
             }
             _ => {
                 let cache = Cache::new().unwrap();

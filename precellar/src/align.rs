@@ -5,7 +5,6 @@ use crate::qc::{AlignQC, Metrics};
 use bstr::BString;
 use kdam::{tqdm, BarExt};
 use std::ops::Range;
-use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::collections::{HashMap, HashSet};
 use std::io::BufRead;
@@ -52,7 +51,6 @@ impl Alinger for BurrowsWheelerAligner {
 }
 
 pub struct FastqProcessor<A> {
-    base_dir: PathBuf,
     assay: Assay,
     aligner: A,
     current_modality: Option<Modality>,
@@ -68,14 +66,9 @@ impl<A: Alinger> FastqProcessor<A> {
     pub fn new(assay: Assay, aligner: A) -> Self {
         Self {
             assay, aligner, current_modality: None, metrics: HashMap::new(),
-            align_qc: HashMap::new(), mito_dna: HashSet::new(), base_dir: PathBuf::from("./"),
+            align_qc: HashMap::new(), mito_dna: HashSet::new(),
             barcode_correct_prob: 0.975,
         }
-    }
-
-    pub fn with_base_dir<P: AsRef<Path>>(mut self, base_dir: P) -> Self {
-        self.base_dir = base_dir.as_ref().to_path_buf();
-        self
     }
 
     pub fn with_barcode_correct_prob(mut self, prob: f64) -> Self {
@@ -212,7 +205,7 @@ impl<A: Alinger> FastqProcessor<A> {
             if regions.is_empty() {
                 None
             } else {
-                Some((read, regions, read.open(self.base_dir.clone()).unwrap()))
+                Some((read, regions, read.open().unwrap()))
             }
         });
         FastqRecords::new(data)
@@ -227,7 +220,7 @@ impl<A: Alinger> FastqProcessor<A> {
             .expect("No barcode region found");
         let range = index.index.into_iter().find(|x| x.1.is_barcode()).unwrap().2;
 
-        read.open(&self.base_dir).unwrap().records().for_each(|record| {
+        read.open().unwrap().records().for_each(|record| {
             let mut record = record.unwrap();
             record = slice_fastq_record(&record, range.start as usize, range.end as usize);
             if read.is_reverse() {

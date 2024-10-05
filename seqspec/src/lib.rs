@@ -11,12 +11,14 @@ pub use region::{Region, RegionType, SequenceType, Onlist};
 
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_yaml::{self, Value};
-use std::{fs, str::FromStr};
+use std::{fs, path::PathBuf, str::FromStr};
 use anyhow::{bail, anyhow, Result};
 use std::path::Path;
 
 #[derive(Deserialize, Serialize, Debug, Clone, PartialEq)]
 pub struct Assay {
+    #[serde(skip, default)]
+    pub file: Option<PathBuf>,
     pub seqspec_version: String,
     pub assay_id: String,
     pub name: String,
@@ -35,8 +37,44 @@ pub struct Assay {
 
 impl Assay {
     pub fn from_path<P: AsRef<Path>>(path: P) -> Result<Self> {
-        let yaml_str = fs::read_to_string(path)?;
+        let yaml_str = fs::read_to_string(&path)?;
+        let mut assay: Assay = serde_yaml::from_str(&yaml_str)?;
+        assay.file = Some(path.as_ref().to_path_buf());
+        assay.normalize_all_paths();
+        Ok(assay)
+    }
+
+    pub fn from_url(url: &str) -> Result<Self> {
+        let yaml_str = reqwest::blocking::get(url)?.text()?;
         Ok(serde_yaml::from_str(&yaml_str)?)
+    }
+
+    /// Normalize all paths in the sequence spec.
+    pub fn normalize_all_paths(&mut self) {
+        if let Some(file) = &self.file {
+            let base_dir = file.parent().unwrap();
+            self.sequence_spec.values_mut().for_each(|read| {
+                if let Some(files) = &mut read.files {
+                    files.iter_mut().for_each(|file| {
+                        if let Err(e) = file.normalize_path(base_dir) {
+                            warn!("{}", e);
+                        }
+                    });
+                }
+            });
+        }
+    }
+
+    pub fn unnormalize_all_paths<P: AsRef<Path>>(&mut self, base_dir: P) {
+        self.sequence_spec.values_mut().for_each(|read| {
+            if let Some(files) = &mut read.files {
+                files.iter_mut().for_each(|file| {
+                    if let Err(e) = file.unnormalize_path(base_dir.as_ref()) {
+                        warn!("Failed to unnormalize path: {}", e);
+                    }
+                });
+            }
+        });
     }
 
     /// Update read information. If the read does not exist, it will be created.
@@ -73,7 +111,7 @@ impl Assay {
         }
 
         if (min_len.is_none() || max_len.is_none()) && read_buffer.files.is_some() {
-            let len = read_buffer.actual_len("./")?;
+            let len = read_buffer.actual_len()?;
             read_buffer.min_len = min_len.unwrap_or(len) as u32;
             read_buffer.max_len = max_len.unwrap_or(len) as u32;
         } else {
@@ -140,7 +178,7 @@ impl Assay {
                     .with_strand(read.strand)
             }).collect();
 
-            read.open("./").unwrap().records().take(500).try_for_each(|record| {
+            read.open().unwrap().records().take(500).try_for_each(|record| {
                 let record = record?;
                 for validator in &mut validators {
                     validator.validate(record.sequence())?;

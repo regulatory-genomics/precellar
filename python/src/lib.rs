@@ -48,8 +48,8 @@ fn make_genome_index(
 /// Parameters
 /// ----------
 ///
-/// seqspec: SeqSpec | Path
-///     A SeqSpec object or file path to the yaml sequencing specification file, see
+/// assay: Assay | Path
+///     A Assay object or file path to the yaml sequencing specification file, see
 ///     https://github.com/pachterlab/seqspec.
 /// genom_index: Path
 ///     File path to the genome index. The genome index can be created by the `make_genome_index` function.
@@ -82,14 +82,14 @@ fn make_genome_index(
 #[pyfunction]
 #[pyo3(
     signature = (
-        seqspec, genome_index, *,
+        assay, genome_index, *,
         modality, output_bam=None, output_fragment=None,
         mito_dna=vec!["chrM".to_owned(), "M".to_owned()],
         shift_left=4, shift_right=-5,
         compression=None, compression_level=None,
         temp_dir=None, num_threads=8,
     ),
-    text_signature = "(seqspec, genome_index, *,
+    text_signature = "(assay, genome_index, *,
         modality, output_bam=None, output_fragment=None,
         mito_dna=['chrM', 'M'],
         shift_left=4, shift_right=-5,
@@ -98,7 +98,7 @@ fn make_genome_index(
 )]
 fn align(
     py: Python<'_>,
-    seqspec: Bound<'_, PyAny>,
+    assay: Bound<'_, PyAny>,
     genome_index: PathBuf,
     modality: &str,
     output_bam: Option<PathBuf>,
@@ -114,19 +114,10 @@ fn align(
     assert!(output_bam.is_some() || output_fragment.is_some(), "either output_bam or output_fragment must be provided");
 
     let modality = Modality::from_str(modality).unwrap();
-    let spec;
-    let base_dir;
-    match seqspec.extract::<PathBuf>() {
-        Ok(p) => {
-            spec = seqspec::Assay::from_path(&p).unwrap();
-            base_dir = p.parent().unwrap().to_path_buf();
-        },
-        _ => {
-            let s: PyRef<Assay> = seqspec.extract()?;
-            spec = s.0.clone();
-            base_dir = ".".into();
-        }
-    }
+    let spec = match assay.extract::<PathBuf>() {
+        Ok(p) => seqspec::Assay::from_path(&p).unwrap(),
+        _ => assay.extract::<PyRef<Assay>>()?.0.clone(),
+    };
 
     let aligner = BurrowsWheelerAligner::new(
         FMIndex::read(genome_index).unwrap(),
@@ -135,8 +126,7 @@ fn align(
     );
     let header = aligner.header();
     let mut processor = FastqProcessor::new(spec, aligner).with_modality(modality)
-        .with_barcode_correct_prob(0.9)
-        .with_base_dir(base_dir);
+        .with_barcode_correct_prob(0.9);
     let mut fragment_qc = FragmentQC::default();
     mito_dna.into_iter().for_each(|x| {
         processor.add_mito_dna(&x);

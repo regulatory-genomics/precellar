@@ -1,10 +1,9 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, path::PathBuf};
 
 use pyo3::prelude::*;
 use seqspec::{Read, Region};
 use anyhow::Result;
 use termtree::Tree;
-use cached_path::Cache;
 
 /** A Assay object.
     
@@ -33,15 +32,27 @@ impl Assay {
     #[new]
     #[pyo3(signature = (path))] 
     pub fn new(path: &str) -> Result<Self> {
-        let cache = Cache::new()?;
-        let file = cache.cached_path(path)?;
-        let assay = seqspec::Assay::from_path(file)?;
+        let assay = if url::Url::parse(path).is_ok() {
+            seqspec::Assay::from_url(path)?
+        } else {
+            seqspec::Assay::from_path(path)?
+        };
         Ok(Assay(assay))
     }
 
-    /// Update read information in the SeqSpec object.
+    /// Filename of the seqspec file.
+    ///
+    /// Returns
+    /// -------
+    /// Path | None
+    #[getter]
+    pub fn filename(&self) -> Option<PathBuf> {
+        self.0.file.clone()
+    }
+
+    /// Update read information in the Assay object.
     /// 
-    /// This method updates the read information in the SeqSpec object.
+    /// This method updates the read information in the Assay object.
     /// If the read does not exist, it will be created.
     ///
     /// Parameters
@@ -49,17 +60,17 @@ impl Assay {
     /// read_id: str
     ///     The id of the read.
     /// modality: str | None
-    ///    The modality of the read.
+    ///     The modality of the read.
     /// primer_id: str | None
-    ///   The id of the primer.
+    ///     The id of the primer.
     /// is_reverse: bool | None
-    ///   Whether the read is reverse.
+    ///     Whether the read is reverse.
     /// fastq: Path | list[Path] | None
-    ///    The path to the fastq file containing the reads.
+    ///     The path to the fastq file containing the reads.
     /// min_len: int | None
-    ///   The minimum length of the read. If not provided, the minimum length is inferred from the fastq file.
+    ///     The minimum length of the read. If not provided, the minimum length is inferred from the fastq file.
     /// max_len: int | None
-    ///   The maximum length of the read. If not provided, the maximum length is inferred from the fastq file.
+    ///     The maximum length of the read. If not provided, the maximum length is inferred from the fastq file.
     #[pyo3(
         signature = (read_id, *, modality=None, primer_id=None, is_reverse=None, fastq=None, min_len=None, max_len=None),
         text_signature = "($self, read_id, *, modality=None, primer_id=None, is_reverse=None, fastq=None, min_len=None, max_len=None)",
@@ -86,9 +97,9 @@ impl Assay {
         )
     }
 
-    /// Delete a read from the SeqSpec object.
+    /// Delete a read from the Assay object.
     #[pyo3(signature = (read_id), text_signature = "($self, read_id)")]
-    pub fn delete_read(&mut self, read_id: &str) {
+    fn delete_read(&mut self, read_id: &str) {
         self.0.delete_read(read_id);
     }
 
@@ -106,9 +117,40 @@ impl Assay {
     pub fn index(&mut self, modality: &str) -> Result<()> {
     */
 
+    /// Convert the Assay object to a yaml string.
+    /// 
+    /// This method converts the Assay object to a yaml string. If you want to save the
+    /// Assay object to a yaml file, use the `.save()` method as it will convert all paths
+    /// to relative paths so that the files can be moved without breaking the Assay object.
+    /// 
+    /// Returns
+    /// -------
+    /// str
+    ///   The yaml string representation of the Assay object.
+    /// 
+    /// See Also
+    /// --------
+    /// save
     #[pyo3(text_signature = "($self)")]
-    pub fn to_yaml(&self) -> String {
-        serde_yaml::to_string(&self.0).unwrap()
+    fn to_yaml(&mut self) -> Result<String> {
+        Ok(serde_yaml::to_string(&self.0)?)
+    }
+
+    /// Save the Assay object to a yaml file.
+    /// 
+    /// This method saves the Assay object to a yaml file. All paths in the Assay object
+    /// will be converted to relative paths with respect to the location of the output file.
+    /// 
+    /// Parameters
+    /// ----------
+    /// out: Path
+    ///    The path to save the yaml file.
+    #[pyo3(text_signature = "($self, out)")]
+    fn save(&self, out: PathBuf) -> Result<()> {
+        let mut assay = self.0.clone();
+        assay.unnormalize_all_paths(out.parent().unwrap());
+        std::fs::write(&out, serde_yaml::to_string(&assay)?)?;
+        Ok(())
     }
 
     fn __repr__(&self) -> String {
