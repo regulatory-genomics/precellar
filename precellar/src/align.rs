@@ -60,6 +60,7 @@ pub struct FastqProcessor<A> {
     barcode_correct_prob: f64,  // if the posterior probability of a correction
                                 // exceeds this threshold, the barcode will be corrected.
                                 // cellrange uses 0.975 for ATAC and 0.9 for multiome.
+    mismatch_in_barcode: usize, // The number of mismatches allowed in barcode
 }
 
 impl<A: Alinger> FastqProcessor<A> {
@@ -68,6 +69,7 @@ impl<A: Alinger> FastqProcessor<A> {
             assay, aligner, current_modality: None, metrics: HashMap::new(),
             align_qc: HashMap::new(), mito_dna: HashSet::new(),
             barcode_correct_prob: 0.975,
+            mismatch_in_barcode: 1,
         }
     }
 
@@ -127,22 +129,23 @@ impl<A: Alinger> FastqProcessor<A> {
             let results = barcodes.into_par_iter().zip(alignments).map(|(barcode, (ali1, ali2))| {
                 let corrected_barcode = corrector.correct(
                     whitelist.get_barcode_counts(),
-                    std::str::from_utf8(barcode.sequence()).unwrap(),
-                    barcode.quality_scores()
+                    barcode.sequence(),
+                    barcode.quality_scores(),
+                    self.mismatch_in_barcode,
                 ).ok();
                 let ali1_ = add_cell_barcode(
                     &header,
                     &ali1,
-                    std::str::from_utf8(barcode.sequence()).unwrap(),
+                    barcode.sequence(),
                     barcode.quality_scores(),
-                    corrected_barcode.as_ref().map(|x| x.as_str())
+                    corrected_barcode,
                 ).unwrap();
                 let ali2_ = add_cell_barcode(
                     &header,
                     &ali2,
-                    std::str::from_utf8(barcode.sequence()).unwrap(),
+                    barcode.sequence(),
                     barcode.quality_scores(),
-                    corrected_barcode.as_ref().map(|x| x.as_str())
+                    corrected_barcode,
                 ).unwrap();
                 {
                     let mut align_qc_lock = align_qc.lock().unwrap();
@@ -160,16 +163,17 @@ impl<A: Alinger> FastqProcessor<A> {
             let results = barcodes.into_par_iter().zip(alignments).map(|(barcode, alignment)| {
                 let corrected_barcode = corrector.correct(
                     whitelist.get_barcode_counts(),
-                    std::str::from_utf8(barcode.sequence()).unwrap(),
-                    barcode.quality_scores()
+                    barcode.sequence(),
+                    barcode.quality_scores(),
+                    self.mismatch_in_barcode,
                 ).ok();
                 let ali = add_cell_barcode(
                     &header,
                     &alignment,
-                    std::str::from_utf8(barcode.sequence()).unwrap(),
+                    barcode.sequence(),
                     
                     barcode.quality_scores(),
-                    corrected_barcode.as_ref().map(|x| x.as_str())
+                    corrected_barcode,
                 ).unwrap();
                 { align_qc.lock().unwrap().update(&ali, &header); }
                 ali
@@ -226,7 +230,7 @@ impl<A: Alinger> FastqProcessor<A> {
             if read.is_reverse() {
                 record = rev_compl_fastq_record(record);
             }
-            whitelist.count_barcode(std::str::from_utf8(record.sequence()).unwrap(), record.quality_scores());
+            whitelist.count_barcode(record.sequence(), record.quality_scores());
         });
 
         self.metrics.entry(modality).or_insert_with(Metrics::default)
@@ -387,9 +391,9 @@ impl<R: BufRead> Iterator for FastqRecordChunk<R> {
 fn add_cell_barcode<R: Record>(
     header: &sam::Header,
     record: &R,
-    ori_barcode: &str,
+    ori_barcode: &[u8],
     ori_qual: &[u8],
-    correct_barcode: Option<&str>,
+    correct_barcode: Option<&[u8]>,
 ) -> std::io::Result<RecordBuf> {
     let mut record_buf = RecordBuf::try_from_alignment_record(header, record)?;
     let data = record_buf.data_mut();
