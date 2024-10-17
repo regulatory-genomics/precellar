@@ -178,8 +178,13 @@ impl BarcodeCorrector {
     }
 }
 
+/// Barcode correction problem: Given a whitelist of barcodes, and a sequenced barcode with quality scores, 
+/// decide which barcode in the whitelist generated the sequenced barcode.
+
 /// Convert quality scores to base-calling error probabilities.
+/// This is interpreted as the likelihood of being a valid barcode base.
+#[inline(always)]
 fn probability(qual: u8) -> f64 {
-    let offset = 33.0;
+    let offset = 33.0;  // Illumina quality score offset
     10f64.powf(-((qual as f64 - offset) / 10.0))
 }

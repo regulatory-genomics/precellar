@@ -2,9 +2,6 @@
 
 import re
 import sys
-import warnings
-import os
-import subprocess
 
 import precellar
 from precellar import utils

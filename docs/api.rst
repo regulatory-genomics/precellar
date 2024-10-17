@@ -7,8 +7,8 @@ methods.
 
 .. currentmodule:: precellar
 
-SeqSpec
-~~~~~~~
+Assay
+~~~~~
 
 .. autosummary::
     :toctree: _autosummary

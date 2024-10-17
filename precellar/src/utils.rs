@@ -1,36 +1,94 @@
-use log::warn;
+use std::ops::Range;
+
 use noodles::fastq;
 use regex::Regex;
 use anyhow::{Result, anyhow};
 use bstr::ByteSlice;
 
-pub fn strip_barcode_from_read_name(
-    mut fq: fastq::Record,
-    regex: &Regex,
-    left_add: usize,
-    right_add: usize,
-) -> Result<(fastq::Record, String)> {
-    let read_name = fq.name().to_str()?;
-    let (barcode, name) = remove_barcode(read_name, regex, left_add, right_add)?;
-    *fq.name_mut() = name.into();
-    Ok((fq, barcode))
+#[derive(Debug, Clone)]
+pub enum GroupIndex {
+    Position(usize),
+    Named(String),
 }
 
-fn remove_barcode(name: &str, re: &Regex, left_add: usize, right_add: usize) -> Result<(String, String)> {
-    let mut mat = re.captures(name)
-        .and_then(|x| x.get(1))
-        .ok_or(anyhow!("The regex must contain exactly one capturing group matching the barcode"))?
-        .range();
-    let barcode = name.get(mat.clone()).unwrap().to_string();
-    if barcode.is_empty() {
-        warn!("regex match is empty for read name: {}", name);
-        Ok((barcode, name.to_string()))
+impl From<usize> for GroupIndex {
+    fn from(i: usize) -> Self {
+        GroupIndex::Position(i)
+    }
+}
+
+impl From<&str> for GroupIndex {
+    fn from(s: &str) -> Self {
+        GroupIndex::Named(s.to_string())
+    }
+}
+
+impl From<String> for GroupIndex {
+    fn from(s: String) -> Self {
+        GroupIndex::Named(s)
+    }
+}
+
+pub fn strip_fastq(
+    mut fq: fastq::Record,
+    regex: &Regex,
+    group_indices: Option<&[GroupIndex]>,
+    from_description: bool,
+) -> Result<(fastq::Record, Option<Vec<String>>)> {
+    let txt = if from_description {
+        fq.description().to_str()?
     } else {
-        mat = (mat.start - left_add)..(mat.end + right_add);
-        let new_name = name.get(..mat.start).unwrap().to_string() + name.get(mat.end..).unwrap();
-        Ok((barcode, new_name))
+        fq.name().to_str()?
+    };
+
+    let (new_name, matches) = strip_from(txt, regex, group_indices)?;
+
+    if from_description {
+        *fq.description_mut() = new_name.into();
+    } else {
+        *fq.name_mut() = new_name.into();
     }
 
+    Ok((fq, matches))
+}
+
+fn strip_from(
+    txt: &str,
+    regex: &Regex,
+    group_indices: Option<&[GroupIndex]>,
+) -> Result<(String, Option<Vec<String>>)> {
+    let caps = regex.captures(txt).ok_or(anyhow!("No match found for: {}", txt))?;
+    let new_name = remove_substrings(txt, caps.iter().skip(1).map(|m| m.unwrap().range()));
+    let matches = if let Some(indices) = group_indices {
+        let matches = indices.iter().map(|idx| match idx {
+            GroupIndex::Position(i) => caps.get(*i+1).map(|m| m.as_str().to_string()),
+            GroupIndex::Named(name) => caps.name(name).map(|m| m.as_str().to_string()),
+        }).collect::<Option<Vec<_>>>().ok_or(anyhow!("Failed to extract barcodes"))?;
+        Some(matches)
+    } else {
+        None
+    };
+    Ok((new_name, matches))
+}
+
+fn remove_substrings<I>(s: &str, ranges: I) -> String
+where
+    I: IntoIterator<Item = Range<usize>>,
+{
+    let mut result = String::with_capacity(s.len());
+    let mut last_index = 0;
+
+    for Range {start, end} in ranges.into_iter() {
+        // Ensure valid ranges and skip invalid ones
+        if start < end && end <= s.len() {
+            result.push_str(&s[last_index..start]); // Append part before the range
+            last_index = end; // Move past the removed range
+        }
+    }
+
+    // Append remaining part after the last removed range
+    result.push_str(&s[last_index..]);
+    result
 }
 
 #[cfg(test)]
@@ -40,9 +98,12 @@ mod tests {
     #[test]
     fn test_strip_barcode() {
         let name = "A01535:24:HW2MMDSX2:2:1359:8513:3458:bd:69:Y6:10:TGATAGGTTG";
-        let re = Regex::new(r"(..:..:..:..):\w+$").unwrap();
-        let (barcode, new_name) = remove_barcode(name, &re, 1, 1).unwrap();
-        assert_eq!(barcode, "bd:69:Y6:10");
-        assert_eq!(new_name, "A01535:24:HW2MMDSX2:2:1359:8513:3458TGATAGGTTG");
+        let re = Regex::new(r"3458(:)(?<barcode>..:..:..:..)(:)(?<umi>[ATCG]+)$").unwrap();
+        let indices = ["barcode".into(), "umi".into()];
+        let (new_name, matches) = strip_from(name, &re, Some(indices.as_slice())).unwrap();
+        let matches = matches.unwrap();
+        assert_eq!(matches[0], "bd:69:Y6:10");
+        assert_eq!(matches[1], "TGATAGGTTG");
+        assert_eq!(new_name, "A01535:24:HW2MMDSX2:2:1359:8513:3458");
     }
 }
