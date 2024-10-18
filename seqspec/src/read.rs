@@ -285,6 +285,7 @@ pub(crate) struct ReadValidator<'a> {
     n_matched: usize,
     onlist: Option<HashSet<String>>,
     strand: Strand,
+    tolerance: f64,
 }
 
 impl<'a> ReadValidator<'a> {
@@ -292,11 +293,13 @@ impl<'a> ReadValidator<'a> {
         &self.region.region_id
     }
 
+    pub fn sequence_type(&self) -> SequenceType {
+        self.region.sequence_type
+    }
+
     pub fn new(region: &'a Region) -> Self {
         let onlist = if let Some(onlist) = &region.onlist {
             Some(onlist.read().unwrap())
-        } else if region.sequence_type == SequenceType::Fixed {
-            Some(HashSet::from([region.sequence.clone()]))
         } else {
             None
         };
@@ -307,6 +310,7 @@ impl<'a> ReadValidator<'a> {
             n_matched: 0,
             onlist,
             strand: Strand::Pos,
+            tolerance: 0.2,
         }
     }
 
@@ -324,36 +328,84 @@ impl<'a> ReadValidator<'a> {
         self.n_matched as f64 / self.n_total as f64
     }
 
-    pub fn validate(&mut self, seq: &[u8]) -> Result<()> {
+    /// Validate a sequence. Return true if the sequence is valid.
+    /// For fixed sequences, the sequence is checked against the fixed sequence with
+    /// certain tolerance (default is 1 mismatches).
+    /// Note that for onlist, we check for the exact match.
+    pub fn validate(&mut self, seq: &[u8]) -> ValidateResult {
         self.n_total += 1;
         let seq = if let Some(range) = &self.range {
             &seq[range.clone()]
         } else {
             seq
         };
-        if seq.len() < self.region.min_len as usize {
-            return Err(anyhow::anyhow!("Sequence too short: {}", seq.len()));
-        }
-        if seq.len() > self.region.max_len as usize {
-            return Err(anyhow::anyhow!("Sequence too long: {}", seq.len()));
-        }
-        if let Some(onlist) = &self.onlist {
+        let len = seq.len();
+        if len < self.region.min_len as usize {
+            ValidateResult::TooShort((seq.len(), self.region.min_len as usize))
+        } else if seq.len() > self.region.max_len as usize {
+            ValidateResult::TooLong((seq.len(), self.region.max_len as usize))
+        } else if self.sequence_type() == SequenceType::Fixed {
+            let d = hamming::distance(seq, self.region.sequence.as_bytes()) as f64;
+            if d <= self.tolerance * len as f64 {
+                self.n_matched += 1;
+                ValidateResult::Valid
+            } else {
+                ValidateResult::MisMatch(d as usize)
+            }
+        } else if let Some(onlist) = &self.onlist {
             match self.strand {
                 Strand::Neg => {
                     let seq = crate::utils::rev_compl(seq);
-                    if onlist.contains(std::str::from_utf8(&seq)?) {
+                    if onlist.contains(std::str::from_utf8(&seq).unwrap()) {
                         self.n_matched += 1;
+                        ValidateResult::Valid
+                    } else {
+                        ValidateResult::OnlistFail
                     }
                 },
                 Strand::Pos => {
-                    if onlist.contains(std::str::from_utf8(seq)?) {
+                    if onlist.contains(std::str::from_utf8(seq).unwrap()) {
                         self.n_matched += 1;
+                        ValidateResult::Valid
+                    } else {
+                        ValidateResult::OnlistFail
                     }
                 },
             }
         } else {
             self.n_matched += 1;
+            ValidateResult::Valid
         }
-        Ok(())
+    }
+}
+
+#[derive(Debug, Clone)]
+pub(crate) enum ValidateResult {
+    TooShort((usize, usize)),
+    TooLong((usize, usize)),
+    OnlistFail,
+    MisMatch(usize),
+    Valid,
+}
+
+impl std::fmt::Display for ValidateResult {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ValidateResult::TooShort((n, min_len)) => {
+                write!(f, "Sequence too short: {} < {}", n, min_len)
+            },
+            ValidateResult::TooLong((n, max_len)) => {
+                write!(f, "Sequence too long: {} > {}", n, max_len)
+            },
+            ValidateResult::OnlistFail => {
+                write!(f, "Not on the onlist")
+            },
+            ValidateResult::MisMatch(n) => {
+                write!(f, "Mismatch: {}", n)
+            },
+            ValidateResult::Valid => {
+                write!(f, "Valid")
+            },
+        }
     }
 }

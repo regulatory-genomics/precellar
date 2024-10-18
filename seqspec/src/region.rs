@@ -4,7 +4,7 @@ use crate::read::UrlType;
 use cached_path::Cache;
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
-use std::{collections::{HashMap, HashSet}, io::BufRead, sync::Arc};
+use std::{collections::{HashMap, HashSet}, io::BufRead, path::Path, sync::Arc};
 use anyhow::Result;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -64,6 +64,10 @@ impl LibSpec {
     /// Iterate over all regions in the library.
     pub fn regions(&self) -> impl Iterator<Item = &Arc<Region>> {
         self.region_map.values()
+    }
+
+    pub fn regions_mut(&mut self) -> impl Iterator<Item = &mut Arc<Region>> {
+        self.region_map.values_mut()
     }
 
     pub fn get_modality(&self, modality: &Modality) -> Option<&Arc<Region>> {
@@ -247,6 +251,22 @@ impl Onlist {
         let file = cache.cached_path(&self.url)?;
         let reader = std::io::BufReader::new(crate::utils::open_file_for_read(file));
         Ok(reader.lines().map(|x| x.unwrap()).collect())
+    }
+
+    pub(crate) fn normalize_path<P: AsRef<Path>>(&mut self, work_dir: P) -> Result<()> {
+        if self.urltype == UrlType::Local {
+            self.url = crate::utils::normalize_path(work_dir, &mut self.url)?
+                .to_str().unwrap().to_owned();
+        }
+        Ok(())
+    }
+
+    pub(crate) fn unnormalize_path<P: AsRef<Path>>(&mut self, work_dir: P) -> Result<()> {
+        if self.urltype == UrlType::Local {
+            self.url = crate::utils::unnormalize_path(work_dir, &mut self.url)?
+                .to_str().unwrap().to_owned();
+        }
+        Ok(())
     }
 }
 

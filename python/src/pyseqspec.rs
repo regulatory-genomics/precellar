@@ -96,7 +96,7 @@ impl Assay {
         signature = (read_id, *, modality=None, primer_id=None, is_reverse=None, fastq=None, min_len=None, max_len=None),
         text_signature = "($self, read_id, *, modality=None, primer_id=None, is_reverse=None, fastq=None, min_len=None, max_len=None)",
     )]
-    pub fn update_read(
+    fn update_read(
         &mut self,
         read_id: &str,
         modality: Option<&str>,
@@ -123,6 +123,11 @@ impl Assay {
     #[pyo3(signature = (read_id), text_signature = "($self, read_id)")]
     fn delete_read(&mut self, read_id: &str) {
         self.0.delete_read(read_id);
+    }
+
+    fn validate(&self, modality: &str, out_dir: PathBuf) -> Result<()> {
+        let modality = Modality::from_str(modality)?;
+        self.0.iter_reads(modality).try_for_each(|read| self.0.validate(read, &out_dir))
     }
 
     /*

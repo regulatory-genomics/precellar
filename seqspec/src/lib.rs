@@ -3,14 +3,16 @@ mod region;
 pub mod utils;
 
 use log::warn;
-use read::{ReadSpan, RegionIndex};
+use read::{ReadSpan, RegionIndex, ValidateResult};
 pub use read::{Read, File, UrlType, Strand};
 use read::ReadValidator;
 use region::LibSpec;
 pub use region::{Region, RegionType, SequenceType, Onlist};
+use noodles::fastq;
 
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_yaml::{self, Value};
+use utils::open_file_for_write;
 use std::{fs, path::PathBuf, str::FromStr, sync::Arc};
 use anyhow::{bail, anyhow, Result};
 use std::path::Path;
@@ -50,6 +52,7 @@ impl Assay {
     }
 
     /// Normalize all paths in the sequence spec.
+    /// This is used to bring relative paths to absolute paths.
     pub fn normalize_all_paths(&mut self) {
         if let Some(file) = &self.file {
             let base_dir = file.parent().unwrap();
@@ -60,6 +63,13 @@ impl Assay {
                             warn!("{}", e);
                         }
                     });
+                }
+            });
+            self.library_spec.regions_mut().for_each(|region| {
+                if let Some(onlist) = &mut Arc::<Region>::get_mut(region).unwrap().onlist {
+                    if let Err(e) = onlist.normalize_path(base_dir) {
+                        warn!("{}", e);
+                    }
                 }
             });
         }
@@ -75,6 +85,15 @@ impl Assay {
                 });
             }
         });
+        /*
+        self.library_spec.regions_mut().for_each(|region| {
+            if let Some(onlist) = &mut Arc::<Region>::get_mut(region).unwrap().onlist {
+                if let Err(e) = onlist.unnormalize_path(base_dir.as_ref()) {
+                    warn!("Failed to unnormalize path: {}", e);
+                }
+            }
+        });
+        */
     }
 
     /// Add default Illumina reads to the sequence spec.
@@ -223,7 +242,7 @@ impl Assay {
             read_buffer.max_len = max_len.unwrap() as u32;
         }
 
-        self.validate_reads(&read_buffer)?;
+        self.verify(&read_buffer)?;
         self.sequence_spec.insert(read_id.to_string(), read_buffer);
 
         Ok(())
@@ -264,7 +283,46 @@ impl Assay {
         self.sequence_spec.values().filter(move |read| read.modality == modality)
     }
 
-    pub fn validate_reads(&self, read: &Read) -> Result<()> {
+    /// Demultiplex reads into separate files based on the primer ID.
+    pub fn validate<P: AsRef<Path>>(&self, read: &Read, dir: P) -> Result<()> {
+        let region = self.library_spec.get_parent(&read.primer_id)
+            .ok_or_else(|| anyhow!("Primer not found: {}", read.primer_id))?;
+        if let Some(index) = read.get_index(region) {
+            let output_valid = dir.as_ref().join(format!("{}.fq.zst", read.read_id));
+            let output_valid = open_file_for_write(output_valid, None, None, 8)?;
+            let mut output_valid = fastq::io::Writer::new(output_valid);
+            let output_other = dir.as_ref().join(format!("Invalid_{}.fq.zst", read.read_id));
+            let output_other = open_file_for_write(output_other, None, None, 8)?;
+            let mut output_other = fastq::io::Writer::new(output_other);
+            if let Some(mut reader) = read.open() {
+                let mut validators: Vec<_> = index.index.iter().map(|(region_id, _, range)| {
+                    let region = self.library_spec.get(region_id).unwrap();
+                    ReadValidator::new(region)
+                        .with_range(range.start as usize ..range.end as usize)
+                        .with_strand(read.strand)
+                }).collect();
+
+                reader.records().try_for_each(|record| {
+                    let record = record?;
+                    let valid = validators.iter_mut().all(|validator| {
+                        match validator.validate(record.sequence()) {
+                            ValidateResult::OnlistFail | ValidateResult::Valid => true,
+                            _ => false,
+                        }
+                    });
+                    if valid {
+                        output_valid.write_record(&record)?;
+                    } else {
+                        output_other.write_record(&record)?;
+                    }
+                    anyhow::Ok(())
+                })?;
+            }
+        }
+        Ok(())
+    }
+
+    fn verify(&self, read: &Read) -> Result<()> {
         let region = self.library_spec.get_parent(&read.primer_id)
             .ok_or_else(|| anyhow!("Primer not found: {}", read.primer_id))?;
         // Check if the primer exists
@@ -296,17 +354,20 @@ impl Assay {
                 reader.records().take(500).try_for_each(|record| {
                     let record = record?;
                     for validator in &mut validators {
-                        validator.validate(record.sequence())?;
+                        let result = validator.validate(record.sequence());
+                        match result {
+                            ValidateResult::TooLong(_) | ValidateResult::TooShort(_) => {
+                                bail!("{}", result);
+                            }
+                            _ => {},
+                        }
                     }
                     anyhow::Ok(())
                 })?;
 
                 for validator in validators {
                     let percent_matched = validator.frac_matched() * 100.0;
-                    if percent_matched < 5.0 {
-                        bail!("Read '{}' failed validation for region '{}'. \
-                        Percentage of matched bases: {:.2}%", read.read_id, validator.id(), percent_matched);
-                    } else if percent_matched < 50.0 {
+                    if percent_matched < 50.0 {
                         warn!("Read '{}' has low percentage of matched bases for region '{}'. \
                         Percentage of matched bases: {:.2}%", read.read_id, validator.id(), percent_matched);
                     }
