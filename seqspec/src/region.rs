@@ -4,14 +4,23 @@ use crate::read::UrlType;
 use cached_path::Cache;
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
-use std::{collections::{HashMap, HashSet}, io::BufRead, path::Path, sync::Arc};
+use std::{collections::{HashMap, HashSet}, io::BufRead, ops::Deref, path::Path, sync::{Arc, RwLock}};
 use anyhow::Result;
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub struct LibSpec {
-    modalities: IndexMap<Modality, Arc<Region>>,
-    parent_map: HashMap<String, Arc<Region>>,
-    region_map: HashMap<String, Arc<Region>>,
+    modalities: IndexMap<Modality, Arc<RwLock<Region>>>,
+    parent_map: HashMap<String, Arc<RwLock<Region>>>,
+    region_map: HashMap<String, Arc<RwLock<Region>>>,
+}
+
+impl PartialEq for LibSpec {
+    fn eq(&self, other: &Self) -> bool {
+        self.modalities.keys().all(|k| {
+            self.modalities.get(k).unwrap().read().unwrap().deref() ==
+                other.modalities.get(k).unwrap().read().unwrap().deref()
+        })
+    }
 }
 
 impl Serialize for LibSpec {
@@ -36,18 +45,20 @@ impl LibSpec {
         let mut parent_map = HashMap::new();
         for region in regions {
             if let RegionType::Modality(modality) = region.region_type {
-                let region = Arc::new(region);
+                let region = Arc::new(RwLock::new(region));
+                let region_id = region.read().unwrap().region_id.clone();
                 if modalities.insert(modality, region.clone()).is_some() {
                     return Err(anyhow::anyhow!("Duplicate modality: {:?}", modality));
                 }
-                if region_map.insert(region.region_id.clone(), region.clone()).is_some() {
-                    return Err(anyhow::anyhow!("Duplicate region id: {}", region.region_id));
+                if region_map.insert(region_id.clone(), region.clone()).is_some() {
+                    return Err(anyhow::anyhow!("Duplicate region id: {}", region_id));
                 }
-                for subregion in region.subregions.iter() {
-                    if region_map.insert(subregion.region_id.clone(), subregion.clone()).is_some() {
-                        return Err(anyhow::anyhow!("Duplicate region id: {}", subregion.region_id));
+                for subregion in region.read().unwrap().subregions.iter() {
+                    let id = subregion.read().unwrap().region_id.clone();
+                    if region_map.insert(id.clone(), subregion.clone()).is_some() {
+                        return Err(anyhow::anyhow!("Duplicate region id: {}", id));
                     }
-                    parent_map.insert(subregion.region_id.clone(), region.clone());
+                    parent_map.insert(id, region.clone());
                 }
             } else {
                 return Err(anyhow::anyhow!("Top-level regions must be modalities"));
@@ -57,45 +68,29 @@ impl LibSpec {
     }
 
     /// Iterate over all regions with modality type in the library.
-    pub fn modalities(&self) -> impl Iterator<Item = &Arc<Region>> {
+    pub fn modalities(&self) -> impl Iterator<Item = &Arc<RwLock<Region>>> {
         self.modalities.values()
     }
 
     /// Iterate over all regions in the library.
-    pub fn regions(&self) -> impl Iterator<Item = &Arc<Region>> {
+    pub fn regions(&self) -> impl Iterator<Item = &Arc<RwLock<Region>>> {
         self.region_map.values()
     }
 
-    pub fn regions_mut(&mut self) -> impl Iterator<Item = &mut Arc<Region>> {
-        self.region_map.values_mut()
-    }
-
-    pub fn get_modality(&self, modality: &Modality) -> Option<&Arc<Region>> {
+    pub fn get_modality(&self, modality: &Modality) -> Option<&Arc<RwLock<Region>>> {
         self.modalities.get(modality)
     }
 
-    pub fn get_modality_mut(&mut self, modality: &Modality) -> Option<&mut Arc<Region>> {
-        self.modalities.get_mut(modality)
-    }
-
-    pub fn get(&self, region_id: &str) -> Option<&Arc<Region>> {
+    pub fn get(&self, region_id: &str) -> Option<&Arc<RwLock<Region>>> {
         self.region_map.get(region_id)
     }
 
-    pub fn get_mut(&mut self, region_id: &str) -> Option<&mut Arc<Region>> {
-        self.region_map.get_mut(region_id)
-    }
-
-    pub fn get_parent(&self, region_id: &str) -> Option<&Arc<Region>> {
+    pub fn get_parent(&self, region_id: &str) -> Option<&Arc<RwLock<Region>>> {
         self.parent_map.get(region_id)
-    }
-
-    pub fn get_parent_mut(&mut self, region_id: &str) -> Option<&mut Arc<Region>> {
-        self.parent_map.get_mut(region_id)
     }
 }
 
-#[derive(Deserialize, Serialize, Debug, Clone, PartialEq)]
+#[derive(Deserialize, Serialize, Debug, Clone)]
 pub struct Region {
     pub region_id: String,
     pub region_type: RegionType,
@@ -106,7 +101,22 @@ pub struct Region {
     pub max_len: u32,
     pub onlist: Option<Onlist>,
     #[serde(rename = "regions", deserialize_with = "deserialize_regions")]
-    pub subregions: Vec<Arc<Region>>,
+    pub subregions: Vec<Arc<RwLock<Region>>>,
+}
+
+impl PartialEq for Region {
+    fn eq(&self, other: &Self) -> bool {
+        self.region_id == other.region_id &&
+            self.region_type == other.region_type &&
+            self.name == other.name &&
+            self.sequence_type == other.sequence_type &&
+            self.sequence == other.sequence &&
+            self.min_len == other.min_len &&
+            self.max_len == other.max_len &&
+            self.onlist == other.onlist &&
+            self.subregions.iter().zip(other.subregions.iter())
+                .all(|(a, b)| a.read().unwrap().deref() == b.read().unwrap().deref())
+    }
 }
 
 impl Region {
@@ -127,12 +137,12 @@ impl Region {
     }
 }
 
-fn deserialize_regions<'de, D>(deserializer: D) -> Result<Vec<Arc<Region>>, D::Error>
+fn deserialize_regions<'de, D>(deserializer: D) -> Result<Vec<Arc<RwLock<Region>>>, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
     if let Some(regions) = Option::<Vec::<Region>>::deserialize(deserializer)? {
-        Ok(regions.into_iter().map(Arc::new).collect())
+        Ok(regions.into_iter().map(|x| Arc::new(RwLock::new(x))).collect())
     } else {
         Ok(Vec::new())
     }

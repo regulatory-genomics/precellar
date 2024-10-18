@@ -13,7 +13,7 @@ use noodles::fastq;
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_yaml::{self, Value};
 use utils::open_file_for_write;
-use std::{fs, path::PathBuf, str::FromStr, sync::Arc};
+use std::{fs, path::PathBuf, str::FromStr, sync::{Arc, RwLock}};
 use anyhow::{bail, anyhow, Result};
 use std::path::Path;
 
@@ -65,8 +65,8 @@ impl Assay {
                     });
                 }
             });
-            self.library_spec.regions_mut().for_each(|region| {
-                if let Some(onlist) = &mut Arc::<Region>::get_mut(region).unwrap().onlist {
+            self.library_spec.regions().for_each(|region| {
+                if let Some(onlist) = &mut region.write().unwrap().onlist {
                     if let Err(e) = onlist.normalize_path(base_dir) {
                         warn!("{}", e);
                     }
@@ -85,23 +85,22 @@ impl Assay {
                 });
             }
         });
-        /*
-        self.library_spec.regions_mut().for_each(|region| {
-            if let Some(onlist) = &mut Arc::<Region>::get_mut(region).unwrap().onlist {
+        self.library_spec.regions().for_each(|region| {
+            if let Some(onlist) = &mut region.write().unwrap().onlist {
                 if let Err(e) = onlist.unnormalize_path(base_dir.as_ref()) {
                     warn!("Failed to unnormalize path: {}", e);
                 }
             }
         });
-        */
     }
 
     /// Add default Illumina reads to the sequence spec.
     pub fn add_illumina_reads(&mut self, modality: Modality, read_len: usize, forward_strand_workflow: bool) -> Result<()> {
-        fn advance_until(iterator: &mut std::slice::Iter<'_, Arc<Region>>, f: fn(&Region) -> bool) -> Option<(Arc<Region>, Vec<Arc<Region>>)> {
+        fn advance_until(iterator: &mut std::slice::Iter<'_, Arc<RwLock<Region>>>, f: fn(&Region) -> bool) -> Option<(Arc<RwLock<Region>>, Vec<Arc<RwLock<Region>>>)> {
             let mut regions = Vec::new();
             while let Some(next_region) = iterator.next() {
-                if f(next_region) {
+                let r = next_region.read().unwrap();
+                if f(&r) {
                     return Some((next_region.clone(), regions))
                 } else {
                     regions.push(next_region.clone());
@@ -110,15 +109,15 @@ impl Assay {
             None
         }
 
-        fn get_length(regions: &[Arc<Region>], reverse: bool) -> usize {
+        fn get_length(regions: &[Arc<RwLock<Region>>], reverse: bool) -> usize {
             if reverse {
                 regions.iter()
-                    .skip_while(|region| region.sequence_type == SequenceType::Fixed)
-                    .map(|region| region.len().unwrap() as usize).sum()
+                    .skip_while(|region| region.read().unwrap().sequence_type == SequenceType::Fixed)
+                    .map(|region| region.read().unwrap().len().unwrap() as usize).sum()
             } else {
                 regions.iter().rev()
-                    .skip_while(|region| region.sequence_type == SequenceType::Fixed)
-                    .map(|region| region.len().unwrap() as usize).sum()
+                    .skip_while(|region| region.read().unwrap().sequence_type == SequenceType::Fixed)
+                    .map(|region| region.read().unwrap().len().unwrap() as usize).sum()
             }
         }
 
@@ -140,10 +139,13 @@ impl Assay {
 
         self.delete_all_reads(modality);
         let regions = self.library_spec.get_modality(&modality).ok_or_else(|| anyhow!("Modality not found: {:?}", modality))?.clone();
+        let regions = regions.read().unwrap();
         let mut regions = regions.subregions.iter();
         while let Some(current_region) = regions.next() {
+            let current_region = current_region.read().unwrap();
             if is_p5(&current_region) {
                 if let Some((next_region, acc)) = advance_until(&mut regions, is_read1) {
+                    let next_region = next_region.read().unwrap();
                     self.update_read::<PathBuf>(
                         &format!("{}-R1", modality.to_string()),
                         Some(modality),
@@ -155,7 +157,7 @@ impl Assay {
                         let acc_len = get_length(acc.as_slice(), false);
                         if acc_len > 0 {
                             self.update_read::<PathBuf>(
-                                &format!("{}-I1", modality.to_string()),
+                                &format!("{}-I2", modality.to_string()),
                                 Some(modality),
                                 Some(&current_region.region_id),
                                 Some(false),
@@ -166,7 +168,7 @@ impl Assay {
                         let acc_len = get_length(acc.as_slice(), true);
                         if acc_len > 0 {
                             self.update_read::<PathBuf>(
-                                &format!("{}-I1", modality.to_string()),
+                                &format!("{}-I2", modality.to_string()),
                                 Some(modality),
                                 Some(&next_region.region_id),
                                 Some(true),
@@ -187,7 +189,7 @@ impl Assay {
                     )?;
                     if acc_len > 0 {
                         self.update_read::<PathBuf>(
-                            &format!("{}-I2", modality.to_string()),
+                            &format!("{}-I1", modality.to_string()),
                             Some(modality),
                             Some(&current_region.region_id),
                             Some(false),
@@ -276,7 +278,7 @@ impl Assay {
     pub fn get_index(&self, read_id: &str) -> Option<RegionIndex> {
         let read = self.sequence_spec.get(read_id)?;
         let region = self.library_spec.get_parent(&read.primer_id)?;
-        read.get_index(region)
+        read.get_index(&region.read().unwrap())
     }
 
     pub fn iter_reads(&self, modality: Modality) -> impl Iterator<Item = &Read> {
@@ -287,7 +289,8 @@ impl Assay {
     pub fn validate<P: AsRef<Path>>(&self, read: &Read, dir: P) -> Result<()> {
         let region = self.library_spec.get_parent(&read.primer_id)
             .ok_or_else(|| anyhow!("Primer not found: {}", read.primer_id))?;
-        if let Some(index) = read.get_index(region) {
+        if let Some(index) = read.get_index(&region.read().unwrap()) {
+            fs::create_dir_all(&dir)?;
             let output_valid = dir.as_ref().join(format!("{}.fq.zst", read.read_id));
             let output_valid = open_file_for_write(output_valid, None, None, 8)?;
             let mut output_valid = fastq::io::Writer::new(output_valid);
@@ -295,8 +298,11 @@ impl Assay {
             let output_other = open_file_for_write(output_other, None, None, 8)?;
             let mut output_other = fastq::io::Writer::new(output_other);
             if let Some(mut reader) = read.open() {
-                let mut validators: Vec<_> = index.index.iter().map(|(region_id, _, range)| {
+                let regions: Vec<_> = index.index.iter().map(|(region_id, _, range)| {
                     let region = self.library_spec.get(region_id).unwrap();
+                    (region.read().unwrap(), range)
+                }).collect();
+                let mut validators: Vec<_> = regions.iter().map(|(region, range)| {
                     ReadValidator::new(region)
                         .with_range(range.start as usize ..range.end as usize)
                         .with_strand(read.strand)
@@ -326,7 +332,7 @@ impl Assay {
         let region = self.library_spec.get_parent(&read.primer_id)
             .ok_or_else(|| anyhow!("Primer not found: {}", read.primer_id))?;
         // Check if the primer exists
-        if let Some(index) = read.get_index(region) {
+        if let Some(index) = read.get_index(&region.read().unwrap()) {
             match index.readlen_info {
                 ReadSpan::Covered | ReadSpan::Span(_) => {},
                 ReadSpan::NotEnough => {
@@ -344,8 +350,11 @@ impl Assay {
             }
 
             if let Some(mut reader) = read.open() {
-                let mut validators: Vec<_> = index.index.iter().map(|(region_id, _, range)| {
+                let regions = index.index.iter().map(|(region_id, _, range)| {
                     let region = self.library_spec.get(region_id).unwrap();
+                    (region.read().unwrap(), range)
+                }).collect::<Vec<_>>();
+                let mut validators: Vec<_> = regions.iter().map(|(region, range)| {
                     ReadValidator::new(region)
                         .with_range(range.start as usize ..range.end as usize)
                         .with_strand(read.strand)

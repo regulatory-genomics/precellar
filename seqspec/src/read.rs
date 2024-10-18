@@ -7,7 +7,7 @@ use indexmap::IndexMap;
 use serde::{Deserialize, Serialize, Serializer};
 use std::collections::HashSet;
 use std::ops::{Deref, DerefMut};
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use std::{io::{BufRead, BufReader}, ops::Range};
 use anyhow::Result;
 use std::path::Path;
@@ -107,6 +107,7 @@ impl Read {
             self.get_read_span(
                 region.subregions.iter().rev()
                     .skip_while(|region| {
+                        let region = region.read().unwrap();
                         let found = region.region_type.is_sequencing_primer() && region.region_id == self.primer_id;
                         if found {
                             found_primer = true;
@@ -118,6 +119,7 @@ impl Read {
             self.get_read_span(
                 region.subregions.iter()
                     .skip_while(|region| {
+                        let region = region.read().unwrap();
                         let found = region.region_type.is_sequencing_primer() && region.region_id == self.primer_id;
                         if found {
                             found_primer = true;
@@ -137,13 +139,14 @@ impl Read {
     /// Get the regions of the read.
     fn get_read_span<'a, I>(&self, mut regions: I) -> RegionIndex
     where
-        I: Iterator<Item = &'a Arc<Region>>,
+        I: Iterator<Item = &'a Arc<RwLock<Region>>>,
     {
         let mut index = Vec::new();
         let read_len = self.max_len;
         let mut cur_pos = 0;
         let mut readlen_info = ReadSpan::Covered;
         while let Some(region) = regions.next() {
+            let region = region.read().unwrap();
             let region_id = region.region_id.clone();
             let region_type = region.region_type;
             if region.is_fixed_length() {  // Fixed-length region
@@ -165,12 +168,14 @@ impl Read {
             } else if cur_pos + region.max_len < read_len {  // Variable-length region and read is longer than max length
                 index.push((region_id, region_type, cur_pos..cur_pos + region.max_len));
                 if let Some(next_region) = regions.next() {
+                    let next_region = next_region.read().unwrap();
                     readlen_info = ReadSpan::ReadThrough(next_region.region_id.clone());
                 }
                 break;
             } else {  // Variable-length region and read is within the length range
                 index.push((region_id, region_type, cur_pos..read_len));
                 if let Some(next_region) = regions.next() {
+                    let next_region = next_region.read().unwrap();
                     readlen_info = ReadSpan::MayReadThrough(next_region.region_id.clone());
                 }
                 break;

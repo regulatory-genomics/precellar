@@ -188,7 +188,7 @@ impl Assay {
         }
 
         let tree = Tree::new("".to_string()).with_leaves(
-            assay.library_spec.modalities().map(|region| build_tree(region, &read_list))
+            assay.library_spec.modalities().map(|region| build_tree(&region.read().unwrap(), &read_list))
         );
         format!("{}", tree)
     }
@@ -212,7 +212,7 @@ fn build_tree(region: &Region, read_list: &HashMap<String, Vec<&Read>>) -> Tree<
         format!("{}({})", id, len)
     };
     Tree::new(label)
-        .with_leaves(region.subregions.iter().map(|child| build_tree(child, read_list)))
+        .with_leaves(region.subregions.iter().map(|child| build_tree(&child.read().unwrap(), read_list)))
 }
 
 fn format_read(read: &Read) -> String {

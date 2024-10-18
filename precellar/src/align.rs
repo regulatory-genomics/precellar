@@ -240,14 +240,14 @@ impl<A: Alinger> FastqProcessor<A> {
     }
 
     fn get_whitelist(&self) -> Result<Whitelist> {
-        let regions: Vec<_> = self.assay.library_spec.get_modality(&self.modality()).unwrap()
-            .subregions.iter().filter(|r| r.region_type.is_barcode()).collect();
+        let regions = self.assay.library_spec.get_modality(&self.modality()).unwrap().read().unwrap();
+        let regions: Vec<_> = regions.subregions.iter().filter(|r| r.read().unwrap().region_type.is_barcode()).collect();
         if regions.len() != 1 {
             bail!("Expecting exactly one barcode region, found {}", regions.len());
         }
         let region = regions[0];
-        if region.sequence_type == SequenceType::Onlist {
-            Ok(Whitelist::new(region.onlist.as_ref().unwrap().read()?))
+        if region.read().unwrap().sequence_type == SequenceType::Onlist {
+            Ok(Whitelist::new(region.read().unwrap().onlist.as_ref().unwrap().read()?))
         } else {
             Ok(Whitelist::empty())
         }
