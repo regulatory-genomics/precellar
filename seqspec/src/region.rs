@@ -113,6 +113,14 @@ impl Region {
             false
         }
     }
+    
+    pub fn len(&self) -> Option<u32> {
+        if self.min_len == self.max_len {
+            Some(self.min_len)
+        } else {
+            None
+        }
+    }
 }
 
 fn deserialize_regions<'de, D>(deserializer: D) -> Result<Vec<Arc<Region>>, D::Error>

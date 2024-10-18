@@ -11,7 +11,7 @@ pub use region::{Region, RegionType, SequenceType, Onlist};
 
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_yaml::{self, Value};
-use std::{fs, path::PathBuf, str::FromStr};
+use std::{fs, path::PathBuf, str::FromStr, sync::Arc};
 use anyhow::{bail, anyhow, Result};
 use std::path::Path;
 
@@ -77,11 +77,115 @@ impl Assay {
         });
     }
 
+    /// Add default Illumina reads to the sequence spec.
+    pub fn add_illumina_reads(&mut self, modality: Modality, read_len: usize, forward_strand_workflow: bool) -> Result<()> {
+        fn advance_until(iterator: &mut std::slice::Iter<'_, Arc<Region>>, f: fn(&Region) -> bool) -> Option<(Arc<Region>, Vec<Arc<Region>>)> {
+            let mut regions = Vec::new();
+            while let Some(next_region) = iterator.next() {
+                if f(next_region) {
+                    return Some((next_region.clone(), regions))
+                } else {
+                    regions.push(next_region.clone());
+                }
+            }
+            None
+        }
+
+        fn get_length(regions: &[Arc<Region>], reverse: bool) -> usize {
+            if reverse {
+                regions.iter()
+                    .skip_while(|region| region.sequence_type == SequenceType::Fixed)
+                    .map(|region| region.len().unwrap() as usize).sum()
+            } else {
+                regions.iter().rev()
+                    .skip_while(|region| region.sequence_type == SequenceType::Fixed)
+                    .map(|region| region.len().unwrap() as usize).sum()
+            }
+        }
+
+        fn is_read1(region: &Region) -> bool {
+            region.region_type == RegionType::NexteraRead1 || region.region_type == RegionType::TruseqRead1
+        }
+
+        fn is_read2(region: &Region) -> bool {
+            region.region_type == RegionType::NexteraRead2 || region.region_type == RegionType::TruseqRead2
+        }
+
+        fn is_p5(region: &Region) -> bool {
+            region.region_type == RegionType::IlluminaP5
+        }
+
+        fn is_p7(region: &Region) -> bool {
+            region.region_type == RegionType::IlluminaP7
+        }
+
+        self.delete_all_reads(modality);
+        let regions = self.library_spec.get_modality(&modality).ok_or_else(|| anyhow!("Modality not found: {:?}", modality))?.clone();
+        let mut regions = regions.subregions.iter();
+        while let Some(current_region) = regions.next() {
+            if is_p5(&current_region) {
+                if let Some((next_region, acc)) = advance_until(&mut regions, is_read1) {
+                    self.update_read::<PathBuf>(
+                        &format!("{}-R1", modality.to_string()),
+                        Some(modality),
+                        Some(&next_region.region_id),
+                        Some(false),
+                        None, Some(read_len), Some(read_len)
+                    )?;
+                    if forward_strand_workflow {
+                        let acc_len = get_length(acc.as_slice(), false);
+                        if acc_len > 0 {
+                            self.update_read::<PathBuf>(
+                                &format!("{}-I1", modality.to_string()),
+                                Some(modality),
+                                Some(&current_region.region_id),
+                                Some(false),
+                                None, Some(acc_len), Some(acc_len)
+                            )?;
+                        }
+                    } else {
+                        let acc_len = get_length(acc.as_slice(), true);
+                        if acc_len > 0 {
+                            self.update_read::<PathBuf>(
+                                &format!("{}-I1", modality.to_string()),
+                                Some(modality),
+                                Some(&next_region.region_id),
+                                Some(true),
+                                None, Some(acc_len), Some(acc_len)
+                            )?;
+                        }
+                    }
+                }
+            } else if is_read2(&current_region) {
+                if let Some((_, acc)) = advance_until(&mut regions, is_p7) {
+                    let acc_len = get_length(acc.as_slice(), false);
+                    self.update_read::<PathBuf>(
+                        &format!("{}-R2", modality.to_string()),
+                        Some(modality),
+                        Some(&current_region.region_id),
+                        Some(true),
+                            None, Some(read_len), Some(read_len)
+                    )?;
+                    if acc_len > 0 {
+                        self.update_read::<PathBuf>(
+                            &format!("{}-I2", modality.to_string()),
+                            Some(modality),
+                            Some(&current_region.region_id),
+                            Some(false),
+                            None, Some(acc_len), Some(acc_len)
+                        )?;
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Update read information. If the read does not exist, it will be created.
     pub fn update_read<P: AsRef<Path>>(
         &mut self,
         read_id: &str,
-        modality: Option<&str>,
+        modality: Option<Modality>,
         primer_id: Option<&str>,
         is_reverse: Option<bool>,
         fastqs: Option<&[P]>,
@@ -101,7 +205,7 @@ impl Assay {
             read_buffer.strand = if rev { Strand::Neg } else { Strand::Pos };
         }
         if let Some(modality) = modality {
-            read_buffer.modality = Modality::from_str(modality)?;
+            read_buffer.modality = modality;
         }
         if let Some(primer_id) = primer_id {
             read_buffer.primer_id = primer_id.to_string();
@@ -127,6 +231,15 @@ impl Assay {
 
     pub fn delete_read(&mut self, read_id: &str) -> Option<Read> {
         self.sequence_spec.shift_remove(read_id)
+    }
+
+    pub fn delete_all_reads(&mut self, modality: Modality) {
+        let ids: Vec<_> = self.iter_reads(modality).map(|read| {
+            read.read_id.to_string()
+        }).collect();
+        ids.into_iter().for_each(|id| {
+            self.delete_read(&id);
+        });
     }
 
     /// Get the index of atomic regions of each read in the sequence spec.
@@ -171,28 +284,32 @@ impl Assay {
                     If this is not the desired behavior, please adjust the region lengths.", read.read_id, id);
                 }
             }
-            let mut validators: Vec<_> = index.index.iter().map(|(region_id, _, range)| {
-                let region = self.library_spec.get(region_id).unwrap();
-                ReadValidator::new(region)
-                    .with_range(range.start as usize ..range.end as usize)
-                    .with_strand(read.strand)
-            }).collect();
 
-            read.open().unwrap().records().take(500).try_for_each(|record| {
-                let record = record?;
-                for validator in &mut validators {
-                    validator.validate(record.sequence())?;
-                }
-                anyhow::Ok(())
-            })?;
-            for validator in validators {
-                let percent_matched = validator.frac_matched() * 100.0;
-                if percent_matched < 5.0 {
-                    bail!("Read '{}' failed validation for region '{}'. \
-                    Percentage of matched bases: {:.2}%", read.read_id, validator.id(), percent_matched);
-                } else if percent_matched < 50.0 {
-                    warn!("Read '{}' has low percentage of matched bases for region '{}'. \
-                    Percentage of matched bases: {:.2}%", read.read_id, validator.id(), percent_matched);
+            if let Some(mut reader) = read.open() {
+                let mut validators: Vec<_> = index.index.iter().map(|(region_id, _, range)| {
+                    let region = self.library_spec.get(region_id).unwrap();
+                    ReadValidator::new(region)
+                        .with_range(range.start as usize ..range.end as usize)
+                        .with_strand(read.strand)
+                }).collect();
+
+                reader.records().take(500).try_for_each(|record| {
+                    let record = record?;
+                    for validator in &mut validators {
+                        validator.validate(record.sequence())?;
+                    }
+                    anyhow::Ok(())
+                })?;
+
+                for validator in validators {
+                    let percent_matched = validator.frac_matched() * 100.0;
+                    if percent_matched < 5.0 {
+                        bail!("Read '{}' failed validation for region '{}'. \
+                        Percentage of matched bases: {:.2}%", read.read_id, validator.id(), percent_matched);
+                    } else if percent_matched < 50.0 {
+                        warn!("Read '{}' has low percentage of matched bases for region '{}'. \
+                        Percentage of matched bases: {:.2}%", read.read_id, validator.id(), percent_matched);
+                    }
                 }
             }
         }
@@ -236,6 +353,19 @@ impl FromStr for Modality {
             "atac" => Ok(Modality::ATAC),
             "crispr" => Ok(Modality::Crispr),
             _ => bail!("Invalid modality: {}", s),
+        }
+    }
+}
+
+impl ToString for Modality {
+    fn to_string(&self) -> String {
+        match self {
+            Modality::DNA => "dna".to_string(),
+            Modality::RNA => "rna".to_string(),
+            Modality::Tag => "tag".to_string(),
+            Modality::Protein => "protein".to_string(),
+            Modality::ATAC => "atac".to_string(),
+            Modality::Crispr => "crispr".to_string(),
         }
     }
 }

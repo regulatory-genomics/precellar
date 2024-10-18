@@ -1,7 +1,7 @@
-use std::{collections::HashMap, path::PathBuf};
+use std::{collections::HashMap, path::PathBuf, str::FromStr};
 
 use pyo3::prelude::*;
-use seqspec::{Read, Region};
+use seqspec::{Modality, Read, Region};
 use anyhow::Result;
 use termtree::Tree;
 
@@ -50,6 +50,27 @@ impl Assay {
         self.0.file.clone()
     }
 
+    /// Add default Illumina reads to the Assay object.
+    /// 
+    /// This method adds default Illumina reads to the Assay object. 
+    /// 
+    /// Parameters
+    /// ----------
+    /// modality: str
+    ///    The modality of the read.
+    /// length: int
+    ///   The length of the read.
+    /// forward_strand_workflow: bool
+    ///   Whether the reads are sequenced in the forward strand workflow.
+    #[pyo3(
+        signature = (modality, *, length=150, forward_strand_workflow=false),
+        text_signature = "($self, modality, *, length=150, forward_strand_workflow=False)",
+    )]
+    pub fn add_illumina_reads(&mut self, modality: &str, length: usize, forward_strand_workflow: bool) -> Result<()> {
+        let modality = Modality::from_str(modality)?;
+        self.0.add_illumina_reads(modality, length, forward_strand_workflow)
+    }
+
     /// Update read information in the Assay object.
     /// 
     /// This method updates the read information in the Assay object.
@@ -90,6 +111,7 @@ impl Assay {
         } else {
             vec![f.extract::<String>().unwrap()]
         });
+        let modality = modality.map(|x| Modality::from_str(x)).transpose()?;
 
         self.0.update_read(
             read_id, modality, primer_id, is_reverse,
