@@ -127,7 +127,7 @@ impl Assay {
 
     fn validate(&self, modality: &str, out_dir: PathBuf) -> Result<()> {
         let modality = Modality::from_str(modality)?;
-        self.0.iter_reads(modality).try_for_each(|read| self.0.validate(read, &out_dir))
+        self.0.validate(modality, out_dir)
     }
 
     /*
