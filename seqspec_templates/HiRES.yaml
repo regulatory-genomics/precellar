@@ -1,0 +1,231 @@
+!Assay
+seqspec_version: 0.3.0
+assay_id: HiRES
+name: HiRES
+doi: https://doi.org/10.1126/science.adg3797
+date: 08 June 2023
+description: Linking genome structures to functions by simultaneous single-cell Hi-C and RNA-seq
+modalities:
+- rna
+- dna
+lib_struct: Custom
+library_protocol: Custom
+library_kit: Illumina Truseq Dual Index
+sequence_protocol: Illumina NovaSeq 6000
+sequence_kit: NovaSeq 6000 v1.5
+sequence_spec: []
+library_spec:
+- !Region
+  parent_id: null
+  region_id: hic
+  region_type: dna
+  name: HiC
+  sequence_type: joined
+  sequence: AATGATACGGCGACCACCGAGATCTACACNNNNNNNNNNNNNNNNCGCGTCTGTCGTCGGCAGCGTCAGATGTGTATAAGAGACAGXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXCTGTCTCTTATACACATCTCCGAGCCCACGAGACNNNNNNNNATCTCGTATGCCGTCTTCTGCTTG
+  min_len: 153
+  max_len: 1150
+  onlist: null
+  regions:
+  - !Region
+    parent_id: hic
+    region_id: hic-illumina_p5
+    region_type: illumina_p5
+    name: Illumina P5
+    sequence_type: fixed
+    sequence: AATGATACGGCGACCACCGAGATCTACAC
+    min_len: 29
+    max_len: 29
+    onlist: null
+    regions: null
+  - !Region
+    parent_id: hic
+    region_id: hic-index5
+    region_type: barcode
+    name: Cell Barcode 1
+    sequence_type: onlist
+    sequence: NNNNNNNNNNNNNNNN
+    min_len: 8
+    max_len: 8
+    onlist: !Onlist
+      file_id: atac_737K-arc-v1.txt.gz
+      filename: atac_737K-arc-v1.txt.gz
+      filetype: txt
+      filesize: 0
+      url: https://teichlab.github.io/scg_lib_structs/data/10X-Genomics/atac_737K-arc-v1.txt.gz
+      urltype: https
+      md5: 0
+      location: remote
+    regions: null
+  - !Region
+    parent_id: hic
+    region_id: hic-nextera_read1
+    region_type: nextera_read1
+    name: nextera_read1
+    sequence_type: fixed
+    sequence: TCGTCGGCAGCGTCAGATGTGTATAAGAGACAG
+    min_len: 33
+    max_len: 33
+    onlist: null
+    regions: null
+  - !Region
+    parent_id: hic
+    region_id: hic-gDNA
+    region_type: gdna
+    name: gDNA
+    sequence_type: random
+    sequence: XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
+    min_len: 1
+    max_len: 1000
+    onlist: null
+    regions: null
+  - !Region
+    parent_id: hic
+    region_id: hic-nextera_read2
+    region_type: nextera_read2
+    name: nextera_read2
+    sequence_type: fixed
+    sequence: CTGTCTCTTATACACATCTCCGAGCCCACGAGAC
+    min_len: 34
+    max_len: 34
+    onlist: null
+    regions: null
+  - !Region
+    parent_id: hic
+    region_id: hic-index7
+    region_type: barcode
+    name: HiC barcode 2
+    sequence_type: onlist
+    sequence: NNNNNNNN
+    min_len: 8
+    max_len: 8
+    onlist: null
+    regions: null
+  - !Region
+    parent_id: hic
+    region_id: hic-illumina_p7
+    region_type: illumina_p7
+    name: Illumina P7
+    sequence_type: fixed
+    sequence: ATCTCGTATGCCGTCTTCTGCTTG
+    min_len: 24
+    max_len: 24
+    onlist: null
+    regions: null
+- !Region
+  parent_id: null
+  region_id: rna
+  region_type: rna
+  name: RNA
+  sequence_type: joined
+  sequence: AATGATACGGCGACCACCGAGATCTACACNNNNNNNNNNNNNNNNCGCGTCTGTCGTCGGCAGCGTCAGATGTGTATAAGAGACAGXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXCTGTCTCTTATACACATCTCCGAGCCCACGAGACNNNNNNNNATCTCGTATGCCGTCTTCTGCTTG
+  min_len: 153
+  max_len: 1150
+  onlist: null
+  regions:
+  - !Region
+    parent_id: rna
+    region_id: rna-illumina_p5
+    region_type: illumina_p5
+    name: Illumina P5
+    sequence_type: fixed
+    sequence: AATGATACGGCGACCACCGAGATCTACAC
+    min_len: 29
+    max_len: 29
+    onlist: null
+    regions: null
+  - !Region
+    parent_id: rna
+    region_id: rna-index5
+    region_type: barcode
+    name: Cell Barcode 1
+    sequence_type: onlist
+    sequence: NNNNNNNNNNNNNNNN
+    min_len: 8
+    max_len: 8
+    onlist: !Onlist
+      file_id: index5.txt
+      filename: index5.txt
+      filetype: txt
+      filesize: 0
+      url: index5.txt
+      urltype: local
+      md5: 0
+      location: local
+    regions: null
+  - !Region
+    parent_id: rna
+    region_id: rna-nextera_read1
+    region_type: nextera_read1
+    name: nextera_read1
+    sequence_type: fixed
+    sequence: TCGTCGGCAGCGTCAGATGTGTATAAGAGACAG
+    min_len: 33
+    max_len: 33
+    onlist: null
+    regions: null
+  - !Region
+    parent_id: rna
+    region_id: rna-gDNA
+    region_type: cdna
+    name: cDNA
+    sequence_type: random
+    sequence: XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
+    min_len: 1
+    max_len: 1000
+    onlist: null
+    regions: null
+  - !Region
+    parent_id: rna
+    region_id: rna-umi
+    region_type: umi
+    name: RNA UMI
+    sequence_type: random
+    sequence: XXXXXXXX
+    min_len: 8
+    max_len: 8
+    onlist: null
+    regions: null
+  - !Region
+    parent_id: rna
+    region_id: rna-linker
+    region_type: linker
+    name: rna-linker
+    sequence_type: fixed
+    sequence: CATTGCGCAATACTACCTCAACC
+    min_len: 23
+    max_len: 23
+    onlist: null
+    regions: null
+  - !Region
+    parent_id: rna
+    region_id: rna-nextera_read2
+    region_type: nextera_read2
+    name: nextera_read2
+    sequence_type: fixed
+    sequence: CTGTCTCTTATACACATCTCCGAGCCCACGAGAC
+    min_len: 34
+    max_len: 34
+    onlist: null
+    regions: null
+  - !Region
+    parent_id: rna
+    region_id: rna-index7
+    region_type: barcode
+    name: RNA barcode 2
+    sequence_type: onlist
+    sequence: NNNNNNNN
+    min_len: 8
+    max_len: 8
+    onlist: null
+    regions: null
+  - !Region
+    parent_id: rna
+    region_id: rna-illumina_p7
+    region_type: illumina_p7
+    name: Illumina P7
+    sequence_type: fixed
+    sequence: ATCTCGTATGCCGTCTTCTGCTTG
+    min_len: 24
+    max_len: 24
+    onlist: null
+    regions: null
