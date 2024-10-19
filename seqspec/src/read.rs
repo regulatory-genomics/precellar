@@ -288,7 +288,7 @@ pub(crate) struct ReadValidator<'a> {
     range: Option<Range<usize>>,
     n_total: usize,
     n_matched: usize,
-    onlist: Option<HashSet<String>>,
+    onlist: Option<HashSet<Vec<u8>>>,
     strand: Strand,
     tolerance: f64,
 }
@@ -329,6 +329,14 @@ impl<'a> ReadValidator<'a> {
         self
     }
 
+    pub fn with_tolerance(mut self, tolerance: f64) -> Self {
+        if tolerance < 0.0 || tolerance > 1.0 {
+            panic!("Tolerance must be between 0 and 1");
+        }
+        self.tolerance = tolerance;
+        self
+    }
+
     pub fn frac_matched(&self) -> f64 {
         self.n_matched as f64 / self.n_total as f64
     }
@@ -344,13 +352,18 @@ impl<'a> ReadValidator<'a> {
         } else {
             seq
         };
+        let seq = if self.strand == Strand::Neg {
+            crate::utils::rev_compl(seq)
+        } else {
+            seq.to_vec()
+        };
         let len = seq.len();
         if len < self.region.min_len as usize {
             ValidateResult::TooShort((seq.len(), self.region.min_len as usize))
         } else if seq.len() > self.region.max_len as usize {
             ValidateResult::TooLong((seq.len(), self.region.max_len as usize))
         } else if self.sequence_type() == SequenceType::Fixed {
-            let d = hamming::distance(seq, self.region.sequence.as_bytes()) as f64;
+            let d = hamming::distance(&seq, self.region.sequence.as_bytes()) as f64;
             if d <= self.tolerance * len as f64 {
                 self.n_matched += 1;
                 ValidateResult::Valid
@@ -358,24 +371,11 @@ impl<'a> ReadValidator<'a> {
                 ValidateResult::MisMatch(d as usize)
             }
         } else if let Some(onlist) = &self.onlist {
-            match self.strand {
-                Strand::Neg => {
-                    let seq = crate::utils::rev_compl(seq);
-                    if onlist.contains(std::str::from_utf8(&seq).unwrap()) {
-                        self.n_matched += 1;
-                        ValidateResult::Valid
-                    } else {
-                        ValidateResult::OnlistFail
-                    }
-                },
-                Strand::Pos => {
-                    if onlist.contains(std::str::from_utf8(seq).unwrap()) {
-                        self.n_matched += 1;
-                        ValidateResult::Valid
-                    } else {
-                        ValidateResult::OnlistFail
-                    }
-                },
+            if onlist.contains(&seq) {
+                self.n_matched += 1;
+                ValidateResult::Valid
+            } else {
+                ValidateResult::OnlistFail
             }
         } else {
             self.n_matched += 1;

@@ -125,9 +125,13 @@ impl Assay {
         self.0.delete_read(read_id);
     }
 
-    fn validate(&self, modality: &str, out_dir: PathBuf) -> Result<()> {
+    #[pyo3(
+        signature = (modality, out_dir, *, tolerance=0.2),
+        text_signature = "($self, modality, out_dir, *, tolerance=None)",
+    )]
+    fn validate(&self, modality: &str, out_dir: PathBuf, tolerance: f64) -> Result<()> {
         let modality = Modality::from_str(modality)?;
-        self.0.validate(modality, out_dir)
+        self.0.validate(modality, out_dir, tolerance)
     }
 
     /*

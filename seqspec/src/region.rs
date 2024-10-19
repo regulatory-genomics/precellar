@@ -256,11 +256,11 @@ pub struct Onlist {
 }
 
 impl Onlist {
-    pub fn read(&self) -> Result<HashSet<String>> {
+    pub fn read(&self) -> Result<HashSet<Vec<u8>>> {
         let cache = Cache::new()?;
         let file = cache.cached_path(&self.url)?;
         let reader = std::io::BufReader::new(crate::utils::open_file_for_read(file));
-        Ok(reader.lines().map(|x| x.unwrap()).collect())
+        Ok(reader.lines().map(|x| x.unwrap().into_bytes()).collect())
     }
 
     pub(crate) fn normalize_path<P: AsRef<Path>>(&mut self, work_dir: P) -> Result<()> {

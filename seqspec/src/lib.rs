@@ -3,7 +3,6 @@ mod region;
 pub mod utils;
 
 use log::warn;
-use rayon::iter::{IndexedParallelIterator, IntoParallelRefIterator, IntoParallelRefMutIterator, ParallelIterator};
 use read::{ReadSpan, RegionIndex, ValidateResult};
 pub use read::{Read, File, UrlType, Strand};
 use read::ReadValidator;
@@ -288,7 +287,7 @@ impl Assay {
 
     /// Validate reads in the sequence spec based on the fixed sequences and
     /// save the valid and invalid reads to different files.
-    pub fn validate<P: AsRef<Path>>(&self, modality: Modality, dir: P) -> Result<()> {
+    pub fn validate<P: AsRef<Path>>(&self, modality: Modality, dir: P, tolerance: f64) -> Result<()> {
         fs::create_dir_all(&dir)?;
         let (mut readers, reads): (Vec<_>, Vec<_>) = self.iter_reads(modality).flat_map(|read| {
             let reader = read.open()?;
@@ -307,6 +306,7 @@ impl Assay {
                 ReadValidator::new(region)
                     .with_range(range.start as usize ..range.end as usize)
                     .with_strand(read.strand)
+                    .with_tolerance(tolerance)
             }).collect::<Vec<_>>()
         ).collect();
 
@@ -335,7 +335,7 @@ impl Assay {
                 break;
             }
 
-            let valid = records.par_iter().zip(validators.par_iter_mut()).all(|(record, validators)|
+            let valid = records.iter().zip(validators.iter_mut()).all(|(record, validators)|
                 validators.iter_mut().all(|validator| {
                     match validator.validate(record.sequence()) {
                         ValidateResult::OnlistFail | ValidateResult::Valid => true,
