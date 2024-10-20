@@ -111,7 +111,7 @@ impl AlignmentMini {
         Ok(Self {
             alignment_start,
             alignment_end,
-            unclipped_start: alignment_start - clipped_start,
+            unclipped_start: alignment_start.wrapping_sub(clipped_start),
             unclipped_end: alignment_end + clipped_end,
             flags: rec.flags()?.bits(),
         })

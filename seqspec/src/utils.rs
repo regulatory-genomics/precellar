@@ -2,15 +2,16 @@ use std::{fs::File, io::{BufWriter, Write}, path::{Path, PathBuf}, str::FromStr}
 use anyhow::{Context, Result, anyhow};
 
 /// Open a file, possibly compressed. Supports gzip and zstd.
-pub fn open_file_for_read<P: AsRef<Path>>(file: P) -> Box<dyn std::io::Read> {
-    match detect_compression(file.as_ref()) {
-        Some(Compression::Gzip) => Box::new(flate2::read::MultiGzDecoder::new(File::open(file.as_ref()).unwrap())),
+pub fn open_file_for_read<P: AsRef<Path>>(file: P) -> Result<Box<dyn std::io::Read>> {
+    let reader: Box<dyn std::io::Read> = match detect_compression(file.as_ref()) {
+        Some(Compression::Gzip) => Box::new(flate2::read::MultiGzDecoder::new(File::open(file.as_ref())?)),
         Some(Compression::Zstd) => {
-            let r = zstd::stream::read::Decoder::new(File::open(file.as_ref()).unwrap()).unwrap();
+            let r = zstd::stream::read::Decoder::new(File::open(file.as_ref())?)?;
             Box::new(r)
         },
-        None => Box::new(File::open(file.as_ref()).unwrap()),
-    }
+        None => Box::new(File::open(file.as_ref())?),
+    };
+    anyhow::Ok(reader).with_context(|| format!("cannot open file: {:?}", file.as_ref()))
 }
 
 /// Determine the file compression type. Supports gzip and zstd.

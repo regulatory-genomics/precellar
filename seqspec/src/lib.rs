@@ -301,14 +301,14 @@ impl Assay {
             Some((reader, (read, regions)))
         }).collect();
 
-        let mut validators: Vec<_> = reads.iter().map(|(read, regions)|
+        let mut validators = reads.iter().map(|(read, regions)|
             regions.iter().map(|(region, range)| {
-                ReadValidator::new(region)
+                Ok(ReadValidator::new(region)?
                     .with_range(range.start as usize ..range.end as usize)
                     .with_strand(read.strand)
-                    .with_tolerance(tolerance)
-            }).collect::<Vec<_>>()
-        ).collect();
+                    .with_tolerance(tolerance))
+            }).collect::<Result<Vec<_>>>()
+        ).collect::<Result<Vec<_>>>()?;
 
         let mut outputs: Vec<_> = reads.iter().map(|(read, _)| {
             let output_valid = dir.as_ref().join(format!("{}.fq.zst", read.read_id));
@@ -382,11 +382,11 @@ impl Assay {
                     let region = self.library_spec.get(region_id).unwrap();
                     (region.read().unwrap(), range)
                 }).collect::<Vec<_>>();
-                let mut validators: Vec<_> = regions.iter().map(|(region, range)| {
-                    ReadValidator::new(region)
+                let mut validators = regions.iter().map(|(region, range)| {
+                    Ok(ReadValidator::new(region)?
                         .with_range(range.start as usize ..range.end as usize)
-                        .with_strand(read.strand)
-                }).collect();
+                        .with_strand(read.strand))
+                }).collect::<Result<Vec<_>>>()?;
 
                 reader.records().take(500).try_for_each(|record| {
                     let record = record?;

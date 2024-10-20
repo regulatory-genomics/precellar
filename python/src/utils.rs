@@ -104,7 +104,7 @@ fn strip_barcode_from_fastq(
     compression_level: Option<u32>,
     num_threads: u32,
 ) -> Result<()> {
-    let mut reader = Reader::new(BufReader::new(open_file_for_read(in_fq)));
+    let mut reader = Reader::new(BufReader::new(open_file_for_read(in_fq)?));
 
     let mut fq_writer = {
         let compression = compression.map(|x| Compression::from_str(x).unwrap())

@@ -84,7 +84,7 @@ impl Read {
             return None;
         }
         let reader = multi_reader::MultiReader::new(
-            files.into_iter().map(move |file| file.open())
+            files.into_iter().map(move |file| file.open().unwrap())
         );
         Some(fastq::Reader::new(BufReader::new(reader)))
     }
@@ -260,15 +260,16 @@ impl File {
     /// If the file is remote, it will be downloaded to the cache directory.
     /// If the file is local, it will be opened directly.
     /// The base_dir is used to resolve relative paths.
-    pub fn open(&self) -> Box<dyn std::io::Read> {
+    pub fn open(&self) -> Result<Box<dyn std::io::Read>> {
         match self.urltype {
             UrlType::Local => {
-                Box::new(crate::utils::open_file_for_read(&self.url))
+                Ok(Box::new(crate::utils::open_file_for_read(&self.url)?))
             }
             _ => {
-                let cache = Cache::new().unwrap();
+                let mut cache = Cache::new().unwrap();
+                cache.dir = home::home_dir().unwrap().join(".cache/seqspec");
                 let file = cache.cached_path(&self.url).unwrap();
-                Box::new(crate::utils::open_file_for_read(file))
+                Ok(Box::new(crate::utils::open_file_for_read(file)?))
             }
         }
     }
@@ -302,13 +303,13 @@ impl<'a> ReadValidator<'a> {
         self.region.sequence_type
     }
 
-    pub fn new(region: &'a Region) -> Self {
+    pub fn new(region: &'a Region) -> Result<Self> {
         let onlist = if let Some(onlist) = &region.onlist {
-            Some(onlist.read().unwrap())
+            Some(onlist.read()?)
         } else {
             None
         };
-        Self {
+        Ok(Self {
             region,
             range: None,
             n_total: 0,
@@ -316,7 +317,7 @@ impl<'a> ReadValidator<'a> {
             onlist,
             strand: Strand::Pos,
             tolerance: 0.2,
-        }
+        })
     }
 
     pub fn with_range(mut self, range: Range<usize>) -> Self {
