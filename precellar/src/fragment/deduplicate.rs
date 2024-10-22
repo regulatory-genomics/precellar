@@ -18,16 +18,19 @@
 // if it's a PCR duplicate, it will be guaranteed to be the same at that end
 // but not at the 3' end.
 
+use anyhow::{Context, Result};
+use bed_utils::bed::Strand;
+use itertools::Itertools;
 use noodles::sam::alignment::record::cigar::op::Kind;
 use noodles::sam::alignment::record::Flags;
 use noodles::sam::alignment::Record;
-use noodles::sam::{alignment::record::data::field::{Tag, Value}, Header};
-use bed_utils::bed::Strand;
-use itertools::Itertools;
+use noodles::sam::{
+    alignment::record::data::field::{Tag, Value},
+    Header,
+};
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::hash::Hash;
-use anyhow::{Result, Context};
-use serde::{Serialize, Deserialize};
 
 use crate::fragment::Fragment;
 
@@ -56,7 +59,14 @@ use crate::fragment::Fragment;
 // RF_secondstrand outward       3' <==1==---------- 5'
 //                               5' ----------==2==> 3'
 #[derive(Eq, PartialEq, Debug, Hash, Serialize, Deserialize)]
-pub enum Orientation { F, R, FR, FF, RR, RF }
+pub enum Orientation {
+    F,
+    R,
+    FR,
+    FF,
+    RR,
+    RF,
+}
 
 /// Reads are considered duplicates if and only if they have the same fingerprint.
 #[derive(Eq, PartialEq, Debug, Hash)]
@@ -89,7 +99,7 @@ pub(crate) struct AlignmentMini {
 impl AlignmentMini {
     fn new<R: Record>(rec: &R) -> Result<Self> {
         let cigar = rec.cigar();
-        let start: usize = rec.alignment_start().unwrap().unwrap().try_into()?;
+        let start: usize = rec.alignment_start().unwrap().unwrap().into();
         let alignment_start: u32 = start.try_into()?;
         let alignment_span: u32 = cigar.alignment_span()?.try_into()?;
         let alignment_end = alignment_start + alignment_span - 1;
@@ -98,15 +108,19 @@ impl AlignmentMini {
             kind == Kind::HardClip || kind == Kind::SoftClip
         });
         let mut clips = clip_groups.into_iter();
-        let clipped_start: u32 = clips.next().map_or(0, |(is_clip, x)| if is_clip {
-            x.map(|x| x.len() as u32).sum()
-        } else {
-            0
+        let clipped_start: u32 = clips.next().map_or(0, |(is_clip, x)| {
+            if is_clip {
+                x.map(|x| x.len() as u32).sum()
+            } else {
+                0
+            }
         });
-        let clipped_end: u32 = clips.last().map_or(0, |(is_clip, x)| if is_clip {
-            x.map(|x| x.len() as u32).sum()
-        } else {
-            0
+        let clipped_end: u32 = clips.last().map_or(0, |(is_clip, x)| {
+            if is_clip {
+                x.map(|x| x.len() as u32).sum()
+            } else {
+                0
+            }
         });
         Ok(Self {
             alignment_start,
@@ -141,7 +155,7 @@ impl AlignmentMini {
         }
     }
 }
- 
+
 #[derive(Serialize, Deserialize, Debug)]
 pub struct AlignmentInfo {
     name: String,
@@ -156,11 +170,21 @@ pub struct AlignmentInfo {
 impl AlignmentInfo {
     pub fn from_read<R: Record>(rec: &R, header: &Header) -> Result<Option<Self>> {
         let barcode = get_barcode(rec)?;
-        if barcode.is_none() { return Ok(None); }
+        if barcode.is_none() {
+            return Ok(None);
+        }
 
         let name = rec.name().unwrap().to_string();
-        let reference_sequence_id: u16 = rec.reference_sequence_id(header).context("no reference sequence id")??.try_into()?;
-        let reference_sequence = header.reference_sequences().get_index(reference_sequence_id as usize).unwrap().0.to_string();
+        let reference_sequence_id: u16 = rec
+            .reference_sequence_id(header)
+            .context("no reference sequence id")??
+            .try_into()?;
+        let reference_sequence = header
+            .reference_sequences()
+            .get_index(reference_sequence_id as usize)
+            .unwrap()
+            .0
+            .to_string();
         let umi = get_umi(rec)?;
         Ok(Some(Self {
             name,
@@ -178,20 +202,34 @@ impl AlignmentInfo {
         let rec2 = records.1;
         let barcode1 = get_barcode(rec1)?;
         let barcode2 = get_barcode(rec2)?;
-        if barcode1 != barcode2 || barcode1.is_none() { return Ok(None); }
+        if barcode1 != barcode2 || barcode1.is_none() {
+            return Ok(None);
+        }
 
         let name1 = rec1.name().unwrap();
         let name2 = rec2.name().unwrap();
         assert!(name1 == name2, "Read names do not match");
 
-        let reference_sequence_id1: u16 = rec1.reference_sequence_id(header).context("no reference sequence id")??.try_into()?;
-        let reference_sequence_id2: u16 = rec2.reference_sequence_id(header).context("no reference sequence id")??.try_into()?;
-        if reference_sequence_id1 != reference_sequence_id2 { return Ok(None); }
+        let reference_sequence_id1: u16 = rec1
+            .reference_sequence_id(header)
+            .context("no reference sequence id")??
+            .try_into()?;
+        let reference_sequence_id2: u16 = rec2
+            .reference_sequence_id(header)
+            .context("no reference sequence id")??
+            .try_into()?;
+        if reference_sequence_id1 != reference_sequence_id2 {
+            return Ok(None);
+        }
         Ok(Some(Self {
             name: name1.to_string(),
             reference_sequence_id: reference_sequence_id1,
-            reference_sequence: header.reference_sequences()
-                .get_index(reference_sequence_id1 as usize).unwrap().0.to_string(),
+            reference_sequence: header
+                .reference_sequences()
+                .get_index(reference_sequence_id1 as usize)
+                .unwrap()
+                .0
+                .to_string(),
             read1: AlignmentMini::new(rec1)?,
             read2: Some(AlignmentMini::new(rec2)?),
             barcode: barcode1.unwrap(),
@@ -263,12 +301,20 @@ impl From<&AlignmentInfo> for FingerPrint {
 
             let orientation = if this.is_reverse_complemented() == other.is_reverse_complemented() {
                 if this.is_reverse_complemented() {
-                    if this.is_first_segment() { Orientation::RR } else { Orientation::FF }
+                    if this.is_first_segment() {
+                        Orientation::RR
+                    } else {
+                        Orientation::FF
+                    }
+                } else if this.is_first_segment() {
+                    Orientation::FF
                 } else {
-                    if this.is_first_segment() { Orientation::FF } else { Orientation::RR }
+                    Orientation::RR
                 }
+            } else if this.is_reverse_complemented() {
+                Orientation::RF
             } else {
-                if this.is_reverse_complemented() { Orientation::RF } else { Orientation::FR }
+                Orientation::FR
             };
             FingerPrint::Paired {
                 reference_id: ali.reference_sequence_id,
@@ -281,7 +327,6 @@ impl From<&AlignmentInfo> for FingerPrint {
     }
 }
 
-
 pub(crate) fn remove_duplicates<I>(data: I) -> HashMap<FingerPrint, Fragment>
 where
     I: IntoIterator<Item = AlignmentInfo>,
@@ -289,23 +334,32 @@ where
     let mut result: HashMap<FingerPrint, Fragment> = HashMap::new();
     data.into_iter().for_each(|ali| {
         let fingerprint = FingerPrint::from(&ali);
-        result.entry(fingerprint).and_modify(|x| x.count +=1)
+        result
+            .entry(fingerprint)
+            .and_modify(|x| x.count += 1)
             .or_insert(Fragment::from((ali, 1)));
     });
     result
 }
 
 fn get_barcode<R: Record>(rec: &R) -> Result<Option<String>> {
-    Ok(rec.data().get(&Tag::CELL_BARCODE_ID).transpose()?.and_then(|x| match x {
-        Value::String(barcode) => Some(barcode.to_string()),
-        _ => None,
-    }))
+    Ok(rec
+        .data()
+        .get(&Tag::CELL_BARCODE_ID)
+        .transpose()?
+        .and_then(|x| match x {
+            Value::String(barcode) => Some(barcode.to_string()),
+            _ => None,
+        }))
 }
 
 fn get_umi<R: Record>(rec: &R) -> Result<Option<String>> {
-    Ok(rec.data().get(&Tag::UMI_ID).transpose()?.and_then(|x| match x {
-        Value::String(umi) => Some(umi.to_string()),
-        _ => None,
-    }))
+    Ok(rec
+        .data()
+        .get(&Tag::UMI_ID)
+        .transpose()?
+        .and_then(|x| match x {
+            Value::String(umi) => Some(umi.to_string()),
+            _ => None,
+        }))
 }
-

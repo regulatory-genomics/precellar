@@ -1,16 +1,19 @@
-use crate::{Modality, RegionType};
 use crate::region::{Region, SequenceType};
+use crate::{Modality, RegionType};
 
+use anyhow::Result;
 use cached_path::Cache;
-use noodles::fastq;
 use indexmap::IndexMap;
+use noodles::fastq;
 use serde::{Deserialize, Serialize, Serializer};
 use std::collections::HashSet;
 use std::ops::{Deref, DerefMut};
-use std::sync::{Arc, RwLock};
-use std::{io::{BufRead, BufReader}, ops::Range};
-use anyhow::Result;
 use std::path::Path;
+use std::sync::{Arc, RwLock};
+use std::{
+    io::{BufRead, BufReader},
+    ops::Range,
+};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct SeqSpec(IndexMap<String, Read>);
@@ -29,7 +32,7 @@ impl DerefMut for SeqSpec {
     }
 }
 
-impl Serialize for SeqSpec{
+impl Serialize for SeqSpec {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         self.0.values().collect::<Vec<_>>().serialize(serializer)
     }
@@ -42,7 +45,10 @@ impl<'de> Deserialize<'de> for SeqSpec {
         for read in reads {
             let read_id = read.read_id.clone();
             if sequences.insert(read_id.clone(), read).is_some() {
-                return Err(serde::de::Error::custom(format!("Duplicate read id: {}", &read_id)));
+                return Err(serde::de::Error::custom(format!(
+                    "Duplicate read id: {}",
+                    &read_id
+                )));
             }
         }
         Ok(Self(sequences))
@@ -78,14 +84,18 @@ impl Default for Read {
 
 impl Read {
     pub fn open(&self) -> Option<fastq::Reader<impl BufRead>> {
-        let files = self.files.clone().unwrap_or(Vec::new())
-            .into_iter().filter(|file| file.filetype == "fastq").collect::<Vec<_>>();
+        let files = self
+            .files
+            .clone()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|file| file.filetype == "fastq")
+            .collect::<Vec<_>>();
         if files.is_empty() {
             return None;
         }
-        let reader = multi_reader::MultiReader::new(
-            files.into_iter().map(move |file| file.open().unwrap())
-        );
+        let reader =
+            multi_reader::MultiReader::new(files.into_iter().map(move |file| file.open().unwrap()));
         Some(fastq::Reader::new(BufReader::new(reader)))
     }
 
@@ -105,30 +115,39 @@ impl Read {
 
         let result = if self.is_reverse() {
             self.get_read_span(
-                region.subregions.iter().rev()
+                region
+                    .subregions
+                    .iter()
+                    .rev()
                     .skip_while(|region| {
                         let region = region.read().unwrap();
-                        let found = region.region_type.is_sequencing_primer() && region.region_id == self.primer_id;
+                        let found = region.region_type.is_sequencing_primer()
+                            && region.region_id == self.primer_id;
                         if found {
                             found_primer = true;
                         }
                         !found
-                    }).skip(1)
+                    })
+                    .skip(1),
             )
         } else {
             self.get_read_span(
-                region.subregions.iter()
+                region
+                    .subregions
+                    .iter()
                     .skip_while(|region| {
                         let region = region.read().unwrap();
-                        let found = region.region_type.is_sequencing_primer() && region.region_id == self.primer_id;
+                        let found = region.region_type.is_sequencing_primer()
+                            && region.region_id == self.primer_id;
                         if found {
                             found_primer = true;
                         }
                         !found
-                    }).skip(1)
+                    })
+                    .skip(1),
             )
         };
-        
+
         if found_primer {
             Some(result)
         } else {
@@ -149,7 +168,8 @@ impl Read {
             let region = region.read().unwrap();
             let region_id = region.region_id.clone();
             let region_type = region.region_type;
-            if region.is_fixed_length() {  // Fixed-length region
+            if region.is_fixed_length() {
+                // Fixed-length region
                 let end = cur_pos + region.min_len;
                 if end >= read_len {
                     index.push((region_id, region_type, cur_pos..read_len));
@@ -161,18 +181,21 @@ impl Read {
                     index.push((region_id, region_type, cur_pos..end));
                     cur_pos = end;
                 }
-            } else if cur_pos + region.min_len >= read_len {  // Variable-length region and read is shorter
+            } else if cur_pos + region.min_len >= read_len {
+                // Variable-length region and read is shorter
                 index.push((region_id, region_type, cur_pos..read_len));
                 readlen_info = ReadSpan::Span((read_len - cur_pos) as usize);
                 break;
-            } else if cur_pos + region.max_len < read_len {  // Variable-length region and read is longer than max length
+            } else if cur_pos + region.max_len < read_len {
+                // Variable-length region and read is longer than max length
                 index.push((region_id, region_type, cur_pos..cur_pos + region.max_len));
                 if let Some(next_region) = regions.next() {
                     let next_region = next_region.read().unwrap();
                     readlen_info = ReadSpan::ReadThrough(next_region.region_id.clone());
                 }
                 break;
-            } else {  // Variable-length region and read is within the length range
+            } else {
+                // Variable-length region and read is within the length range
                 index.push((region_id, region_type, cur_pos..read_len));
                 if let Some(next_region) = regions.next() {
                     let next_region = next_region.read().unwrap();
@@ -181,7 +204,10 @@ impl Read {
                 break;
             }
         }
-        RegionIndex { index, readlen_info }
+        RegionIndex {
+            index,
+            readlen_info,
+        }
     }
 
     pub fn is_reverse(&self) -> bool {
@@ -200,11 +226,11 @@ pub struct RegionIndex {
 
 #[derive(Debug, Clone)]
 pub enum ReadSpan {
-    Covered,  // The read is fully contained within the target region
-    Span(usize),  // The read spans the target region
-    NotEnough,  // Read is too short to reach the target region
-    ReadThrough(String),  // Read is longer than the target region
-    MayReadThrough(String),  // Read may be longer than the target region
+    Covered,                // The read is fully contained within the target region
+    Span(usize),            // The read spans the target region
+    NotEnough,              // Read is too short to reach the target region
+    ReadThrough(String),    // Read is longer than the target region
+    MayReadThrough(String), // Read may be longer than the target region
 }
 
 #[derive(Deserialize, Serialize, Debug, Copy, Clone, PartialEq)]
@@ -243,7 +269,9 @@ impl File {
     pub(crate) fn normalize_path<P: AsRef<Path>>(&mut self, work_dir: P) -> Result<()> {
         if self.urltype == UrlType::Local {
             self.url = crate::utils::normalize_path(work_dir, &mut self.url)?
-                .to_str().unwrap().to_owned();
+                .to_str()
+                .unwrap()
+                .to_owned();
         }
         Ok(())
     }
@@ -251,7 +279,9 @@ impl File {
     pub(crate) fn unnormalize_path<P: AsRef<Path>>(&mut self, work_dir: P) -> Result<()> {
         if self.urltype == UrlType::Local {
             self.url = crate::utils::unnormalize_path(work_dir, &mut self.url)?
-                .to_str().unwrap().to_owned();
+                .to_str()
+                .unwrap()
+                .to_owned();
         }
         Ok(())
     }
@@ -262,9 +292,7 @@ impl File {
     /// The base_dir is used to resolve relative paths.
     pub fn open(&self) -> Result<Box<dyn std::io::Read>> {
         match self.urltype {
-            UrlType::Local => {
-                Ok(Box::new(crate::utils::open_file_for_read(&self.url)?))
-            }
+            UrlType::Local => Ok(Box::new(crate::utils::open_file_for_read(&self.url)?)),
             _ => {
                 let mut cache = Cache::new().unwrap();
                 cache.dir = home::home_dir().unwrap().join(".cache/seqspec");
@@ -331,7 +359,7 @@ impl<'a> ReadValidator<'a> {
     }
 
     pub fn with_tolerance(mut self, tolerance: f64) -> Self {
-        if tolerance < 0.0 || tolerance > 1.0 {
+        if !(0.0..=1.0).contains(&tolerance) {
             panic!("Tolerance must be between 0 and 1");
         }
         self.tolerance = tolerance;
@@ -399,19 +427,19 @@ impl std::fmt::Display for ValidateResult {
         match self {
             ValidateResult::TooShort((n, min_len)) => {
                 write!(f, "Sequence too short: {} < {}", n, min_len)
-            },
+            }
             ValidateResult::TooLong((n, max_len)) => {
                 write!(f, "Sequence too long: {} > {}", n, max_len)
-            },
+            }
             ValidateResult::OnlistFail => {
                 write!(f, "Not on the onlist")
-            },
+            }
             ValidateResult::MisMatch(n) => {
                 write!(f, "Mismatch: {}", n)
-            },
+            }
             ValidateResult::Valid => {
                 write!(f, "Valid")
-            },
+            }
         }
     }
 }

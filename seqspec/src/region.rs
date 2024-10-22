@@ -1,11 +1,17 @@
-use crate::Modality;
 use crate::read::UrlType;
+use crate::Modality;
 
+use anyhow::Result;
 use cached_path::Cache;
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
-use std::{collections::{HashMap, HashSet}, io::BufRead, ops::Deref, path::Path, sync::{Arc, RwLock}};
-use anyhow::Result;
+use std::{
+    collections::{HashMap, HashSet},
+    io::BufRead,
+    ops::Deref,
+    path::Path,
+    sync::{Arc, RwLock},
+};
 
 #[derive(Debug, Clone)]
 pub struct LibSpec {
@@ -17,15 +23,18 @@ pub struct LibSpec {
 impl PartialEq for LibSpec {
     fn eq(&self, other: &Self) -> bool {
         self.modalities.keys().all(|k| {
-            self.modalities.get(k).unwrap().read().unwrap().deref() ==
-                other.modalities.get(k).unwrap().read().unwrap().deref()
+            self.modalities.get(k).unwrap().read().unwrap().deref()
+                == other.modalities.get(k).unwrap().read().unwrap().deref()
         })
     }
 }
 
 impl Serialize for LibSpec {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        self.modalities.values().collect::<Vec<_>>().serialize(serializer)
+        self.modalities
+            .values()
+            .collect::<Vec<_>>()
+            .serialize(serializer)
     }
 }
 
@@ -50,7 +59,10 @@ impl LibSpec {
                 if modalities.insert(modality, region.clone()).is_some() {
                     return Err(anyhow::anyhow!("Duplicate modality: {:?}", modality));
                 }
-                if region_map.insert(region_id.clone(), region.clone()).is_some() {
+                if region_map
+                    .insert(region_id.clone(), region.clone())
+                    .is_some()
+                {
                     return Err(anyhow::anyhow!("Duplicate region id: {}", region_id));
                 }
                 for subregion in region.read().unwrap().subregions.iter() {
@@ -64,7 +76,11 @@ impl LibSpec {
                 return Err(anyhow::anyhow!("Top-level regions must be modalities"));
             };
         }
-        Ok(Self { modalities, region_map, parent_map })
+        Ok(Self {
+            modalities,
+            region_map,
+            parent_map,
+        })
     }
 
     /// Iterate over all regions with modality type in the library.
@@ -106,28 +122,27 @@ pub struct Region {
 
 impl PartialEq for Region {
     fn eq(&self, other: &Self) -> bool {
-        self.region_id == other.region_id &&
-            self.region_type == other.region_type &&
-            self.name == other.name &&
-            self.sequence_type == other.sequence_type &&
-            self.sequence == other.sequence &&
-            self.min_len == other.min_len &&
-            self.max_len == other.max_len &&
-            self.onlist == other.onlist &&
-            self.subregions.iter().zip(other.subregions.iter())
+        self.region_id == other.region_id
+            && self.region_type == other.region_type
+            && self.name == other.name
+            && self.sequence_type == other.sequence_type
+            && self.sequence == other.sequence
+            && self.min_len == other.min_len
+            && self.max_len == other.max_len
+            && self.onlist == other.onlist
+            && self
+                .subregions
+                .iter()
+                .zip(other.subregions.iter())
                 .all(|(a, b)| a.read().unwrap().deref() == b.read().unwrap().deref())
     }
 }
 
 impl Region {
     pub fn is_fixed_length(&self) -> bool {
-        if self.min_len == self.max_len {
-            true
-        } else {
-            false
-        }
+        self.min_len == self.max_len
     }
-    
+
     pub fn len(&self) -> Option<u32> {
         if self.min_len == self.max_len {
             Some(self.min_len)
@@ -135,14 +150,23 @@ impl Region {
             None
         }
     }
+
+    // https://rust-lang.github.io/rust-clippy/master/index.html#len_without_is_empty
+    // It is good custom to have both methods, because for some data structures, asking about the length will be a costly operation, whereas .is_empty() can usually answer in constant time. Also it used to lead to false positives on the len_zero lint – currently that lint will ignore such entities.
+    pub fn is_empty(&self) -> bool {
+        self.min_len != self.max_len
+    }
 }
 
 fn deserialize_regions<'de, D>(deserializer: D) -> Result<Vec<Arc<RwLock<Region>>>, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
-    if let Some(regions) = Option::<Vec::<Region>>::deserialize(deserializer)? {
-        Ok(regions.into_iter().map(|x| Arc::new(RwLock::new(x))).collect())
+    if let Some(regions) = Option::<Vec<Region>>::deserialize(deserializer)? {
+        Ok(regions
+            .into_iter()
+            .map(|x| Arc::new(RwLock::new(x)))
+            .collect())
     } else {
         Ok(Vec::new())
     }
@@ -195,42 +219,33 @@ pub enum RegionType {
 
 impl RegionType {
     pub fn is_modality(&self) -> bool {
-        match self {
-            RegionType::Modality(_) => true,
-            _ => false,
-        }
+        matches!(self, RegionType::Modality(_))
     }
 
     pub fn is_barcode(&self) -> bool {
-        match self {
-            RegionType::Barcode => true,
-            _ => false,
-        }
+        matches!(self, RegionType::Barcode)
     }
 
     pub fn is_umi(&self) -> bool {
-        match self {
-            RegionType::Umi => true,
-            _ => false,
-        }
+        matches!(self, RegionType::Umi)
     }
 
     /// Check if the region contains region of interest (insertion).
     pub fn is_target(&self) -> bool {
-        match self {
-            RegionType::Gdna | RegionType::Cdna => true,
-            _ => false,
-        }
+        matches!(self, RegionType::Gdna | RegionType::Cdna)
     }
 
     pub fn is_sequencing_primer(&self) -> bool {
-        match self {
-            RegionType::CustomPrimer |
-                RegionType::TruseqRead1 | RegionType::TruseqRead2 |
-                RegionType::NexteraRead1 | RegionType::NexteraRead2 |
-                RegionType::IlluminaP5 | RegionType::IlluminaP7 => true,
-            _ => false,
-        }
+        matches!(
+            self,
+            RegionType::CustomPrimer
+                | RegionType::TruseqRead1
+                | RegionType::TruseqRead2
+                | RegionType::NexteraRead1
+                | RegionType::NexteraRead2
+                | RegionType::IlluminaP5
+                | RegionType::IlluminaP7
+        )
     }
 }
 
@@ -238,9 +253,9 @@ impl RegionType {
 #[serde(rename_all = "lowercase")]
 pub enum SequenceType {
     Fixed,  // sequence string is known and fixed in length and nucleotide composition
-    Random,  // the sequence is not known a-priori
-    Onlist,  // the sequence is derived from an onlist
-    Joined,  // the sequence is created from nested regions and the regions property must contain Regions
+    Random, // the sequence is not known a-priori
+    Onlist, // the sequence is derived from an onlist
+    Joined, // the sequence is created from nested regions and the regions property must contain Regions
 }
 
 #[derive(Deserialize, Serialize, Debug, Clone, PartialEq)]
@@ -267,7 +282,9 @@ impl Onlist {
     pub(crate) fn normalize_path<P: AsRef<Path>>(&mut self, work_dir: P) -> Result<()> {
         if self.urltype == UrlType::Local {
             self.url = crate::utils::normalize_path(work_dir, &mut self.url)?
-                .to_str().unwrap().to_owned();
+                .to_str()
+                .unwrap()
+                .to_owned();
         }
         Ok(())
     }
@@ -275,7 +292,9 @@ impl Onlist {
     pub(crate) fn unnormalize_path<P: AsRef<Path>>(&mut self, work_dir: P) -> Result<()> {
         if self.urltype == UrlType::Local {
             self.url = crate::utils::unnormalize_path(work_dir, &mut self.url)?
-                .to_str().unwrap().to_owned();
+                .to_str()
+                .unwrap()
+                .to_owned();
         }
         Ok(())
     }

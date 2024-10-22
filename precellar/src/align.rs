@@ -1,34 +1,37 @@
 use crate::barcode::{BarcodeCorrector, Whitelist};
-use seqspec::{Assay, Modality, Read, RegionType, SequenceType};
 use crate::qc::{AlignQC, Metrics};
+use seqspec::{Assay, Modality, Read, RegionType, SequenceType};
 
+use anyhow::{bail, Result};
 use bstr::BString;
+use bwa_mem2::BurrowsWheelerAligner;
+use either::Either;
 use kdam::{tqdm, BarExt};
-use std::ops::Range;
-use std::sync::{Arc, Mutex};
+use log::info;
+use noodles::sam::alignment::record_buf::data::field::value::Value;
+use noodles::sam::alignment::{record::data::field::tag::Tag, record_buf::RecordBuf, Record};
+use noodles::{bam, fastq, sam};
+use rayon::iter::{IndexedParallelIterator, IntoParallelIterator, ParallelIterator};
+use smallvec::SmallVec;
 use std::collections::{HashMap, HashSet};
 use std::io::BufRead;
-use smallvec::SmallVec;
-use anyhow::{bail, Result};
-use noodles::{bam, sam, fastq};
-use noodles::sam::alignment::{
-    Record, record_buf::RecordBuf, record::data::field::tag::Tag,
-};
-use noodles::sam::alignment::record_buf::data::field::value::Value;
-use bwa_mem2::BurrowsWheelerAligner;
-use log::info;
-use rayon::iter::{IndexedParallelIterator, IntoParallelIterator, ParallelIterator};
-use either::Either;
+use std::ops::Range;
+use std::sync::{Arc, Mutex};
 
 pub trait Alinger {
     fn chunk_size(&self) -> usize;
 
     fn header(&self) -> sam::Header;
 
-    fn align_reads(&mut self, records: &mut [fastq::Record]) -> impl ExactSizeIterator<Item = sam::Record>;
+    fn align_reads(
+        &mut self,
+        records: &mut [fastq::Record],
+    ) -> impl ExactSizeIterator<Item = sam::Record>;
 
-    fn align_read_pairs(&mut self, records: &mut [(fastq::Record, fastq::Record)]) ->
-        impl ExactSizeIterator<Item = (sam::Record, sam::Record)>;
+    fn align_read_pairs(
+        &mut self,
+        records: &mut [(fastq::Record, fastq::Record)],
+    ) -> impl ExactSizeIterator<Item = (sam::Record, sam::Record)>;
 }
 
 impl Alinger for BurrowsWheelerAligner {
@@ -40,12 +43,17 @@ impl Alinger for BurrowsWheelerAligner {
         self.get_sam_header()
     }
 
-    fn align_reads(&mut self, records: &mut [fastq::Record]) -> impl ExactSizeIterator<Item = sam::Record> {
+    fn align_reads(
+        &mut self,
+        records: &mut [fastq::Record],
+    ) -> impl ExactSizeIterator<Item = sam::Record> {
         self.align_reads(records)
     }
 
-    fn align_read_pairs(&mut self, records: &mut [(fastq::Record, fastq::Record)]) ->
-        impl ExactSizeIterator<Item = (sam::Record, sam::Record)> {
+    fn align_read_pairs(
+        &mut self,
+        records: &mut [(fastq::Record, fastq::Record)],
+    ) -> impl ExactSizeIterator<Item = (sam::Record, sam::Record)> {
         self.align_read_pairs(records)
     }
 }
@@ -57,17 +65,21 @@ pub struct FastqProcessor<A> {
     mito_dna: HashSet<usize>,
     metrics: HashMap<Modality, Metrics>,
     align_qc: HashMap<Modality, Arc<Mutex<AlignQC>>>,
-    barcode_correct_prob: f64,  // if the posterior probability of a correction
-                                // exceeds this threshold, the barcode will be corrected.
-                                // cellrange uses 0.975 for ATAC and 0.9 for multiome.
+    barcode_correct_prob: f64, // if the posterior probability of a correction
+    // exceeds this threshold, the barcode will be corrected.
+    // cellrange uses 0.975 for ATAC and 0.9 for multiome.
     mismatch_in_barcode: usize, // The number of mismatches allowed in barcode
 }
 
 impl<A: Alinger> FastqProcessor<A> {
     pub fn new(assay: Assay, aligner: A) -> Self {
         Self {
-            assay, aligner, current_modality: None, metrics: HashMap::new(),
-            align_qc: HashMap::new(), mito_dna: HashSet::new(),
+            assay,
+            aligner,
+            current_modality: None,
+            metrics: HashMap::new(),
+            align_qc: HashMap::new(),
+            mito_dna: HashSet::new(),
             barcode_correct_prob: 0.975,
             mismatch_in_barcode: 1,
         }
@@ -79,139 +91,191 @@ impl<A: Alinger> FastqProcessor<A> {
     }
 
     pub fn modality(&self) -> Modality {
-        self.current_modality.expect("modality not set, please call set_modality first")
+        self.current_modality
+            .expect("modality not set, please call set_modality first")
     }
 
     pub fn add_mito_dna(&mut self, mito_dna: &str) {
-        self.aligner.header().reference_sequences().get_index_of(&BString::from(mito_dna))
+        self.aligner
+            .header()
+            .reference_sequences()
+            .get_index_of(&BString::from(mito_dna))
             .map(|x| self.mito_dna.insert(x));
     }
 
     pub fn with_modality(mut self, modality: Modality) -> Self {
-        self.current_modality = Some(modality.into());
+        self.current_modality = Some(modality);
         self
     }
 
     pub fn get_report(&self) -> Metrics {
-        let mut metrics = self.metrics.get(&self.modality()).map_or(Metrics::default(), |x| x.clone());
+        let mut metrics = self
+            .metrics
+            .get(&self.modality())
+            .map_or(Metrics::default(), |x| x.clone());
         if let Some(align_qc) = self.align_qc.get(&self.modality()) {
             align_qc.lock().unwrap().report(&mut metrics);
         }
         metrics
     }
 
-    pub fn gen_barcoded_alignments(&mut self) ->
-        impl Iterator<Item = Either<Vec<RecordBuf>, Vec<(RecordBuf, RecordBuf)>>> + '_
-    {
+    pub fn gen_barcoded_alignments(
+        &mut self,
+    ) -> impl Iterator<Item = Either<Vec<RecordBuf>, Vec<(RecordBuf, RecordBuf)>>> + '_ {
         info!("Counting barcodes...");
         let whitelist = self.count_barcodes().unwrap();
-        info!("Found {} barcodes. {:.2}% of them have an exact match in whitelist", whitelist.total_count, whitelist.frac_exact_match() * 100.0);
+        info!(
+            "Found {} barcodes. {:.2}% of them have an exact match in whitelist",
+            whitelist.total_count,
+            whitelist.frac_exact_match() * 100.0
+        );
 
         info!("Aligning reads...");
         let fq_records = self.gen_raw_fastq_records();
         let is_paired = fq_records.is_paired_end();
-        let corrector = BarcodeCorrector::default().with_bc_confidence_threshold(self.barcode_correct_prob);
+        let corrector =
+            BarcodeCorrector::default().with_bc_confidence_threshold(self.barcode_correct_prob);
         let header = self.aligner.header();
         self.align_qc.insert(
             self.modality(),
             Arc::new(Mutex::new(AlignQC {
                 mito_dna: self.mito_dna.clone(),
                 ..AlignQC::default()
-            }))
+            })),
         );
         let align_qc = self.align_qc.get(&self.modality()).unwrap().clone();
 
         let mut progress_bar = tqdm!(total = whitelist.total_count);
-        fq_records.chunk(self.aligner.chunk_size()).map(move |data| if is_paired {
-            let (barcodes, mut reads): (Vec<_>, Vec<_>) = data.into_iter()
-                .map(|(barcode, (read1, read2))| (barcode, (read1.unwrap(), read2.unwrap()))).unzip();
-            let alignments: Vec<_> = self.aligner.align_read_pairs(&mut reads).collect();
-            let results = barcodes.into_par_iter().zip(alignments).map(|(barcode, (ali1, ali2))| {
-                let corrected_barcode = corrector.correct(
-                    whitelist.get_barcode_counts(),
-                    barcode.sequence(),
-                    barcode.quality_scores(),
-                    self.mismatch_in_barcode,
-                ).ok();
-                let ali1_ = add_cell_barcode(
-                    &header,
-                    &ali1,
-                    barcode.sequence(),
-                    barcode.quality_scores(),
-                    corrected_barcode,
-                ).unwrap();
-                let ali2_ = add_cell_barcode(
-                    &header,
-                    &ali2,
-                    barcode.sequence(),
-                    barcode.quality_scores(),
-                    corrected_barcode,
-                ).unwrap();
-                {
-                    let mut align_qc_lock = align_qc.lock().unwrap();
-                    align_qc_lock.update(&ali1_, &header);
-                    align_qc_lock.update(&ali2_, &header);
+        fq_records
+            .chunk(self.aligner.chunk_size())
+            .map(move |data| {
+                if is_paired {
+                    let (barcodes, mut reads): (Vec<_>, Vec<_>) = data
+                        .into_iter()
+                        .map(|(barcode, (read1, read2))| {
+                            (barcode, (read1.unwrap(), read2.unwrap()))
+                        })
+                        .unzip();
+                    let alignments: Vec<_> = self.aligner.align_read_pairs(&mut reads).collect();
+                    let results = barcodes
+                        .into_par_iter()
+                        .zip(alignments)
+                        .map(|(barcode, (ali1, ali2))| {
+                            let corrected_barcode = corrector
+                                .correct(
+                                    whitelist.get_barcode_counts(),
+                                    barcode.sequence(),
+                                    barcode.quality_scores(),
+                                    self.mismatch_in_barcode,
+                                )
+                                .ok();
+                            let ali1_ = add_cell_barcode(
+                                &header,
+                                &ali1,
+                                barcode.sequence(),
+                                barcode.quality_scores(),
+                                corrected_barcode,
+                            )
+                            .unwrap();
+                            let ali2_ = add_cell_barcode(
+                                &header,
+                                &ali2,
+                                barcode.sequence(),
+                                barcode.quality_scores(),
+                                corrected_barcode,
+                            )
+                            .unwrap();
+                            {
+                                let mut align_qc_lock = align_qc.lock().unwrap();
+                                align_qc_lock.update(&ali1_, &header);
+                                align_qc_lock.update(&ali2_, &header);
+                            }
+                            (ali1_, ali2_)
+                        })
+                        .collect::<Vec<_>>();
+                    progress_bar.update(results.len()).unwrap();
+                    Either::Right(results)
+                } else {
+                    let (barcodes, mut reads): (Vec<_>, Vec<_>) = data
+                        .into_iter()
+                        .map(|(barcode, (read1, _))| (barcode, read1.unwrap()))
+                        .unzip();
+                    let alignments: Vec<_> = self.aligner.align_reads(&mut reads).collect();
+                    let results = barcodes
+                        .into_par_iter()
+                        .zip(alignments)
+                        .map(|(barcode, alignment)| {
+                            let corrected_barcode = corrector
+                                .correct(
+                                    whitelist.get_barcode_counts(),
+                                    barcode.sequence(),
+                                    barcode.quality_scores(),
+                                    self.mismatch_in_barcode,
+                                )
+                                .ok();
+                            let ali = add_cell_barcode(
+                                &header,
+                                &alignment,
+                                barcode.sequence(),
+                                barcode.quality_scores(),
+                                corrected_barcode,
+                            )
+                            .unwrap();
+                            {
+                                align_qc.lock().unwrap().update(&ali, &header);
+                            }
+                            ali
+                        })
+                        .collect::<Vec<_>>();
+                    progress_bar.update(results.len()).unwrap();
+                    Either::Left(results)
                 }
-                (ali1_, ali2_)
-            }).collect::<Vec<_>>();
-            progress_bar.update(results.len()).unwrap();
-            Either::Right(results)
-        } else {
-            let (barcodes, mut reads): (Vec<_>, Vec<_>) = data.into_iter()
-                .map(|(barcode, (read1, _))| (barcode, read1.unwrap())).unzip();
-            let alignments: Vec<_> = self.aligner.align_reads(&mut reads).collect();
-            let results = barcodes.into_par_iter().zip(alignments).map(|(barcode, alignment)| {
-                let corrected_barcode = corrector.correct(
-                    whitelist.get_barcode_counts(),
-                    barcode.sequence(),
-                    barcode.quality_scores(),
-                    self.mismatch_in_barcode,
-                ).ok();
-                let ali = add_cell_barcode(
-                    &header,
-                    &alignment,
-                    barcode.sequence(),
-                    
-                    barcode.quality_scores(),
-                    corrected_barcode,
-                ).unwrap();
-                { align_qc.lock().unwrap().update(&ali, &header); }
-                ali
-            }).collect::<Vec<_>>();
-            progress_bar.update(results.len()).unwrap();
-            Either::Left(results)
-        })
+            })
     }
 
-    pub fn gen_raw_alignments(&mut self) -> 
-        impl Iterator<Item = Either<Vec<sam::Record>, Vec<(sam::Record, sam::Record)>>> + '_
-    {
+    pub fn gen_raw_alignments(
+        &mut self,
+    ) -> impl Iterator<Item = Either<Vec<sam::Record>, Vec<(sam::Record, sam::Record)>>> + '_ {
         let fq_records = self.gen_raw_fastq_records();
         let is_paired = fq_records.is_paired_end();
-        fq_records.chunk(self.aligner.chunk_size()).map(move |data| if is_paired {
-            let mut reads: Vec<_> = data.into_iter().map(|(_, (read1, read2))|
-                (read1.unwrap(), read2.unwrap())).collect();
-            let alignments = self.aligner.align_read_pairs(&mut reads).collect();
-            Either::Right(alignments)
-        } else {
-            let mut reads: Vec<_> = data.into_iter().map(|(_, (read1, _))|
-                read1.unwrap()).collect();
-            let alignments = self.aligner.align_reads(reads.as_mut()).collect();
-            Either::Left(alignments)
-        })
+        fq_records
+            .chunk(self.aligner.chunk_size())
+            .map(move |data| {
+                if is_paired {
+                    let mut reads: Vec<_> = data
+                        .into_iter()
+                        .map(|(_, (read1, read2))| (read1.unwrap(), read2.unwrap()))
+                        .collect();
+                    let alignments = self.aligner.align_read_pairs(&mut reads).collect();
+                    Either::Right(alignments)
+                } else {
+                    let mut reads: Vec<_> = data
+                        .into_iter()
+                        .map(|(_, (read1, _))| read1.unwrap())
+                        .collect();
+                    let alignments = self.aligner.align_reads(reads.as_mut()).collect();
+                    Either::Left(alignments)
+                }
+            })
     }
 
     pub fn gen_raw_fastq_records(&self) -> FastqRecords<impl BufRead> {
         let modality = self.modality();
-        let data = self.assay.get_index_by_modality(modality).filter_map(|(read, index)| {
-            let regions: Vec<_> = index.index.into_iter()
-                .filter(|x| x.1.is_barcode() || x.1.is_target()).collect();
-            if regions.is_empty() {
-                None
-            } else {
-                Some((read, regions, read.open().unwrap()))
-            }
-        });
+        let data = self
+            .assay
+            .get_index_by_modality(modality)
+            .filter_map(|(read, index)| {
+                let regions: Vec<_> = index
+                    .index
+                    .into_iter()
+                    .filter(|x| x.1.is_barcode() || x.1.is_target())
+                    .collect();
+                if regions.is_empty() {
+                    None
+                } else {
+                    Some((read, regions, read.open().unwrap()))
+                }
+            });
         FastqRecords::new(data)
     }
 
@@ -219,10 +283,17 @@ impl<A: Alinger> FastqProcessor<A> {
         let modality = self.modality();
         let mut whitelist = self.get_whitelist()?;
 
-        let (read, index) = self.assay.get_index_by_modality(modality).into_iter()
+        let (read, index) = self
+            .assay
+            .get_index_by_modality(modality)
             .find(|(_, index)| index.index.iter().any(|x| x.1.is_barcode()))
             .expect("No barcode region found");
-        let range = index.index.into_iter().find(|x| x.1.is_barcode()).unwrap().2;
+        let range = index
+            .index
+            .into_iter()
+            .find(|x| x.1.is_barcode())
+            .unwrap()
+            .2;
 
         read.open().unwrap().records().for_each(|record| {
             let mut record = record.unwrap();
@@ -233,21 +304,38 @@ impl<A: Alinger> FastqProcessor<A> {
             whitelist.count_barcode(record.sequence(), record.quality_scores());
         });
 
-        self.metrics.entry(modality).or_insert_with(Metrics::default)
-            .insert("frac_q30_bases_barcode".to_string(), whitelist.frac_q30_bases());
+        self.metrics.entry(modality).or_default().insert(
+            "frac_q30_bases_barcode".to_string(),
+            whitelist.frac_q30_bases(),
+        );
 
         Ok(whitelist)
     }
 
     fn get_whitelist(&self) -> Result<Whitelist> {
-        let regions = self.assay.library_spec.get_modality(&self.modality()).unwrap().read().unwrap();
-        let regions: Vec<_> = regions.subregions.iter().filter(|r| r.read().unwrap().region_type.is_barcode()).collect();
+        let regions = self
+            .assay
+            .library_spec
+            .get_modality(&self.modality())
+            .unwrap()
+            .read()
+            .unwrap();
+        let regions: Vec<_> = regions
+            .subregions
+            .iter()
+            .filter(|r| r.read().unwrap().region_type.is_barcode())
+            .collect();
         if regions.len() != 1 {
-            bail!("Expecting exactly one barcode region, found {}", regions.len());
+            bail!(
+                "Expecting exactly one barcode region, found {}",
+                regions.len()
+            );
         }
         let region = regions[0];
         if region.read().unwrap().sequence_type == SequenceType::Onlist {
-            Ok(Whitelist::new(region.read().unwrap().onlist.as_ref().unwrap().read()?))
+            Ok(Whitelist::new(
+                region.read().unwrap().onlist.as_ref().unwrap().read()?,
+            ))
         } else {
             Ok(Whitelist::empty())
         }
@@ -271,34 +359,45 @@ pub type UMI = fastq::Record;
 impl<R: BufRead> FastqRecords<R> {
     fn new<'a, I>(iter: I) -> Self
     where
-        I: Iterator<Item = (&'a Read, Vec<(String, RegionType, Range<u32>)>, fastq::Reader<R>)>,
+        I: Iterator<
+            Item = (
+                &'a Read,
+                Vec<(String, RegionType, Range<u32>)>,
+                fastq::Reader<R>,
+            ),
+        >,
     {
-        let records = iter.map(|(read, regions, reader)|
-            FastqRecord {
+        let records = iter
+            .map(|(read, regions, reader)| FastqRecord {
                 id: read.read_id.to_string(),
                 is_reverse: read.is_reverse(),
                 subregion: regions.into_iter().map(|x| (x.1, x.2)).collect(),
                 reader,
                 min_len: read.min_len as usize,
                 max_len: read.max_len as usize,
-            }
-        ).collect();
+            })
+            .collect();
         Self(records)
     }
 
     fn chunk(self, chunk_size: usize) -> FastqRecordChunk<R> {
-        FastqRecordChunk { fq: self, chunk_size }
+        FastqRecordChunk {
+            fq: self,
+            chunk_size,
+        }
     }
 
     fn is_paired_end(&self) -> bool {
         let mut read1 = false;
         let mut read2 = false;
         self.0.iter().for_each(|x| {
-            x.subregion.iter().for_each(|(region_type, _)| if region_type.is_target() {
-                if x.is_reverse {
-                    read1 = true;
-                } else {
-                    read2 = true;
+            x.subregion.iter().for_each(|(region_type, _)| {
+                if region_type.is_target() {
+                    if x.is_reverse {
+                        read1 = true;
+                    } else {
+                        read2 = true;
+                    }
                 }
             });
         });
@@ -311,23 +410,37 @@ impl<R: BufRead> Iterator for FastqRecords<R> {
 
     fn next(&mut self) -> Option<Self::Item> {
         let mut id_without_record = Vec::new();
-        let records: SmallVec<[_; 4]> = self.0.iter_mut().map(|x| {
-            let mut record = fastq::Record::default();
-            if x.reader.read_record(&mut record).expect("error reading fastq record") == 0 {
-                id_without_record.push(x.id.as_str());
-                None
-            } else {
-                let n = record.sequence().len();
-                if n < x.min_len || n > x.max_len {
-                    panic!("Read length ({}) out of range: {}-{}", n, x.min_len, x.max_len);
+        let records: SmallVec<[_; 4]> = self
+            .0
+            .iter_mut()
+            .map(|x| {
+                let mut record = fastq::Record::default();
+                if x.reader
+                    .read_record(&mut record)
+                    .expect("error reading fastq record")
+                    == 0
+                {
+                    id_without_record.push(x.id.as_str());
+                    None
+                } else {
+                    let n = record.sequence().len();
+                    if n < x.min_len || n > x.max_len {
+                        panic!(
+                            "Read length ({}) out of range: {}-{}",
+                            n, x.min_len, x.max_len
+                        );
+                    }
+                    Some(record)
                 }
-                Some(record)
-            }
-        }).collect();
+            })
+            .collect();
         if id_without_record.len() == records.len() {
             return None;
-        } else if id_without_record.len() > 0 {
-            panic!("Missing records in these files: {}", id_without_record.join(","));
+        } else if !id_without_record.is_empty() {
+            panic!(
+                "Missing records in these files: {}",
+                id_without_record.join(",")
+            );
         }
 
         let mut barcode = None;
@@ -371,8 +484,8 @@ impl<R: BufRead> Iterator for FastqRecordChunk<R> {
         let mut accumulated_length = 0;
 
         for record in self.fq.by_ref() {
-            accumulated_length += record.1.0.as_ref().map_or(0, |x| x.sequence().len()) +
-                record.1.1.as_ref().map_or(0, |x| x.sequence().len());
+            accumulated_length += record.1 .0.as_ref().map_or(0, |x| x.sequence().len())
+                + record.1 .1.as_ref().map_or(0, |x| x.sequence().len());
             chunk.push(record);
             if accumulated_length >= self.chunk_size {
                 break;
@@ -387,7 +500,6 @@ impl<R: BufRead> Iterator for FastqRecordChunk<R> {
     }
 }
 
-
 fn add_cell_barcode<R: Record>(
     header: &sam::Header,
     record: &R,
@@ -397,8 +509,14 @@ fn add_cell_barcode<R: Record>(
 ) -> std::io::Result<RecordBuf> {
     let mut record_buf = RecordBuf::try_from_alignment_record(header, record)?;
     let data = record_buf.data_mut();
-    data.insert(Tag::CELL_BARCODE_SEQUENCE, Value::String(ori_barcode.into()));
-    data.insert(Tag::CELL_BARCODE_QUALITY_SCORES, Value::String(ori_qual.into()));
+    data.insert(
+        Tag::CELL_BARCODE_SEQUENCE,
+        Value::String(ori_barcode.into()),
+    );
+    data.insert(
+        Tag::CELL_BARCODE_QUALITY_SCORES,
+        Value::String(ori_qual.into()),
+    );
     if let Some(barcode) = correct_barcode {
         data.insert(Tag::CELL_BARCODE_ID, Value::String(barcode.into()));
     }
@@ -415,13 +533,18 @@ fn slice_fastq_record(record: &fastq::Record, start: usize, end: usize) -> fastq
 
 fn rev_compl_fastq_record(mut record: fastq::Record) -> fastq::Record {
     *record.quality_scores_mut() = record.quality_scores().iter().rev().copied().collect();
-    *record.sequence_mut() = record.sequence().iter().rev().map(|&x| match x {
-        b'A' => b'T',
-        b'T' => b'A',
-        b'C' => b'G',
-        b'G' => b'C',
-        _ => x,
-    }).collect();
+    *record.sequence_mut() = record
+        .sequence()
+        .iter()
+        .rev()
+        .map(|&x| match x {
+            b'A' => b'T',
+            b'T' => b'A',
+            b'C' => b'G',
+            b'G' => b'C',
+            _ => x,
+        })
+        .collect();
     record
 }
 
@@ -441,7 +564,10 @@ impl<'a, R: std::io::Read> NameCollatedRecords<'a, R> {
     }
 
     fn check(&mut self, name: &BString) {
-        assert!(!self.checker.contains(name), "bam file must be name collated or name sorted");
+        assert!(
+            !self.checker.contains(name),
+            "bam file must be name collated or name sorted"
+        );
         self.checker.insert(name.to_owned());
     }
 }
@@ -456,7 +582,10 @@ impl<'a, R: std::io::Read> Iterator for NameCollatedRecords<'a, R> {
             if name == prev_name {
                 Some((prev_record, record))
             } else {
-                panic!("Expecting paired end reads with the same name, found {} and {}", prev_name, name);
+                panic!(
+                    "Expecting paired end reads with the same name, found {} and {}",
+                    prev_name, name
+                );
             }
         } else {
             self.check(&name);
@@ -465,7 +594,6 @@ impl<'a, R: std::io::Read> Iterator for NameCollatedRecords<'a, R> {
         }
     }
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -479,10 +607,9 @@ mod tests {
         let aligner = BurrowsWheelerAligner::new(
             FMIndex::read("tests/data/hg38").unwrap(),
             AlignerOpts::default(),
-            PairedEndStats::default()
+            PairedEndStats::default(),
         );
-        let mut processor = FastqProcessor::new(spec, aligner)
-            .with_modality(Modality::ATAC);
+        let mut processor = FastqProcessor::new(spec, aligner).with_modality(Modality::ATAC);
 
         processor.gen_barcoded_alignments().take(6).for_each(|x| {
             println!("{:?}", x);

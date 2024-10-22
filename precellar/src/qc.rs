@@ -1,26 +1,24 @@
-use std::collections::{HashMap, HashSet};
-use std::ops::{Deref, DerefMut};
-use std::fmt::Display;
 use bed_utils::bed::BEDLike;
 use noodles::sam;
-use noodles::sam::alignment::{
-    Record, record::data::field::tag::Tag,
-};
+use noodles::sam::alignment::{record::data::field::tag::Tag, Record};
+use std::collections::{HashMap, HashSet};
+use std::fmt::Display;
+use std::ops::{Deref, DerefMut};
 
 use crate::fragment::Fragment;
 
 #[derive(Debug, Default, Clone)]
 pub struct Metrics(HashMap<String, f64>);
 
-impl From <HashMap<String, f64>> for Metrics {
+impl From<HashMap<String, f64>> for Metrics {
     fn from(map: HashMap<String, f64>) -> Self {
         Metrics(map)
     }
 }
 
-impl Into<HashMap<String, f64>> for Metrics {
-    fn into(self) -> HashMap<String, f64> {
-        self.0
+impl From<Metrics> for HashMap<String, f64> {
+    fn from(val: Metrics) -> Self {
+        val.0
     }
 }
 
@@ -133,8 +131,8 @@ impl FlagStat {
                         self.singleton += 1;
                     } else {
                         self.mate_mapped += 1;
-                        let rec_id = record.mate_reference_sequence_id(header).unwrap().unwrap(); 
-                        let mat_id = record.reference_sequence_id(header).unwrap().unwrap(); 
+                        let rec_id = record.mate_reference_sequence_id(header).unwrap().unwrap();
+                        let mat_id = record.reference_sequence_id(header).unwrap().unwrap();
 
                         if mat_id != rec_id {
                             self.mate_reference_sequence_id_mismatch += 1;
@@ -148,7 +146,7 @@ impl FlagStat {
 
 #[derive(Debug, Default)]
 pub struct AlignQC {
-    pub(crate) mito_dna: HashSet<usize>,  // Mitochondrial DNA reference sequence IDs
+    pub(crate) mito_dna: HashSet<usize>, // Mitochondrial DNA reference sequence IDs
     pub(crate) all_reads_flagstat: FlagStat,
     pub(crate) barcoded_reads_flagstat: FlagStat,
     pub(crate) hq_flagstat: FlagStat,
@@ -167,21 +165,39 @@ impl AlignQC {
     pub fn update<R: Record>(&mut self, record: &R, header: &sam::Header) {
         let mut flagstat = FlagStat::default();
         flagstat.update(header, record);
-        if flagstat.paired == 1 && flagstat.read_2 == 1{
+        if flagstat.paired == 1 && flagstat.read_2 == 1 {
             self.num_read2_bases += record.sequence().len() as u64;
-            self.num_read2_q30_bases += record.quality_scores().as_ref().iter().filter(|x| *x >= 30).count() as u64;
+            self.num_read2_q30_bases += record
+                .quality_scores()
+                .as_ref()
+                .iter()
+                .filter(|x| *x >= 30)
+                .count() as u64;
         } else {
             self.num_read1_bases += record.sequence().len() as u64;
-            self.num_read1_q30_bases += record.quality_scores().as_ref().iter().filter(|x| *x >= 30).count() as u64;
+            self.num_read1_q30_bases += record
+                .quality_scores()
+                .as_ref()
+                .iter()
+                .filter(|x| *x >= 30)
+                .count() as u64;
         }
 
         self.all_reads_flagstat.add(&flagstat);
-        let is_hq = record.mapping_quality().map_or(true, |x| x.unwrap().get() >= 30);
+        let is_hq = record
+            .mapping_quality()
+            .map_or(true, |x| x.unwrap().get() >= 30);
         if is_hq {
             self.hq_flagstat.add(&flagstat);
         }
 
-        if record.data().get(&Tag::CELL_BARCODE_ID).transpose().unwrap().is_some() {
+        if record
+            .data()
+            .get(&Tag::CELL_BARCODE_ID)
+            .transpose()
+            .unwrap()
+            .is_some()
+        {
             self.barcoded_reads_flagstat.add(&flagstat);
             if let Some(rid) = record.reference_sequence_id(header) {
                 if is_hq && self.mito_dna.contains(&rid.unwrap()) {
@@ -224,9 +240,18 @@ impl AlignQC {
 
         metric.insert("sequenced_reads".to_string(), num_reads as f64);
         metric.insert("sequenced_read_pairs".to_string(), num_pairs as f64);
-        metric.insert("frac_q30_bases_read1".to_string(), self.num_read1_q30_bases as f64 / self.num_read1_bases as f64);
-        metric.insert("frac_q30_bases_read2".to_string(), self.num_read2_q30_bases as f64 / self.num_read2_bases as f64);
-        metric.insert("frac_confidently_mapped".to_string(), fraction_confidently_mapped);
+        metric.insert(
+            "frac_q30_bases_read1".to_string(),
+            self.num_read1_q30_bases as f64 / self.num_read1_bases as f64,
+        );
+        metric.insert(
+            "frac_q30_bases_read2".to_string(),
+            self.num_read2_q30_bases as f64 / self.num_read2_bases as f64,
+        );
+        metric.insert(
+            "frac_confidently_mapped".to_string(),
+            fraction_confidently_mapped,
+        );
         metric.insert("frac_unmapped".to_string(), fraction_unmapped);
         metric.insert("frac_valid_barcode".to_string(), valid_barcode);
         metric.insert("frac_nonnuclear".to_string(), fraction_nonnuclear);
@@ -261,8 +286,18 @@ impl FragmentQC {
     }
 
     pub fn report(&self, metric: &mut Metrics) {
-        metric.insert("frac_duplicates".to_string(), self.num_pcr_duplicates as f64 / (self.num_unique_fragments + self.num_pcr_duplicates) as f64);
-        metric.insert("frac_fragment_in_nucleosome_free_region".to_string(), self.num_frag_nfr as f64 / self.num_unique_fragments as f64);
-        metric.insert("frac_fragment_flanking_single_nucleosome".to_string(), self.num_frag_single as f64 / self.num_unique_fragments as f64);
+        metric.insert(
+            "frac_duplicates".to_string(),
+            self.num_pcr_duplicates as f64
+                / (self.num_unique_fragments + self.num_pcr_duplicates) as f64,
+        );
+        metric.insert(
+            "frac_fragment_in_nucleosome_free_region".to_string(),
+            self.num_frag_nfr as f64 / self.num_unique_fragments as f64,
+        );
+        metric.insert(
+            "frac_fragment_flanking_single_nucleosome".to_string(),
+            self.num_frag_single as f64 / self.num_unique_fragments as f64,
+        );
     }
 }
