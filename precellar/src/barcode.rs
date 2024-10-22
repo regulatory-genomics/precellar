@@ -243,7 +243,8 @@ impl Whitelist {
     }
 
     pub fn mean_base_quality_score(&self) -> f64 {
-        if self.total_base_count <= 0 {
+        if self.total_base_count == 0 {
+            // u64 never < 0
             0.0
         } else {
             self.base_qual_sum as f64 / self.total_base_count as f64
@@ -251,7 +252,7 @@ impl Whitelist {
     }
 
     pub fn frac_q30_bases(&self) -> f64 {
-        if self.total_base_count <= 0 {
+        if self.total_base_count == 0 {
             0.0
         } else {
             self.q30_base_count as f64 / self.total_base_count as f64
@@ -259,7 +260,7 @@ impl Whitelist {
     }
 
     pub fn frac_exact_match(&self) -> f64 {
-        if self.total_count <= 0 {
+        if self.total_count == 0 {
             0.0
         } else {
             1.0 - (self.mismatch_count as f64 / self.total_count as f64)
