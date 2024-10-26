@@ -5,8 +5,9 @@ pub mod utils;
 use log::warn;
 use noodles::fastq;
 use read::ReadValidator;
+pub use read::RegionIndex;
 pub use read::{File, Read, Strand, UrlType};
-use read::{ReadSpan, RegionIndex, ValidateResult};
+use read::{ReadSpan, ValidateResult};
 use region::LibSpec;
 pub use region::{Onlist, Region, RegionType, SequenceType};
 
@@ -169,11 +170,11 @@ impl Assay {
             .ok_or_else(|| anyhow!("Modality not found: {:?}", modality))?
             .clone();
         let regions = regions.read().unwrap();
-        let mut regions = regions.subregions.iter();
-        while let Some(current_region) = regions.next() {
+        let mut sub_regions = regions.subregions.iter();
+        while let Some(current_region) = sub_regions.next() {
             let current_region = current_region.read().unwrap();
             if is_p5(&current_region) {
-                if let Some((next_region, acc)) = advance_until(&mut regions, is_read1) {
+                if let Some((next_region, acc)) = advance_until(&mut sub_regions, is_read1) {
                     let next_region = next_region.read().unwrap();
                     self.update_read::<PathBuf>(
                         &format!("{}-R1", modality),
@@ -213,7 +214,7 @@ impl Assay {
                     }
                 }
             } else if is_read2(&current_region) {
-                if let Some((_, acc)) = advance_until(&mut regions, is_p7) {
+                if let Some((_, acc)) = advance_until(&mut sub_regions, is_p7) {
                     let acc_len = get_length(acc.as_slice(), false);
                     self.update_read::<PathBuf>(
                         &format!("{}-R2", modality),
@@ -328,10 +329,10 @@ impl Assay {
     ) -> impl Iterator<Item = (&Read, RegionIndex)> {
         self.sequence_spec.values().filter_map(move |read| {
             if read.modality == modality {
-                let index = self
+                let parent_region_index = self
                     .get_index(&read.read_id)
                     .unwrap_or_else(|| panic!("Cannot find index for Read: {}", read.read_id));
-                Some((read, index))
+                Some((read, parent_region_index))
             } else {
                 None
             }
@@ -341,8 +342,8 @@ impl Assay {
     /// Get the index of atomic regions of a read in the sequence spec.
     pub fn get_index(&self, read_id: &str) -> Option<RegionIndex> {
         let read = self.sequence_spec.get(read_id)?;
-        let region = self.library_spec.get_parent(&read.primer_id)?;
-        read.get_index(&region.read().unwrap())
+        let library_parent_region = self.library_spec.get_parent(&read.primer_id)?;
+        read.get_index(&library_parent_region.read().unwrap())
     }
 
     pub fn iter_reads(&self, modality: Modality) -> impl Iterator<Item = &Read> {
