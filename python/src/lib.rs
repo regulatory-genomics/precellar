@@ -1,25 +1,29 @@
-mod utils;
 mod pyseqspec;
+mod utils;
 
-use log::info;
-use noodles::fastq::io::Writer;
-use std::{io::BufWriter, collections::HashMap, path::PathBuf, str::FromStr};
+use anyhow::Result;
 use bwa_mem2::{AlignerOpts, BurrowsWheelerAligner, FMIndex, PairedEndStats};
 use either::Either;
-use ::precellar::align::{extend_fastq_record, DummyAligner};
-use pyo3::prelude::*;
-use anyhow::Result;
-use noodles::{bgzf, sam::alignment::io::Write};
-use noodles::bam;
 use itertools::Itertools;
+use log::info;
+use noodles::bam;
+use noodles::fastq::io::Writer;
+use noodles::{bgzf, sam::alignment::io::Write};
+use pyo3::prelude::*;
+use std::{collections::HashMap, io::BufWriter, path::PathBuf, str::FromStr};
 
 use ::precellar::{
-    align::{Alinger, FastqProcessor, NameCollatedRecords},
+    align::{
+        extend_fastq_record, Alinger, Barcode, DummyAligner, FastqProcessor, NameCollatedRecords,
+    },
     fragment::FragmentGenerator,
-    qc::{FragmentQC, Metrics, AlignQC},
+    qc::{AlignQC, FragmentQC, Metrics},
 };
 use pyseqspec::Assay;
-use seqspec::{Modality, utils::{open_file_for_write, Compression}};
+use seqspec::{
+    utils::{open_file_for_write, Compression},
+    Modality,
+};
 
 #[cfg(not(target_env = "msvc"))]
 use tikv_jemallocator::Jemalloc;
@@ -29,19 +33,16 @@ use tikv_jemallocator::Jemalloc;
 static GLOBAL: Jemalloc = Jemalloc;
 
 /// Create a genome index from a fasta file.
-/// 
+///
 /// Parameters
 /// ----------
-/// 
+///
 /// fasta: Path
 ///    File path to the fasta file.
 /// genome_prefix: Path
 ///   File path to the genome index.
 #[pyfunction]
-fn make_genome_index(
-    fasta: PathBuf,
-    genome_prefix: PathBuf,
-) -> Result<()> {
+fn make_genome_index(fasta: PathBuf, genome_prefix: PathBuf) -> Result<()> {
     FMIndex::new(fasta, genome_prefix).unwrap();
     Ok(())
 }
@@ -77,7 +78,7 @@ fn make_genome_index(
 ///     The temporary directory to use.
 /// num_threads: int
 ///     The number of threads to use.
-/// 
+///
 /// Returns
 /// -------
 /// dict
@@ -114,7 +115,10 @@ fn align(
     temp_dir: Option<PathBuf>,
     num_threads: u32,
 ) -> Result<HashMap<String, f64>> {
-    assert!(output_bam.is_some() || output_fragment.is_some(), "either output_bam or output_fragment must be provided");
+    assert!(
+        output_bam.is_some() || output_fragment.is_some(),
+        "either output_bam or output_fragment must be provided"
+    );
 
     let modality = Modality::from_str(modality).unwrap();
     let spec = match assay.extract::<PathBuf>() {
@@ -125,10 +129,11 @@ fn align(
     let aligner = BurrowsWheelerAligner::new(
         FMIndex::read(genome_index).unwrap(),
         AlignerOpts::default().with_n_threads(num_threads as usize),
-        PairedEndStats::default()
+        PairedEndStats::default(),
     );
     let header = aligner.header();
-    let mut processor = FastqProcessor::new(spec, aligner).with_modality(modality)
+    let mut processor = FastqProcessor::new(spec, aligner)
+        .with_modality(modality)
         .with_barcode_correct_prob(0.9);
     let mut fragment_qc = FragmentQC::default();
     mito_dna.into_iter().for_each(|x| {
@@ -137,16 +142,21 @@ fn align(
     });
 
     {
-        let mut bam_writer = output_bam.map(|output| {
-            let mut writer = noodles::bam::io::writer::Builder::default().build_from_path(output)?;
-            writer.write_header(&header)?;
-            anyhow::Ok(writer)
-        }).transpose()?;
+        let mut bam_writer = output_bam
+            .map(|output| {
+                let mut writer =
+                    noodles::bam::io::writer::Builder::default().build_from_path(output)?;
+                writer.write_header(&header)?;
+                anyhow::Ok(writer)
+            })
+            .transpose()?;
         let alignments = processor.gen_barcoded_alignments().map(|data| {
             py.check_signals().unwrap();
             if let Some(writer) = &mut bam_writer {
                 match data.as_ref() {
-                    Either::Left(chunk) => chunk.iter().for_each(|x| writer.write_alignment_record(&header, x).unwrap()),
+                    Either::Left(chunk) => chunk
+                        .iter()
+                        .for_each(|x| writer.write_alignment_record(&header, x).unwrap()),
                     Either::Right(chunk) => chunk.iter().for_each(|(a, b)| {
                         writer.write_alignment_record(&header, a).unwrap();
                         writer.write_alignment_record(&header, b).unwrap();
@@ -155,12 +165,16 @@ fn align(
             }
             data
         });
-        
-        let fragment_writer = output_fragment.as_ref().map(|output| {
-            let compression = compression.map(|x| Compression::from_str(x).unwrap())
-                .or(output.try_into().ok());
-            open_file_for_write(output, compression, compression_level, num_threads)
-        }).transpose()?;
+
+        let fragment_writer = output_fragment
+            .as_ref()
+            .map(|output| {
+                let compression = compression
+                    .map(|x| Compression::from_str(x).unwrap())
+                    .or(output.try_into().ok());
+                open_file_for_write(output, compression, compression_level, num_threads)
+            })
+            .transpose()?;
         if let Some(mut writer) = fragment_writer {
             let mut fragment_generator = FragmentGenerator::default();
             if let Some(dir) = temp_dir {
@@ -168,13 +182,16 @@ fn align(
                 fragment_generator.set_shift_left(shift_left);
                 fragment_generator.set_shift_right(shift_right);
             }
-            fragment_generator.gen_unique_fragments(&header, alignments).into_iter().for_each(|fragments| {
-                py.check_signals().unwrap();
-                fragments.into_iter().for_each(|frag| {
-                    fragment_qc.update(&frag);
-                    writeln!(writer.as_mut(), "{}", frag).unwrap();
-                })
-            });
+            fragment_generator
+                .gen_unique_fragments(&header, alignments)
+                .into_iter()
+                .for_each(|fragments| {
+                    py.check_signals().unwrap();
+                    fragments.into_iter().for_each(|frag| {
+                        fragment_qc.update(&frag);
+                        writeln!(writer.as_mut(), "{}", frag).unwrap();
+                    })
+                });
         }
     }
 
@@ -203,7 +220,7 @@ fn align(
 fn make_fragment(
     py: Python<'_>,
     input: PathBuf,
-    output : PathBuf,
+    output: PathBuf,
     mito_dna: Vec<String>,
     chunk_size: usize,
     compression: Option<&str>,
@@ -212,7 +229,10 @@ fn make_fragment(
     num_threads: u32,
 ) -> Result<HashMap<String, f64>> {
     let file = std::fs::File::open(input)?;
-    let decoder = bgzf::MultithreadedReader::with_worker_count((num_threads as usize).try_into().unwrap(), file);
+    let decoder = bgzf::MultithreadedReader::with_worker_count(
+        (num_threads as usize).try_into().unwrap(),
+        file,
+    );
     let mut reader = bam::io::Reader::from(decoder);
     let header = reader.read_header()?;
 
@@ -220,17 +240,25 @@ fn make_fragment(
     let mut align_qc = AlignQC::default();
     mito_dna.into_iter().for_each(|mito| {
         fragment_qc.add_mito_dna(&mito);
-        header.reference_sequences().get_index_of(&bstr::BString::from(mito)).map(|x| align_qc.add_mito_dna(x));
+        header
+            .reference_sequences()
+            .get_index_of(&bstr::BString::from(mito))
+            .map(|x| align_qc.add_mito_dna(x));
     });
 
-    let chunks = NameCollatedRecords::new(reader.records()).map(|x| {
-        align_qc.update(&x.0, &header);
-        align_qc.update(&x.1, &header);
-        x
-    }).chunks(chunk_size);
-    let alignments = chunks.into_iter().map(|chunk| Either::Right(chunk.collect_vec()));
+    let chunks = NameCollatedRecords::new(reader.records())
+        .map(|x| {
+            align_qc.update(&x.0, &header);
+            align_qc.update(&x.1, &header);
+            x
+        })
+        .chunks(chunk_size);
+    let alignments = chunks
+        .into_iter()
+        .map(|chunk| Either::Right(chunk.collect_vec()));
 
-    let compression = compression.map(|x| Compression::from_str(x).unwrap())
+    let compression = compression
+        .map(|x| Compression::from_str(x).unwrap())
         .or((&output).try_into().ok());
     let mut writer = open_file_for_write(output, compression, compression_level, num_threads)?;
 
@@ -239,13 +267,16 @@ fn make_fragment(
         fragment_generator.set_temp_dir(dir)
     };
 
-    fragment_generator.gen_unique_fragments(&header, alignments).into_iter().for_each(|fragments| {
-        py.check_signals().unwrap();
-        fragments.into_iter().for_each(|frag| {
-            fragment_qc.update(&frag);
-            writeln!(writer.as_mut(), "{}", frag).unwrap();
-        })
-    });
+    fragment_generator
+        .gen_unique_fragments(&header, alignments)
+        .into_iter()
+        .for_each(|fragments| {
+            py.check_signals().unwrap();
+            fragments.into_iter().for_each(|frag| {
+                fragment_qc.update(&frag);
+                writeln!(writer.as_mut(), "{}", frag).unwrap();
+            })
+        });
 
     let mut report = Metrics::default();
     align_qc.report(&mut report);
@@ -258,16 +289,16 @@ fn make_fragment(
 /// Fixed sequences and linkers are removed.
 #[pyfunction]
 #[pyo3(
-    signature = (assay, *, modality, out_dir),
-    text_signature = "(assay, *, modality, out_dir)",
+    signature = (assay, *, modality, out_dir, correct_barcode=false),
+    text_signature = "(assay, *, modality, out_dir, corect_barcode=False)",
 )]
 fn make_fastq(
     py: Python<'_>,
     assay: Bound<'_, PyAny>,
     modality: &str,
     out_dir: PathBuf,
-) -> Result<()>
-{
+    correct_barcode: bool,
+) -> Result<()> {
     let modality = Modality::from_str(modality).unwrap();
     let spec = match assay.extract::<PathBuf>() {
         Ok(p) => seqspec::Assay::from_path(&p).unwrap(),
@@ -276,15 +307,16 @@ fn make_fastq(
 
     let aligner = DummyAligner;
     let mut processor = FastqProcessor::new(spec, aligner).with_modality(modality);
-    let fq_reader = processor.gen_barcoded_fastq(false);
+    let fq_reader = processor.gen_barcoded_fastq(correct_barcode);
 
     info!(
-        "Adding the following barcodes to Read 1: {}", 
-        fq_reader.get_all_barcodes().into_iter().map(|(x, n)| format!("{} ({})", x, n)).join(" + "),
-    );
-    info!(
-        "Adding the following UMIs to Read 1: {}", 
-        fq_reader.get_all_umi().into_iter().map(|(x, n)| format!("{} ({})", x, n)).join(" + "),
+        "Adding these to the start of Read 1: {}",
+        fq_reader
+            .get_all_barcodes()
+            .into_iter()
+            .chain(fq_reader.get_all_umi())
+            .map(|(x, n)| format!("{} ({})", x, n))
+            .join(" + "),
     );
 
     std::fs::create_dir_all(&out_dir)?;
@@ -304,28 +336,33 @@ fn make_fastq(
         if i % 1000000 == 0 {
             py.check_signals().unwrap();
         }
-        let mut bc = record.barcode.unwrap().raw;
-        if let Some(umi) = record.umi {
-            extend_fastq_record(&mut bc, &umi);
-        }
-        extend_fastq_record(&mut bc, &record.read1.unwrap());
+        let Barcode { mut raw, corrected } = record.barcode.unwrap();
+        if !correct_barcode || corrected.is_some() {
+            if let Some(corrected) = corrected {
+                *raw.sequence_mut() = corrected;
+            }
+            if let Some(umi) = record.umi {
+                extend_fastq_record(&mut raw, &umi);
+            }
+            extend_fastq_record(&mut raw, &record.read1.unwrap());
 
-        read1_writer.write_record(&bc)?;
-        if let Some(writer) = &mut read2_writer {
-            writer.write_record(&record.read2.unwrap())?;
+            read1_writer.write_record(&raw)?;
+            if let Some(writer) = &mut read2_writer {
+                writer.write_record(&record.read2.unwrap())?;
+            }
         }
     }
 
     Ok(())
 }
 
-
 /// A Python module implemented in Rust.
 #[pymodule]
 fn precellar(m: &Bound<'_, PyModule>) -> PyResult<()> {
     env_logger::builder()
         .filter_level(log::LevelFilter::Info)
-        .try_init().unwrap();
+        .try_init()
+        .unwrap();
 
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
 
