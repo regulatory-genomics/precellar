@@ -269,6 +269,7 @@ impl Whitelist {
 }
 
 /// A barcode validator that uses a barcode counter to validate barcodes.
+#[derive(Debug, Clone)]
 pub struct BarcodeCorrector {
     /// threshold for sum of probability of error on barcode QVs. Barcodes exceeding
     /// this threshold will be marked as not valid.
@@ -276,6 +277,8 @@ pub struct BarcodeCorrector {
     /// if the posterior probability of a correction
     /// exceeds this threshold, the barcode will be corrected.
     bc_confidence_threshold: f64,
+    /// The number of mismatches allowed in barcode
+    max_mismatch: usize, 
 }
 
 impl Default for BarcodeCorrector {
@@ -283,6 +286,7 @@ impl Default for BarcodeCorrector {
         Self {
             max_expected_errors: f64::MAX,
             bc_confidence_threshold: 0.975,
+            max_mismatch: 1,
         }
     }
 }
@@ -290,6 +294,11 @@ impl Default for BarcodeCorrector {
 impl BarcodeCorrector {
     pub fn with_bc_confidence_threshold(mut self, threshold: f64) -> Self {
         self.bc_confidence_threshold = threshold;
+        self
+    }
+
+    pub fn with_max_missmatch(mut self, max_mismatch: usize) -> Self {
+        self.max_mismatch = max_mismatch;
         self
     }
 }
@@ -313,14 +322,13 @@ impl BarcodeCorrector {
         barcode_counts: &'a OligoFrequncy,
         barcode: &'a [u8],
         qual: &[u8],
-        n_mismatch: usize,
     ) -> Result<&[u8], BarcodeError> {
         let expected_errors: f64 = qual.iter().map(|&q| error_probability(q)).sum();
         if expected_errors >= self.max_expected_errors {
             return Err(BarcodeError::ExceedExpectedError(expected_errors));
         }
 
-        let (bc, prob) = barcode_counts.likelihood(barcode, qual, n_mismatch);
+        let (bc, prob) = barcode_counts.likelihood(barcode, qual, self.max_mismatch);
         if prob <= 0.0 {
             Err(BarcodeError::NoMatch)
         } else if prob >= self.bc_confidence_threshold {
@@ -330,9 +338,6 @@ impl BarcodeCorrector {
         }
     }
 }
-
-/// Barcode correction problem: Given a whitelist of barcodes, and a sequenced barcode with quality scores,
-/// decide which barcode in the whitelist generated the sequenced barcode.
 
 /// Convert Illumina quality scores to base-calling error probabilities, i.e.,
 /// the probability of an incorrect base call.

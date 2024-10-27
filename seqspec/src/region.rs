@@ -106,9 +106,11 @@ impl LibSpec {
     }
 }
 
+pub type RegionId = String;
+
 #[derive(Deserialize, Serialize, Debug, Clone)]
 pub struct Region {
-    pub region_id: String,
+    pub region_id: RegionId,
     pub region_type: RegionType,
     pub name: String,
     pub sequence_type: SequenceType,

@@ -9,7 +9,7 @@ pub use read::RegionIndex;
 pub use read::{File, Read, Strand, UrlType};
 use read::{ReadSpan, ValidateResult};
 use region::LibSpec;
-pub use region::{Onlist, Region, RegionType, SequenceType};
+pub use region::{Onlist, Region, RegionId, RegionType, SequenceType};
 
 use anyhow::{anyhow, bail, Result};
 use serde::{Deserialize, Deserializer, Serialize};
