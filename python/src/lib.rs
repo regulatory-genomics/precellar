@@ -1,9 +1,12 @@
 mod utils;
 mod pyseqspec;
 
-use std::{collections::HashMap, path::PathBuf, str::FromStr};
+use log::info;
+use noodles::fastq::io::Writer;
+use std::{io::BufWriter, collections::HashMap, path::PathBuf, str::FromStr};
 use bwa_mem2::{AlignerOpts, BurrowsWheelerAligner, FMIndex, PairedEndStats};
 use either::Either;
+use ::precellar::align::{extend_fastq_record, DummyAligner};
 use pyo3::prelude::*;
 use anyhow::Result;
 use noodles::{bgzf, sam::alignment::io::Write};
@@ -250,6 +253,72 @@ fn make_fragment(
     Ok(report.into())
 }
 
+/// Generate consolidated fastq files from the sequencing specification.
+/// The barcodes and UMIs are concatenated to the read 1 sequence.
+/// Fixed sequences and linkers are removed.
+#[pyfunction]
+#[pyo3(
+    signature = (assay, *, modality, out_dir),
+    text_signature = "(assay, *, modality, out_dir)",
+)]
+fn make_fastq(
+    py: Python<'_>,
+    assay: Bound<'_, PyAny>,
+    modality: &str,
+    out_dir: PathBuf,
+) -> Result<()>
+{
+    let modality = Modality::from_str(modality).unwrap();
+    let spec = match assay.extract::<PathBuf>() {
+        Ok(p) => seqspec::Assay::from_path(&p).unwrap(),
+        _ => assay.extract::<PyRef<Assay>>()?.0.clone(),
+    };
+
+    let aligner = DummyAligner;
+    let mut processor = FastqProcessor::new(spec, aligner).with_modality(modality);
+    let fq_reader = processor.gen_barcoded_fastq(false);
+
+    info!(
+        "Adding the following barcodes to Read 1: {}", 
+        fq_reader.get_all_barcodes().into_iter().map(|(x, n)| format!("{} ({})", x, n)).join(" + "),
+    );
+    info!(
+        "Adding the following UMIs to Read 1: {}", 
+        fq_reader.get_all_umi().into_iter().map(|(x, n)| format!("{} ({})", x, n)).join(" + "),
+    );
+
+    std::fs::create_dir_all(&out_dir)?;
+    let read1_fq = out_dir.join("R1.fq.zst");
+    let read1_writer = open_file_for_write(read1_fq, Some(Compression::Zstd), None, 8)?;
+    let mut read1_writer = Writer::new(BufWriter::new(read1_writer));
+    let mut read2_writer = if fq_reader.is_paired_end() {
+        let read2_fq = out_dir.join("R2.fq.zst");
+        let read2_writer = open_file_for_write(read2_fq, Some(Compression::Zstd), None, 8)?;
+        let read2_writer = Writer::new(BufWriter::new(read2_writer));
+        Some(read2_writer)
+    } else {
+        None
+    };
+
+    for (i, record) in fq_reader.enumerate() {
+        if i % 1000000 == 0 {
+            py.check_signals().unwrap();
+        }
+        let mut bc = record.barcode.unwrap().raw;
+        if let Some(umi) = record.umi {
+            extend_fastq_record(&mut bc, &umi);
+        }
+        extend_fastq_record(&mut bc, &record.read1.unwrap());
+
+        read1_writer.write_record(&bc)?;
+        if let Some(writer) = &mut read2_writer {
+            writer.write_record(&record.read2.unwrap())?;
+        }
+    }
+
+    Ok(())
+}
+
 
 /// A Python module implemented in Rust.
 #[pymodule]
@@ -265,6 +334,7 @@ fn precellar(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(make_genome_index, m)?)?;
     m.add_function(wrap_pyfunction!(align, m)?)?;
     m.add_function(wrap_pyfunction!(make_fragment, m)?)?;
+    m.add_function(wrap_pyfunction!(make_fastq, m)?)?;
 
     utils::register_submodule(m)?;
     Ok(())

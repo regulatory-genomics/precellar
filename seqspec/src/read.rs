@@ -83,7 +83,10 @@ impl Default for Read {
 }
 
 impl Read {
-    pub fn open(&self) -> Option<fastq::Reader<impl BufRead>> {
+    /// Open the fastq files for reading, and return a fastq reader.
+    /// If the read has multiple fastq files, they will be concatenated.
+    /// If the read has no fastq files, return None.
+    pub fn open(&self) -> Option<fastq::Reader<Box<dyn BufRead>>> {
         let files = self
             .files
             .clone()
@@ -96,9 +99,10 @@ impl Read {
         }
         let reader =
             multi_reader::MultiReader::new(files.into_iter().map(move |file| file.open().unwrap()));
-        Some(fastq::Reader::new(BufReader::new(reader)))
+        Some(fastq::Reader::new(Box::new(BufReader::new(reader))))
     }
 
+    /// Get the actual length of the read by reading the first record from the fastq file.
     pub fn actual_len(&self) -> Result<usize> {
         let mut reader = self.open().unwrap();
         let mut record = fastq::Record::default();
@@ -155,7 +159,7 @@ impl Read {
         }
     }
 
-    /// Get the regions of the read.
+    /// Helper function to get the region index for a read.
     fn get_read_span<'a, I>(&self, mut regions: I) -> RegionIndex
     where
         I: Iterator<Item = &'a Arc<RwLock<Region>>>,

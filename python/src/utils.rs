@@ -97,7 +97,6 @@ fn strip_barcode_from_fastq(
     in_fq: PathBuf,
     out_fq: PathBuf,
     regex: &str,
-    //out_barcode: Option<PathBuf>,
     out_barcode: Option<Bound<'_, PyAny>>,
     from_description: bool,
     compression: Option<&str>,

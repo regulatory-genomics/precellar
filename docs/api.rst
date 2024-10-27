@@ -24,6 +24,7 @@ Core functions
     make_genome_index
     align
     make_fragment
+    make_fastq
 
 Utilities
 ~~~~~~~~~
