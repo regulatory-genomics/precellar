@@ -349,6 +349,32 @@ pub struct AnnotatedFastqReader {
 }
 
 impl AnnotatedFastqReader {
+    pub fn get_all_barcodes(&self) -> Vec<(&str, usize)> {
+        self.inner
+            .iter()
+            .flat_map(|(annotator, _)| {
+                annotator
+                    .subregions
+                    .iter()
+                    .filter(|(_, region_type, _)| region_type.is_barcode())
+                    .map(|(id, _, r)| (id.as_str(), r.len()))
+            })
+            .collect()
+    }
+
+    pub fn get_all_umi(&self) -> Vec<(&str, usize)> {
+        self.inner
+            .iter()
+            .flat_map(|(annotator, _)| {
+                annotator
+                    .subregions
+                    .iter()
+                    .filter(|(_, region_type, _)| region_type.is_umi())
+                    .map(|(id, _, r)| (id.as_str(), r.len()))
+            })
+            .collect()
+    }
+
     pub fn is_paired_end(&self) -> bool {
         let mut has_read1 = false;
         let mut has_read2 = false;
@@ -428,7 +454,7 @@ struct FastqAnnotator {
 impl<'a> FastqAnnotator {
     pub fn new(read: &Read, index: RegionIndex, whitelists: &IndexMap<String, Whitelist>, corrector: BarcodeCorrector) -> Option<Self> {
         let subregions: Vec<_> = index.index.into_iter()
-            .filter(|x| x.1.is_barcode() || x.1.is_target()) // only barcode and target regions
+            .filter(|x| x.1.is_barcode() || x.1.is_umi() || x.1.is_target()) // only barcode and target regions
             .collect();
         if subregions.is_empty() {
             None
@@ -463,10 +489,12 @@ impl<'a> FastqAnnotator {
         let mut read2 = None;
         self.subregions.iter().for_each(|(id, region_type, range)| {
             let mut fq = slice_fastq_record(&record, range.start as usize, range.end as usize);
-            if region_type.is_barcode() {
-                if self.is_reverse {
-                    fq = rev_compl_fastq_record(fq);
-                }
+            if self.is_reverse && (region_type.is_barcode() || region_type.is_umi()) {
+                fq = rev_compl_fastq_record(fq);
+            }
+            if region_type.is_umi() {
+                umi = Some(fq);
+            } else if region_type.is_barcode() {
                 let corrected = self.whitelists.get(id).map_or(Some(fq.sequence().to_vec()), |counts|
                     self.corrector.correct(
                         counts,

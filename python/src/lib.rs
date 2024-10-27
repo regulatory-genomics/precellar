@@ -1,6 +1,7 @@
 mod utils;
 mod pyseqspec;
 
+use log::info;
 use noodles::fastq::io::Writer;
 use std::{io::BufWriter, collections::HashMap, path::PathBuf, str::FromStr};
 use bwa_mem2::{AlignerOpts, BurrowsWheelerAligner, FMIndex, PairedEndStats};
@@ -252,6 +253,9 @@ fn make_fragment(
     Ok(report.into())
 }
 
+/// Generate consolidated fastq files from the sequencing specification.
+/// The barcodes and UMIs are concatenated to the read 1 sequence.
+/// Fixed sequences and linkers are removed.
 #[pyfunction]
 #[pyo3(
     signature = (assay, *, modality, out_dir),
@@ -273,6 +277,15 @@ fn make_fastq(
     let aligner = DummyAligner;
     let mut processor = FastqProcessor::new(spec, aligner).with_modality(modality);
     let fq_reader = processor.gen_barcoded_fastq(false);
+
+    info!(
+        "Adding the following barcodes to Read 1: {}", 
+        fq_reader.get_all_barcodes().into_iter().map(|(x, n)| format!("{} ({})", x, n)).join(" + "),
+    );
+    info!(
+        "Adding the following UMIs to Read 1: {}", 
+        fq_reader.get_all_umi().into_iter().map(|(x, n)| format!("{} ({})", x, n)).join(" + "),
+    );
 
     std::fs::create_dir_all(&out_dir)?;
     let read1_fq = out_dir.join("R1.fq.zst");
