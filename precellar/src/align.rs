@@ -163,74 +163,76 @@ impl<A: Alinger> FastqProcessor<A> {
 
         let mut progress_bar = tqdm!(total = fq_reader.total_reads.unwrap_or(0));
         let fq_reader = VectorChunk::new(fq_reader, self.aligner.chunk_size());
-        fq_reader
-            .map(move |data| {
-                if is_paired {
-                    let (barcodes, mut reads): (Vec<_>, Vec<_>) = data
-                        .into_iter()
-                        .map(|rec| {
-                            (rec.barcode.unwrap(), (rec.read1.unwrap(), rec.read2.unwrap()))
-                        })
-                        .unzip();
-                    let alignments: Vec<_> = self.aligner.align_read_pairs(&mut reads).collect();
-                    let results = barcodes
-                        .into_iter()
-                        .zip(alignments)
-                        .map(|(barcode, (ali1, ali2))| {
-                            let ali1_ = add_cell_barcode(
-                                &header,
-                                &ali1,
-                                barcode.raw.sequence(),
-                                barcode.raw.quality_scores(),
-                                barcode.corrected.as_deref(),
-                            )
-                            .unwrap();
-                            let ali2_ = add_cell_barcode(
-                                &header,
-                                &ali2,
-                                barcode.raw.sequence(),
-                                barcode.raw.quality_scores(),
-                                barcode.corrected.as_deref(),
-                            )
-                            .unwrap();
-                            {
-                                let mut align_qc_lock = align_qc.lock().unwrap();
-                                align_qc_lock.update(&ali1_, &header);
-                                align_qc_lock.update(&ali2_, &header);
-                            }
-                            (ali1_, ali2_)
-                        })
-                        .collect::<Vec<_>>();
-                    progress_bar.update(results.len()).unwrap();
-                    Either::Right(results)
-                } else {
-                    let (barcodes, mut reads): (Vec<_>, Vec<_>) = data
-                        .into_iter()
-                        .map(|rec| (rec.barcode.unwrap(), rec.read1.unwrap()))
-                        .unzip();
-                    let alignments: Vec<_> = self.aligner.align_reads(&mut reads).collect();
-                    let results = barcodes
-                        .into_iter()
-                        .zip(alignments)
-                        .map(|(barcode, alignment)| {
-                            let ali = add_cell_barcode(
-                                &header,
-                                &alignment,
-                                barcode.raw.sequence(),
-                                barcode.raw.quality_scores(),
-                                barcode.corrected.as_deref(),
-                            )
-                            .unwrap();
-                            {
-                                align_qc.lock().unwrap().update(&ali, &header);
-                            }
-                            ali
-                        })
-                        .collect::<Vec<_>>();
-                    progress_bar.update(results.len()).unwrap();
-                    Either::Left(results)
-                }
-            })
+        fq_reader.map(move |data| {
+            if is_paired {
+                let (barcodes, mut reads): (Vec<_>, Vec<_>) = data
+                    .into_iter()
+                    .map(|rec| {
+                        (
+                            rec.barcode.unwrap(),
+                            (rec.read1.unwrap(), rec.read2.unwrap()),
+                        )
+                    })
+                    .unzip();
+                let alignments: Vec<_> = self.aligner.align_read_pairs(&mut reads).collect();
+                let results = barcodes
+                    .into_iter()
+                    .zip(alignments)
+                    .map(|(barcode, (ali1, ali2))| {
+                        let ali1_ = add_cell_barcode(
+                            &header,
+                            &ali1,
+                            barcode.raw.sequence(),
+                            barcode.raw.quality_scores(),
+                            barcode.corrected.as_deref(),
+                        )
+                        .unwrap();
+                        let ali2_ = add_cell_barcode(
+                            &header,
+                            &ali2,
+                            barcode.raw.sequence(),
+                            barcode.raw.quality_scores(),
+                            barcode.corrected.as_deref(),
+                        )
+                        .unwrap();
+                        {
+                            let mut align_qc_lock = align_qc.lock().unwrap();
+                            align_qc_lock.update(&ali1_, &header);
+                            align_qc_lock.update(&ali2_, &header);
+                        }
+                        (ali1_, ali2_)
+                    })
+                    .collect::<Vec<_>>();
+                progress_bar.update(results.len()).unwrap();
+                Either::Right(results)
+            } else {
+                let (barcodes, mut reads): (Vec<_>, Vec<_>) = data
+                    .into_iter()
+                    .map(|rec| (rec.barcode.unwrap(), rec.read1.unwrap()))
+                    .unzip();
+                let alignments: Vec<_> = self.aligner.align_reads(&mut reads).collect();
+                let results = barcodes
+                    .into_iter()
+                    .zip(alignments)
+                    .map(|(barcode, alignment)| {
+                        let ali = add_cell_barcode(
+                            &header,
+                            &alignment,
+                            barcode.raw.sequence(),
+                            barcode.raw.quality_scores(),
+                            barcode.corrected.as_deref(),
+                        )
+                        .unwrap();
+                        {
+                            align_qc.lock().unwrap().update(&ali, &header);
+                        }
+                        ali
+                    })
+                    .collect::<Vec<_>>();
+                progress_bar.update(results.len()).unwrap();
+                Either::Left(results)
+            }
+        })
     }
 
     pub fn gen_barcoded_fastq(&mut self, correct_barcode: bool) -> AnnotatedFastqReader {
@@ -328,9 +330,9 @@ impl<A: Alinger> FastqProcessor<A> {
                 let r = r.read().unwrap();
                 if r.region_type.is_barcode() {
                     if let Some(onlist) = r.onlist.as_ref() {
-                        let list = onlist.read().map(|list|
-                            (r.region_id.to_string(), Whitelist::new(list))
-                        );
+                        let list = onlist
+                            .read()
+                            .map(|list| (r.region_id.to_string(), Whitelist::new(list)));
                         Some(list)
                     } else {
                         None
@@ -338,7 +340,8 @@ impl<A: Alinger> FastqProcessor<A> {
                 } else {
                     None
                 }
-            }).collect()
+            })
+            .collect()
     }
 }
 
@@ -394,7 +397,9 @@ impl AnnotatedFastqReader {
 }
 
 impl FromIterator<(FastqAnnotator, fastq::Reader<Box<dyn BufRead>>)> for AnnotatedFastqReader {
-    fn from_iter<T: IntoIterator<Item = (FastqAnnotator, fastq::Reader<Box<dyn BufRead>>)>>(iter: T) -> Self {
+    fn from_iter<T: IntoIterator<Item = (FastqAnnotator, fastq::Reader<Box<dyn BufRead>>)>>(
+        iter: T,
+    ) -> Self {
         Self {
             buffer: fastq::Record::default(),
             total_reads: None,
@@ -426,16 +431,20 @@ impl Iterator for AnnotatedFastqReader {
             .collect();
 
         if records.is_empty() {
-            return None
+            None
         } else if missing.is_some() {
             panic!("Missing records in this file: {}", missing.unwrap());
         } else {
-            Some(records.into_iter().reduce(|mut this, other| {
-                this.join(other);
-                this
-            }).unwrap())
+            Some(
+                records
+                    .into_iter()
+                    .reduce(|mut this, other| {
+                        this.join(other);
+                        this
+                    })
+                    .unwrap(),
+            )
         }
-        
     }
 }
 
@@ -451,19 +460,28 @@ struct FastqAnnotator {
     max_len: usize,
 }
 
-impl<'a> FastqAnnotator {
-    pub fn new(read: &Read, index: RegionIndex, whitelists: &IndexMap<String, Whitelist>, corrector: BarcodeCorrector) -> Option<Self> {
-        let subregions: Vec<_> = index.index.into_iter()
+impl FastqAnnotator {
+    pub fn new(
+        read: &Read,
+        index: RegionIndex,
+        whitelists: &IndexMap<String, Whitelist>,
+        corrector: BarcodeCorrector,
+    ) -> Option<Self> {
+        let subregions: Vec<_> = index
+            .index
+            .into_iter()
             .filter(|x| x.1.is_barcode() || x.1.is_umi() || x.1.is_target()) // only barcode and target regions
             .collect();
         if subregions.is_empty() {
             None
         } else {
-            let whitelists = subregions.iter()
+            let whitelists = subregions
+                .iter()
                 .flat_map(|(id, _, _)| {
                     let v = whitelists.get(id)?;
                     Some((id.clone(), v.get_barcode_counts().clone()))
-                }).collect();
+                })
+                .collect();
             let anno = Self {
                 whitelists,
                 corrector,
@@ -480,7 +498,12 @@ impl<'a> FastqAnnotator {
     fn annotate(&self, record: &fastq::Record) -> Result<AnnotatedRecord> {
         let n = record.sequence().len();
         if n < self.min_len || n > self.max_len {
-            bail!("Read length ({}) out of range: {}-{}", n, self.min_len, self.max_len);
+            bail!(
+                "Read length ({}) out of range: {}-{}",
+                n,
+                self.min_len,
+                self.max_len
+            );
         }
 
         let mut barcode: Option<Barcode> = None;
@@ -488,20 +511,22 @@ impl<'a> FastqAnnotator {
         let mut read1 = None;
         let mut read2 = None;
         self.subregions.iter().for_each(|(id, region_type, range)| {
-            let mut fq = slice_fastq_record(&record, range.start as usize, range.end as usize);
+            let mut fq = slice_fastq_record(record, range.start as usize, range.end as usize);
             if self.is_reverse && (region_type.is_barcode() || region_type.is_umi()) {
                 fq = rev_compl_fastq_record(fq);
             }
             if region_type.is_umi() {
                 umi = Some(fq);
             } else if region_type.is_barcode() {
-                let corrected = self.whitelists.get(id).map_or(Some(fq.sequence().to_vec()), |counts|
-                    self.corrector.correct(
-                        counts,
-                        fq.sequence(),
-                        fq.quality_scores(), 
-                    ).ok().map(|x| x.to_vec())
-                );
+                let corrected =
+                    self.whitelists
+                        .get(id)
+                        .map_or(Some(fq.sequence().to_vec()), |counts| {
+                            self.corrector
+                                .correct(counts, fq.sequence(), fq.quality_scores())
+                                .ok()
+                                .map(|x| x.to_vec())
+                        });
                 if let Some(bc) = &mut barcode {
                     bc.extend(&Barcode { raw: fq, corrected });
                 } else {
@@ -514,16 +539,19 @@ impl<'a> FastqAnnotator {
                     } else {
                         read2 = Some(fq);
                     }
+                } else if let Some(s) = &mut read1 {
+                    extend_fastq_record(s, &fq);
                 } else {
-                    if let Some(s) = &mut read1 {
-                        extend_fastq_record(s, &fq);
-                    } else {
-                        read1 = Some(fq);
-                    }
+                    read1 = Some(fq);
                 }
             }
         });
-        Ok(AnnotatedRecord { barcode, umi, read1, read2 })
+        Ok(AnnotatedRecord {
+            barcode,
+            umi,
+            read1,
+            read2,
+        })
     }
 }
 
@@ -560,18 +588,25 @@ impl AnnotatedRecord {
         self.read1.as_ref().map_or(0, |x| x.sequence().len())
             + self.read2.as_ref().map_or(0, |x| x.sequence().len())
     }
+    pub fn is_empty(&self) -> bool {
+        self.read1.is_none() && self.read2.is_none()
+    }
 }
 
 impl AnnotatedRecord {
     pub fn join(&mut self, other: Self) {
         if let Some(bc) = &mut self.barcode {
-            other.barcode.as_ref().map(|x| bc.extend(x));
+            if let Some(x) = other.barcode.as_ref() {
+                bc.extend(x)
+            }
         } else {
             self.barcode = other.barcode;
         }
 
         if let Some(umi) = &mut self.umi {
-            other.umi.as_ref().map(|x| extend_fastq_record(umi, x));
+            if let Some(x) = other.umi.as_ref() {
+                extend_fastq_record(umi, x)
+            }
         } else {
             self.umi = other.umi;
         }
@@ -601,10 +636,7 @@ pub struct VectorChunk<I> {
 
 impl<I> VectorChunk<I> {
     pub fn new(inner: I, chunk_size: usize) -> Self {
-        Self {
-            inner,
-            chunk_size,
-        }
+        Self { inner, chunk_size }
     }
 }
 
@@ -664,7 +696,8 @@ fn slice_fastq_record(record: &fastq::Record, start: usize, end: usize) -> fastq
 
 pub fn extend_fastq_record(this: &mut fastq::Record, other: &fastq::Record) {
     this.sequence_mut().extend_from_slice(other.sequence());
-    this.quality_scores_mut().extend_from_slice(other.quality_scores());
+    this.quality_scores_mut()
+        .extend_from_slice(other.quality_scores());
 }
 
 fn rev_compl_fastq_record(mut record: fastq::Record) -> fastq::Record {
