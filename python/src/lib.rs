@@ -215,7 +215,11 @@ fn align(
         temp_dir=None,
         num_threads=8,
     ),
-    text_signature = "(seqspec, genome_index, *, modality, output_bam=None, output_fragment=None, num_threads=8)",
+    text_signature = "(input, output, *,
+        mito_dna=['chrM', 'M'],
+        chunk_size=50000000,
+        compression=None, compression_level=None,
+        temp_dir=None, num_threads=8)",
 )]
 fn make_fragment(
     py: Python<'_>,
