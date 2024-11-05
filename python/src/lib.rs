@@ -14,7 +14,7 @@ use std::{collections::HashMap, io::BufWriter, path::PathBuf, str::FromStr};
 
 use ::precellar::{
     align::{
-        extend_fastq_record, Alinger, Barcode, DummyAligner, FastqProcessor, NameCollatedRecords,
+        extend_fastq_record, Aligner, Barcode, DummyAligner, FastqProcessor, NameCollatedRecords,
     },
     fragment::FragmentGenerator,
     qc::{AlignQC, FragmentQC, Metrics},
