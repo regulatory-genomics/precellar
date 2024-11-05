@@ -20,7 +20,7 @@ use std::ops::Range;
 use std::sync::{Arc, Mutex};
 
 // GenomeAligner and TranscriptomeAligner
-pub trait Alinger {
+pub trait Aligner {
     type AlignOutput;
     type ModRecordBuf;
 
@@ -59,7 +59,7 @@ pub trait Alinger {
 
 pub struct DummyAligner;
 
-impl Alinger for DummyAligner {
+impl Aligner for DummyAligner {
     type AlignOutput = sam::Record;
     type ModRecordBuf = RecordBuf;
     fn chunk_size(&self) -> usize {
@@ -97,7 +97,7 @@ impl Alinger for DummyAligner {
     }
 }
 
-impl Alinger for StarAligner {
+impl Aligner for StarAligner {
     type AlignOutput = Vec<sam::Record>;
     type ModRecordBuf = Vec<RecordBuf>;
 
@@ -168,7 +168,7 @@ impl Alinger for StarAligner {
     }
 }
 
-impl Alinger for BurrowsWheelerAligner {
+impl Aligner for BurrowsWheelerAligner {
     type AlignOutput = sam::Record;
     type ModRecordBuf = RecordBuf;
 
@@ -242,7 +242,7 @@ pub struct FastqProcessor<A> {
     mismatch_in_barcode: usize, // The number of mismatches allowed in barcode
 }
 
-impl<A: Alinger> FastqProcessor<A> {
+impl<A: Aligner> FastqProcessor<A> {
     pub fn new(assay: Assay, aligner: A) -> Self {
         Self {
             assay,
