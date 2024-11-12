@@ -8,9 +8,10 @@ use indexmap::IndexMap;
 use kdam::{tqdm, BarExt};
 use log::info;
 use noodles::sam::alignment::record_buf::{data::field::value::Value, RecordBuf};
-use noodles::sam::alignment::{record::data::field::tag::Tag, Record};
+use noodles::sam::alignment::record::data::field::tag::Tag;
 use noodles::{bam, fastq, sam};
 use rayon::iter::ParallelIterator;
+use rayon::slice::ParallelSlice;
 use seqspec::{Assay, Modality, Read, RegionId, RegionIndex, RegionType};
 use smallvec::SmallVec;
 use star_aligner::StarAligner;
@@ -56,13 +57,11 @@ pub trait Aligner {
 
     fn align_reads(
         &mut self,
-        header: &sam::Header,
         records: Vec<AnnotatedRecord>,
     ) -> Vec<Self::AlignOutput>;
 
     fn align_read_pairs(
         &mut self,
-        header: &sam::Header,
         records: Vec<AnnotatedRecord>,
     ) -> Vec<(Self::AlignOutput, Self::AlignOutput)>;
 }
@@ -80,13 +79,12 @@ impl Aligner for DummyAligner {
         sam::Header::default()
     }
 
-    fn align_reads(&mut self, _: &sam::Header, _: Vec<AnnotatedRecord>) -> Vec<Self::AlignOutput> {
+    fn align_reads(&mut self, _: Vec<AnnotatedRecord>) -> Vec<Self::AlignOutput> {
         Vec::new()
     }
 
     fn align_read_pairs(
         &mut self,
-        _: &sam::Header,
         _: Vec<AnnotatedRecord>,
     ) -> Vec<(Self::AlignOutput, Self::AlignOutput)> {
         Vec::new()
@@ -106,7 +104,6 @@ impl Aligner for BurrowsWheelerAligner {
 
     fn align_reads(
         &mut self,
-        header: &sam::Header,
         records: Vec<AnnotatedRecord>,
     ) -> Vec<Self::AlignOutput> {
         let (info, mut reads): (Vec<_>, Vec<_>) = records
@@ -117,23 +114,21 @@ impl Aligner for BurrowsWheelerAligner {
         // TODO: add UMI
         self.align_reads(reads.as_mut_slice())
             .enumerate()
-            .map(|(i, alignment)| {
+            .map(|(i, mut alignment)| {
                 let (bc, umi) = info.get(i).unwrap();
                 add_cell_barcode(
-                    header,
-                    &alignment,
+                    &mut alignment,
                     bc.raw.sequence(),
                     bc.raw.quality_scores(),
                     bc.corrected.as_deref(),
-                )
-                .unwrap()
+                );
+                alignment
             })
             .collect()
     }
 
     fn align_read_pairs(
         &mut self,
-        header: &sam::Header,
         records: Vec<AnnotatedRecord>,
     ) -> Vec<(Self::AlignOutput, Self::AlignOutput)> {
         let (info, mut reads): (Vec<_>, Vec<_>) = records
@@ -147,25 +142,21 @@ impl Aligner for BurrowsWheelerAligner {
             .unzip();
         self.align_read_pairs(&mut reads)
             .enumerate()
-            .map(|(i, (ali1, ali2))| {
+            .map(|(i, (mut ali1, mut ali2))| {
                 let (bc, umi) = info.get(i).unwrap();
-                let ali1_ = add_cell_barcode(
-                    &header,
-                    &ali1,
+                add_cell_barcode(
+                    &mut ali1,
                     bc.raw.sequence(),
                     bc.raw.quality_scores(),
                     bc.corrected.as_deref(),
-                )
-                .unwrap();
-                let ali2_ = add_cell_barcode(
-                    &header,
-                    &ali2,
+                );
+                add_cell_barcode(
+                    &mut ali2,
                     bc.raw.sequence(),
                     bc.raw.quality_scores(),
                     bc.corrected.as_deref(),
-                )
-                .unwrap();
-                (ali1_, ali2_)
+                );
+                (ali1, ali2)
             })
             .collect()
     }
@@ -184,88 +175,64 @@ impl Aligner for StarAligner {
 
     fn align_reads(
         &mut self,
-        header: &sam::Header,
         records: Vec<AnnotatedRecord>,
     ) -> Vec<Self::AlignOutput> {
-        let (info, mut reads): (Vec<_>, Vec<_>) = records
-            .into_iter()
-            .map(|rec| ((rec.barcode.unwrap(), rec.umi), rec.read1.unwrap()))
-            .unzip();
+        let num_threads = 8;
+        let chunk_size = get_chunk_size(records.len(), num_threads);
 
-        // TODO: StarAligner can expose a method to align a single read instead of a batch,
-        // so that barcode and UMI processing can be done in parallel.
-        StarAligner::align_reads(self, reads.as_mut_slice())
-            .collect::<Vec<_>>()
-            .into_iter()
-            .enumerate()
-            .map(|(i, alignment)| {
-                let (bc, umi) = info.get(i).unwrap();
-                alignment
-                    .into_iter()
-                    .map(|x| {
-                        add_cell_barcode(
-                            header,
-                            &x,
-                            bc.raw.sequence(),
-                            bc.raw.quality_scores(),
-                            bc.corrected.as_deref(),
-                        )
-                        .unwrap()
-                    })
-                    .collect()
+        records.par_chunks(chunk_size).flat_map_iter(|chunk| {
+            let mut aligner = self.clone();
+            chunk.iter().map(move |rec| {
+                let bc = rec.barcode.as_ref().unwrap();
+                let mut ali = aligner.align_read(&rec.read1.as_ref().unwrap()).unwrap();
+                ali.iter_mut().for_each(|alignment|
+                    add_cell_barcode(
+                        alignment,
+                        bc.raw.sequence(),
+                        bc.raw.quality_scores(),
+                        bc.corrected.as_deref(),
+                    )
+                );
+                ali
             })
-            .collect()
+        }).collect()
     }
 
     fn align_read_pairs(
         &mut self,
-        header: &sam::Header,
         records: Vec<AnnotatedRecord>,
     ) -> Vec<(Self::AlignOutput, Self::AlignOutput)> {
-        let (info, mut reads): (Vec<_>, Vec<_>) = records
-            .into_iter()
-            .map(|rec| {
-                (
-                    (rec.barcode.unwrap(), rec.umi),
-                    (rec.read1.unwrap(), rec.read2.unwrap()),
-                )
-            })
-            .unzip();
-        StarAligner::align_read_pairs(self, &mut reads)
-            .collect::<Vec<_>>()
-            .into_iter()
-            .enumerate()
-            .map(|(i, (ali1, ali2))| {
-                let (bc, umi) = info.get(i).unwrap();
-                let ali1_ = ali1
-                    .into_iter()
-                    .map(|x| {
-                        add_cell_barcode(
-                            &header,
-                            &x,
-                            bc.raw.sequence(),
-                            bc.raw.quality_scores(),
-                            bc.corrected.as_deref(),
-                        )
-                        .unwrap()
-                    })
-                    .collect();
-                let ali2_ = ali2
-                    .into_iter()
-                    .map(|x| {
-                        add_cell_barcode(
-                            &header,
-                            &x,
-                            bc.raw.sequence(),
-                            bc.raw.quality_scores(),
-                            bc.corrected.as_deref(),
-                        )
-                        .unwrap()
-                    })
-                    .collect();
-                (ali1_, ali2_)
-            })
-            .collect()
+        let num_threads = 8;
+        let chunk_size = get_chunk_size(records.len(), num_threads);
+
+        records.par_chunks(chunk_size).flat_map_iter(|chunk| {
+            let mut aligner = self.clone();
+            chunk.iter().map(move |rec| {
+                let bc = rec.barcode.as_ref().unwrap();
+                let (mut ali1, mut ali2) = aligner.align_read_pair(
+                    &rec.read1.as_ref().unwrap(),
+                    &rec.read2.as_ref().unwrap()
+                ).unwrap();
+                ali1.iter_mut().chain(ali2.iter_mut()).for_each(|alignment|
+                    add_cell_barcode(
+                        alignment,
+                        bc.raw.sequence(),
+                        bc.raw.quality_scores(),
+                        bc.corrected.as_deref(),
+                    )
+                );
+                (ali1, ali2)
+            }).collect::<Vec<_>>()
+        }).collect()
+    }
+}
+
+fn get_chunk_size(total_length: usize, num_threads: usize) -> usize {
+    let chunk_size = total_length / num_threads;
+    if chunk_size == 0 {
+        1
+    } else {
+        chunk_size
     }
 }
 
@@ -353,7 +320,7 @@ impl<A: Aligner> FastqProcessor<A> {
         fq_reader.map(move |data| {
             let align_qc = self.align_qc.get_mut(&modality).unwrap();
             if is_paired {
-                let results: Vec<_> = self.aligner.align_read_pairs(&header, data);
+                let results: Vec<_> = self.aligner.align_read_pairs(data);
                 results.iter().for_each(|(ali1, ali2)| {
                     ali1.as_iter().for_each(|x| align_qc.update(x, &header));
                     ali2.as_iter().for_each(|x| align_qc.update(x, &header));
@@ -361,7 +328,7 @@ impl<A: Aligner> FastqProcessor<A> {
                 progress_bar.update(results.len()).unwrap();
                 Either::Right(results)
             } else {
-                let results: Vec<_> = self.aligner.align_reads(&header, data);
+                let results: Vec<_> = self.aligner.align_reads(data);
                 results.iter().for_each(|ali| {
                     ali.as_iter().for_each(|x| align_qc.update(x, &header));
                 });
@@ -799,14 +766,12 @@ impl<I: Iterator<Item = AnnotatedRecord>> Iterator for VectorChunk<I> {
     }
 }
 
-fn add_cell_barcode<R: Record>(
-    header: &sam::Header,
-    record: &R,
+fn add_cell_barcode(
+    record_buf: &mut RecordBuf,
     ori_barcode: &[u8],
     ori_qual: &[u8],
     correct_barcode: Option<&[u8]>,
-) -> std::io::Result<RecordBuf> {
-    let mut record_buf = RecordBuf::try_from_alignment_record(header, record)?;
+) {
     let data = record_buf.data_mut();
     data.insert(
         Tag::CELL_BARCODE_SEQUENCE,
@@ -819,7 +784,6 @@ fn add_cell_barcode<R: Record>(
     if let Some(barcode) = correct_barcode {
         data.insert(Tag::CELL_BARCODE_ID, Value::String(barcode.into()));
     }
-    Ok(record_buf)
 }
 
 fn slice_fastq_record(record: &fastq::Record, start: usize, end: usize) -> fastq::Record {

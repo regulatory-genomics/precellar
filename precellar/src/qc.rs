@@ -169,17 +169,15 @@ impl AlignQC {
             self.num_read2_bases += record.sequence().len() as u64;
             self.num_read2_q30_bases += record
                 .quality_scores()
-                .as_ref()
                 .iter()
-                .filter(|x| *x >= 30)
+                .filter(|s| s.as_ref().map(|x| *x >= 30).unwrap_or(false))
                 .count() as u64;
         } else {
             self.num_read1_bases += record.sequence().len() as u64;
             self.num_read1_q30_bases += record
                 .quality_scores()
-                .as_ref()
                 .iter()
-                .filter(|x| *x >= 30)
+                .filter(|s| s.as_ref().map(|x| *x >= 30).unwrap_or(false))
                 .count() as u64;
         }
 

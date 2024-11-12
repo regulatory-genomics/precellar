@@ -1,22 +1,70 @@
-use std::{fs::File, io::{BufWriter, Write}, path::{Path, PathBuf}, str::FromStr};
-use anyhow::{Context, Result, anyhow};
+use anyhow::{anyhow, bail, Context, Result};
+use futures::StreamExt;
+use std::{
+    fs::File, io::{BufWriter, Write}, path::{Path, PathBuf}, str::FromStr
+};
+use tokio::io::AsyncRead;
+use tokio_util::io::StreamReader;
+use async_compression::tokio::bufread::GzipDecoder;
+use async_compression::tokio::bufread::ZstdDecoder;
+use url::Url;
+
+pub async fn fetch_content(src: &str, compression: Option<Compression>) -> Result<Box<dyn AsyncRead + Unpin>> {
+    if let Ok(url) = Url::parse(src) {
+        if !url.cannot_be_a_base() {
+            return Ok(Box::new(open_url_async(url).await?));
+        }
+    }
+
+    let reader = tokio::io::BufReader::new(tokio::fs::File::open(src).await?);
+
+    let compression = compression.or_else(|| detect_compression(src));
+    let reader: Box<dyn AsyncRead + Unpin> = match compression {
+        Some(Compression::Gzip) => Box::new(GzipDecoder::new(reader)),
+        Some(Compression::Zstd) => Box::new(ZstdDecoder::new(reader)),
+        None => Box::new(reader),
+    };
+    Ok(reader)
+}
 
 /// Open a file, possibly compressed. Supports gzip and zstd.
 pub fn open_file_for_read<P: AsRef<Path>>(file: P) -> Result<Box<dyn std::io::Read>> {
     let reader: Box<dyn std::io::Read> = match detect_compression(file.as_ref()) {
-        Some(Compression::Gzip) => Box::new(flate2::read::MultiGzDecoder::new(File::open(file.as_ref())?)),
+        Some(Compression::Gzip) => Box::new(flate2::read::MultiGzDecoder::new(File::open(
+            file.as_ref(),
+        )?)),
         Some(Compression::Zstd) => {
             let r = zstd::stream::read::Decoder::new(File::open(file.as_ref())?)?;
             Box::new(r)
-        },
+        }
         None => Box::new(File::open(file.as_ref())?),
     };
     anyhow::Ok(reader).with_context(|| format!("cannot open file: {:?}", file.as_ref()))
 }
 
+pub async fn open_url_async(url: Url) -> Result<impl AsyncRead> {
+    // Create a client with automatic redirect following
+    let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::limited(10)) // Follow up to 10 redirects
+        .build()?;
+
+    let response = client.get(url).send().await?;
+    if !response.status().is_success() {
+        bail!("Request failed with status: {}", response.status());
+    }
+
+    // Convert the response into a byte stream
+    let byte_stream = response
+        .bytes_stream()
+        .map(|result| result.map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e)));
+    Ok(StreamReader::new(byte_stream))
+}
+
 /// Determine the file compression type. Supports gzip and zstd.
 fn detect_compression<P: AsRef<Path>>(path: P) -> Option<Compression> {
-    let file = File::open(path.as_ref()).with_context(|| format!("cannot open file: {:?}", path.as_ref())).unwrap();
+    let file = File::open(path.as_ref())
+        .with_context(|| format!("cannot open file: {:?}", path.as_ref()))
+        .unwrap();
     if flate2::read::MultiGzDecoder::new(file).header().is_some() {
         Some(Compression::Gzip)
     } else if let Some(ext) = path.as_ref().extension() {
@@ -70,28 +118,36 @@ pub fn open_file_for_write<P: AsRef<Path>>(
     num_threads: u32,
 ) -> Result<Box<dyn Write + Send>> {
     let buffer = BufWriter::new(
-        File::create(&filename).with_context(|| format!("cannot create file: {}", filename.as_ref().display()))?
+        File::create(&filename)
+            .with_context(|| format!("cannot create file: {}", filename.as_ref().display()))?,
     );
     let writer: Box<dyn Write + Send> = match compression {
         None => Box::new(buffer),
-        Some(Compression::Gzip) => Box::new(flate2::write::GzEncoder::new(buffer, flate2::Compression::new(compression_level.unwrap_or(6)))),
+        Some(Compression::Gzip) => Box::new(flate2::write::GzEncoder::new(
+            buffer,
+            flate2::Compression::new(compression_level.unwrap_or(6)),
+        )),
         Some(Compression::Zstd) => {
-            let mut zstd = zstd::stream::Encoder::new(buffer, compression_level.unwrap_or(9) as i32)?;
+            let mut zstd =
+                zstd::stream::Encoder::new(buffer, compression_level.unwrap_or(9) as i32)?;
             zstd.multithread(num_threads)?;
             Box::new(zstd.auto_finish())
-        },
+        }
     };
     Ok(writer)
 }
 
 pub fn rev_compl(seq: &[u8]) -> Vec<u8> {
-    seq.iter().rev().map(|&x| match x {
-        b'A' => b'T',
-        b'T' => b'A',
-        b'C' => b'G',
-        b'G' => b'C',
-        _ => x,
-    }).collect()
+    seq.iter()
+        .rev()
+        .map(|&x| match x {
+            b'A' => b'T',
+            b'T' => b'A',
+            b'C' => b'G',
+            b'G' => b'C',
+            _ => x,
+        })
+        .collect()
 }
 
 pub fn normalize_path<P1: AsRef<Path>, P2: AsRef<Path>>(work_dir: P1, path: P2) -> Result<PathBuf> {
@@ -101,10 +157,15 @@ pub fn normalize_path<P1: AsRef<Path>, P2: AsRef<Path>>(work_dir: P1, path: P2) 
     } else {
         work_dir.as_ref().join(path)
     };
-    result.canonicalize().with_context(|| format!("Failed to normalize path: {:?}", &result))
+    result
+        .canonicalize()
+        .with_context(|| format!("Failed to normalize path: {:?}", &result))
 }
 
-pub fn unnormalize_path<P1: AsRef<Path>, P2: AsRef<Path>>(work_dir: P1, path: P2) -> Result<PathBuf> {
+pub fn unnormalize_path<P1: AsRef<Path>, P2: AsRef<Path>>(
+    work_dir: P1,
+    path: P2,
+) -> Result<PathBuf> {
     let work_dir = work_dir.as_ref().canonicalize()?;
     let path = path.as_ref().canonicalize()?;
     Ok(relative_path(work_dir.as_path(), path.as_path()))

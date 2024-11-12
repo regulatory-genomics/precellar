@@ -1,10 +1,14 @@
 use std::{io::{BufReader, BufWriter}, path::PathBuf, str::FromStr};
 use precellar::utils::strip_fastq;
 use seqspec::utils::{open_file_for_read, open_file_for_write, Compression};
-use noodles::fastq::{self, Reader, io::Writer};
+use noodles::fastq::{self, io::Writer, Reader};
+use noodles::bam;
 use anyhow::Result;
 use pyo3::{prelude::*, types::PyDict};
 use regex::Regex;
+use tokio::runtime::Runtime;
+use futures::TryStreamExt;
+use noodles::sam::alignment::record::QualityScores;
 
 /// Remove barcode from the read names of fastq records.
 /// 
@@ -145,7 +149,7 @@ fn strip_barcode_from_fastq(
     let re = Regex::new(regex)?;
     reader.records().enumerate().try_for_each(|(i, record)| {
         if i % 1000000 == 0 {
-            py.check_signals().unwrap();
+            py.check_signals()?;
         }
         let record = record?;
         let (record, barcodes) = strip_fastq(
@@ -171,11 +175,69 @@ fn strip_barcode_from_fastq(
     Ok(())
 }
 
+/// Convert a BAM file to a FASTQ file.
+/// 
+/// Parameters
+/// ----------
+/// input: str
+///    File path or url to the input BAM file.
+/// output: Path
+///   File path to the output FASTQ file.
+/// compression: str | None
+///    Compression algorithm to use. If None, the compression algorithm will be inferred from the file extension.
+/// compression_level: int | None
+///   Compression level to use.
+#[pyfunction]
+#[pyo3(
+    signature = (input, output, *, compression=None, compression_level=None),
+    text_signature = "(input, output, *, compression=None, compression_level=None)",
+)]
+fn bam_to_fastq(
+    py: Python<'_>,
+    input: &str,
+    output: PathBuf,
+    compression: Option<&str>,
+    compression_level: Option<u32>,
+) -> Result<()> {
+    fn bam_to_fq(bam: &bam::Record) -> fastq::Record {
+        let name = bam.name().unwrap();
+        let seq: Vec<u8> = bam.sequence().iter().collect();
+        let qual: Vec<u8> = bam.quality_scores().iter().map(|x| x.unwrap() + 33).collect();
+        fastq::Record::new(fastq::record::Definition::new(name, ""), seq, qual)
+    }
+
+    let compression = compression.map(|x| Compression::from_str(x).unwrap())
+        .or((&output).try_into().ok());
+    let mut writer = Writer::new(BufWriter::new(open_file_for_write(output, compression, compression_level, 8)?));
+
+    let rt = Runtime::new()?;
+    rt.block_on(async {
+        let reader = seqspec::utils::fetch_content(input, None).await?;
+        let mut reader = bam::r#async::io::Reader::new(reader);
+        reader.read_header().await?;
+
+        let mut n = 0u32;
+        while let Some(record) = reader.records().try_next().await.unwrap() {
+            if n % 100000 == 0 {
+                py.check_signals()?;
+            }
+
+            let flag = record.flags();
+            if flag.is_unmapped() || !(flag.is_secondary() || flag.is_supplementary()) {
+                writer.write_record(&bam_to_fq(&record))?;
+            }
+            n += 1;
+        }
+        Ok(())
+    })
+}
+
 #[pymodule]
 pub(crate) fn register_submodule(parent_module: &Bound<'_, PyModule>) -> PyResult<()> {
     let utils = PyModule::new_bound(parent_module.py(), "utils")?;
 
     utils.add_function(wrap_pyfunction!(strip_barcode_from_fastq, &utils)?)?;
+    utils.add_function(wrap_pyfunction!(bam_to_fastq, &utils)?)?;
 
     parent_module.add_submodule(&utils)
 }

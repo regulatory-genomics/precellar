@@ -10,12 +10,12 @@ crate-type = ["cdylib"]
 
 [dependencies]
 anyhow = "1.0"
-bwa-mem2 = { git = "https://github.com/regulatory-genomics/bwa-mem2-rust.git", rev = "07eda9b9c2815ae52b3fa30b01de0e19fae31fe0" }
-star-aligner = { git = "https://github.com/regulatory-genomics/star-aligner", rev = "f9915ea3afbac1e8f4773e2e7c22376f1549c3c7" }
+bwa-mem2 = { git = "https://github.com/regulatory-genomics/bwa-mem2-rust.git", rev = "de9b0af1c4077b70c31d9129da1d3f4229a125c7" }
+star-aligner = { git = "https://github.com/regulatory-genomics/star-aligner", rev = "faef1085eaf26e6e8d5875fcbc641c3af9444d89" }
 bstr = "1.0"
 either = "1.13"
 itertools = "0.13"
-noodles = { version = "0.80", features = ["core", "fastq", "bam", "sam", "bgzf"] }
+noodles = { version = "0.85", features = ["core", "fastq", "bam", "sam", "bgzf"] }
 seqspec = { version = "0.1", workspace = true }
 serde_yaml = "0.9"
 termtree = "0.5"
@@ -24,6 +24,8 @@ regex = "1.6"
 log = "0.4"
 env_logger = "0.11"
 url = "2.5"
+tokio = { version = "1", features = ["rt", "rt-multi-thread"] }
+futures = "0.3"
 
 [dependencies.pyo3]
 version = "0.22.3"

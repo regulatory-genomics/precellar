@@ -33,3 +33,4 @@ Utilities
     :toctree: _autosummary
 
     utils.strip_barcode_from_fastq
+    bam_to_fastq
