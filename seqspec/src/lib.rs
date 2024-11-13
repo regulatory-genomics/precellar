@@ -21,7 +21,7 @@ use std::{
     str::FromStr,
     sync::{Arc, RwLock},
 };
-use utils::{open_file_for_write, Compression};
+use utils::{create_file, Compression};
 
 #[derive(Deserialize, Serialize, Debug, Clone, PartialEq)]
 pub struct Assay {
@@ -403,13 +403,13 @@ impl Assay {
             .map(|(read, _)| {
                 let output_valid = dir.as_ref().join(format!("{}.fq.zst", read.read_id));
                 let output_valid =
-                    open_file_for_write(output_valid, Some(Compression::Zstd), Some(9), 8)?;
+                    create_file(output_valid, Some(Compression::Zstd), Some(9), 8)?;
                 let output_valid = fastq::io::Writer::new(output_valid);
                 let output_other = dir
                     .as_ref()
                     .join(format!("Invalid_{}.fq.zst", read.read_id));
                 let output_other =
-                    open_file_for_write(output_other, Some(Compression::Zstd), Some(9), 8)?;
+                    create_file(output_other, Some(Compression::Zstd), Some(9), 8)?;
                 let output_other = fastq::io::Writer::new(output_other);
 
                 anyhow::Ok((output_valid, output_other))

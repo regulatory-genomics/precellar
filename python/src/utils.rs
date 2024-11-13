@@ -1,13 +1,13 @@
-use std::{io::{BufReader, BufWriter}, path::PathBuf, str::FromStr};
+use std::{io::BufWriter, path::PathBuf, str::FromStr};
 use precellar::utils::strip_fastq;
-use seqspec::utils::{open_file_for_read, open_file_for_write, Compression};
-use noodles::fastq::{self, io::Writer, Reader};
+use seqspec::utils::{open_file_async, is_url, create_file, Compression};
+use noodles::fastq::{self, io::Writer};
 use noodles::bam;
 use anyhow::Result;
 use pyo3::{prelude::*, types::PyDict};
 use regex::Regex;
 use tokio::runtime::Runtime;
-use futures::TryStreamExt;
+use futures::{StreamExt, TryStreamExt};
 use noodles::sam::alignment::record::QualityScores;
 
 /// Remove barcode from the read names of fastq records.
@@ -18,8 +18,8 @@ use noodles::sam::alignment::record::QualityScores;
 /// 
 /// Parameters
 /// ----------
-/// in_fq: Path
-///     File path to the input fastq file.
+/// in_fq: str 
+///     File path or URL to the input fastq file.
 /// out_fq: Path
 ///     File path to the output fastq file.
 /// regex: str
@@ -33,10 +33,13 @@ use noodles::sam::alignment::record::QualityScores;
 ///     If None, none of the barcodes will be written to a file.
 /// from_description: bool
 ///    If True, the barcode will be extracted from the description instead of the name.
-/// compression: str | None
+/// compression: Literal['gzip', 'zst'] | None
 ///     Compression algorithm to use. If None, the compression algorithm will be inferred from the file extension.
 /// compression_level: int | None
 ///     Compression level to use.
+/// input_compression: Liter['gzip', 'zst'] | None
+///     Compression algorithm of the input fastq file. This has to be specified
+///     if the input fastq file is compressed and fetched from a URL.
 /// num_threads: int
 ///     The number of threads to use.
 /// 
@@ -90,29 +93,34 @@ use noodles::sam::alignment::record::QualityScores;
 #[pyo3(
     signature = (in_fq, out_fq,
         *, regex, out_barcode=None, from_description=false,
-        compression=None, compression_level=None, num_threads=8,
+        compression=None, compression_level=None, input_compression=None, num_threads=8
     ),
     text_signature = "(in_fq, out_fq,
         *, regex, out_barcode, from_description=False,
-        compression=None, compression_level=None, num_threads=8)",
+        compression=None, compression_level=None, input_compression=None, num_threads=8)",
 )]
 fn strip_barcode_from_fastq(
     py: Python<'_>,
-    in_fq: PathBuf,
+    in_fq: &str,
     out_fq: PathBuf,
     regex: &str,
     out_barcode: Option<Bound<'_, PyAny>>,
     from_description: bool,
     compression: Option<&str>,
     compression_level: Option<u32>,
+    input_compression: Option<&str>,
     num_threads: u32,
 ) -> Result<()> {
-    let mut reader = Reader::new(BufReader::new(open_file_for_read(in_fq)?));
+    if is_url(in_fq) && input_compression.is_none() {
+        log::warn!("The input source is URL and input_compression is None");
+    }
+
+    let re = Regex::new(regex)?;
 
     let mut fq_writer = {
         let compression = compression.map(|x| Compression::from_str(x).unwrap())
             .or((&out_fq).try_into().ok());
-        Writer::new(BufWriter::new(open_file_for_write(out_fq, compression, compression_level, num_threads)?))
+        Writer::new(BufWriter::new(create_file(out_fq, compression, compression_level, num_threads)?))
     };
 
     let (barcode_keys, mut barcode_writers) = if let Some(output) = out_barcode {
@@ -139,54 +147,65 @@ fn strip_barcode_from_fastq(
         let writers = files.into_iter().map(|file| {
             let compression = compression.map(|x| Compression::from_str(x).unwrap())
                 .or((&file).try_into().ok());
-            Writer::new(BufWriter::new(open_file_for_write(file, compression, compression_level, num_threads).unwrap()))
+            Writer::new(BufWriter::new(create_file(file, compression, compression_level, num_threads).unwrap()))
         }).collect();
         (Some(keys), writers)
     } else {
         (None, Vec::new())
     };
 
-    let re = Regex::new(regex)?;
-    reader.records().enumerate().try_for_each(|(i, record)| {
-        if i % 1000000 == 0 {
-            py.check_signals()?;
-        }
-        let record = record?;
-        let (record, barcodes) = strip_fastq(
-            record, &re, barcode_keys.as_ref().map(|x| x.as_slice()), from_description
-        )?;
+    let rt = Runtime::new()?;
+    rt.block_on(async {
+        let reader = open_file_async(in_fq, input_compression.map(|x| Compression::from_str(x).unwrap())).await?;
+        let mut reader = fastq::AsyncReader::new(tokio::io::BufReader::new(reader));
 
-        fq_writer.write_record(&record)?;
-        if let Some(barcodes) = barcodes {
-            barcodes.into_iter().enumerate().for_each(|(i, barcode)| {
-                let qual_score = vec![b'~'; barcode.len()];
-                let fq = fastq::Record::new(
-                    fastq::record::Definition::new(record.name(), ""),
-                    barcode.into_bytes(),
-                    qual_score,
-                );
-                barcode_writers.get_mut(i).unwrap().write_record(&fq).unwrap();
-            })
-        }
+        let mut i = 0u32;
+        reader.records().for_each(|record| {
+            if i % 1000000 == 0 {
+                py.check_signals().unwrap();
+            }
+            i += 1;
 
-        anyhow::Ok(())
-    })?;
+            let record = record.unwrap();
+            let (record, barcodes) = strip_fastq(
+                record, &re, barcode_keys.as_ref().map(|x| x.as_slice()), from_description
+            ).unwrap();
 
-    Ok(())
+            fq_writer.write_record(&record).unwrap();
+            if let Some(barcodes) = barcodes {
+                barcodes.into_iter().enumerate().for_each(|(i, barcode)| {
+                    let qual_score = vec![b'~'; barcode.len()];
+                    let fq = fastq::Record::new(
+                        fastq::record::Definition::new(record.name(), ""),
+                        barcode.into_bytes(),
+                        qual_score,
+                    );
+                    barcode_writers.get_mut(i).unwrap().write_record(&fq).unwrap();
+                })
+            }
+
+            futures::future::ready(())
+        }).await;
+
+        Ok(())
+    })
 }
 
 /// Convert a BAM file to a FASTQ file.
+/// 
+/// This function reads a BAM file and convert the alignments back to a FASTQ file.
+/// The function will ignore secondary/supplementary alignments.
 /// 
 /// Parameters
 /// ----------
 /// input: str
 ///    File path or url to the input BAM file.
 /// output: Path
-///   File path to the output FASTQ file.
-/// compression: str | None
+///    File path to the output FASTQ file.
+/// compression: Literal['gzip', 'zst'] | None
 ///    Compression algorithm to use. If None, the compression algorithm will be inferred from the file extension.
 /// compression_level: int | None
-///   Compression level to use.
+///    Compression level to use.
 #[pyfunction]
 #[pyo3(
     signature = (input, output, *, compression=None, compression_level=None),
@@ -208,11 +227,11 @@ fn bam_to_fastq(
 
     let compression = compression.map(|x| Compression::from_str(x).unwrap())
         .or((&output).try_into().ok());
-    let mut writer = Writer::new(BufWriter::new(open_file_for_write(output, compression, compression_level, 8)?));
+    let mut writer = Writer::new(BufWriter::new(create_file(output, compression, compression_level, 8)?));
 
     let rt = Runtime::new()?;
     rt.block_on(async {
-        let reader = seqspec::utils::fetch_content(input, None).await?;
+        let reader = seqspec::utils::open_file_async(input, None).await?;
         let mut reader = bam::r#async::io::Reader::new(reader);
         reader.read_header().await?;
 

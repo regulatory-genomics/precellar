@@ -21,7 +21,7 @@ use ::precellar::{
 };
 use pyseqspec::Assay;
 use seqspec::{
-    utils::{open_file_for_write, Compression},
+    utils::{create_file, Compression},
     Modality,
 };
 
@@ -178,7 +178,7 @@ fn align(
                 let compression = compression
                     .map(|x| Compression::from_str(x).unwrap())
                     .or(output.try_into().ok());
-                open_file_for_write(output, compression, compression_level, num_threads as u32)
+                create_file(output, compression, compression_level, num_threads as u32)
             })
             .transpose()?;
         if let Some(mut writer) = fragment_writer {
@@ -270,7 +270,7 @@ fn make_fragment(
     let compression = compression
         .map(|x| Compression::from_str(x).unwrap())
         .or((&output).try_into().ok());
-    let mut writer = open_file_for_write(output, compression, compression_level, num_threads)?;
+    let mut writer = create_file(output, compression, compression_level, num_threads)?;
 
     let mut fragment_generator = FragmentGenerator::default();
     if let Some(dir) = temp_dir {
@@ -331,11 +331,11 @@ fn make_fastq(
 
     std::fs::create_dir_all(&out_dir)?;
     let read1_fq = out_dir.join("R1.fq.zst");
-    let read1_writer = open_file_for_write(read1_fq, Some(Compression::Zstd), None, 8)?;
+    let read1_writer = create_file(read1_fq, Some(Compression::Zstd), None, 8)?;
     let mut read1_writer = Writer::new(BufWriter::new(read1_writer));
     let mut read2_writer = if fq_reader.is_paired_end() {
         let read2_fq = out_dir.join("R2.fq.zst");
-        let read2_writer = open_file_for_write(read2_fq, Some(Compression::Zstd), None, 8)?;
+        let read2_writer = create_file(read2_fq, Some(Compression::Zstd), None, 8)?;
         let read2_writer = Writer::new(BufWriter::new(read2_writer));
         Some(read2_writer)
     } else {

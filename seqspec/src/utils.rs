@@ -9,26 +9,34 @@ use async_compression::tokio::bufread::GzipDecoder;
 use async_compression::tokio::bufread::ZstdDecoder;
 use url::Url;
 
-pub async fn fetch_content(src: &str, compression: Option<Compression>) -> Result<Box<dyn AsyncRead + Unpin>> {
-    if let Ok(url) = Url::parse(src) {
-        if !url.cannot_be_a_base() {
-            return Ok(Box::new(open_url_async(url).await?));
+pub fn create_file<P: AsRef<Path>>(
+    filename: P,
+    compression: Option<Compression>,
+    compression_level: Option<u32>,
+    num_threads: u32,
+) -> Result<Box<dyn Write + Send>> {
+    let buffer = BufWriter::new(
+        File::create(&filename)
+            .with_context(|| format!("cannot create file: {}", filename.as_ref().display()))?,
+    );
+    let writer: Box<dyn Write + Send> = match compression {
+        None => Box::new(buffer),
+        Some(Compression::Gzip) => Box::new(flate2::write::GzEncoder::new(
+            buffer,
+            flate2::Compression::new(compression_level.unwrap_or(6)),
+        )),
+        Some(Compression::Zstd) => {
+            let mut zstd =
+                zstd::stream::Encoder::new(buffer, compression_level.unwrap_or(9) as i32)?;
+            zstd.multithread(num_threads)?;
+            Box::new(zstd.auto_finish())
         }
-    }
-
-    let reader = tokio::io::BufReader::new(tokio::fs::File::open(src).await?);
-
-    let compression = compression.or_else(|| detect_compression(src));
-    let reader: Box<dyn AsyncRead + Unpin> = match compression {
-        Some(Compression::Gzip) => Box::new(GzipDecoder::new(reader)),
-        Some(Compression::Zstd) => Box::new(ZstdDecoder::new(reader)),
-        None => Box::new(reader),
     };
-    Ok(reader)
+    Ok(writer)
 }
 
 /// Open a file, possibly compressed. Supports gzip and zstd.
-pub fn open_file_for_read<P: AsRef<Path>>(file: P) -> Result<Box<dyn std::io::Read>> {
+pub fn open_file<P: AsRef<Path>>(file: P) -> Result<Box<dyn std::io::Read>> {
     let reader: Box<dyn std::io::Read> = match detect_compression(file.as_ref()) {
         Some(Compression::Gzip) => Box::new(flate2::read::MultiGzDecoder::new(File::open(
             file.as_ref(),
@@ -42,7 +50,33 @@ pub fn open_file_for_read<P: AsRef<Path>>(file: P) -> Result<Box<dyn std::io::Re
     anyhow::Ok(reader).with_context(|| format!("cannot open file: {:?}", file.as_ref()))
 }
 
-pub async fn open_url_async(url: Url) -> Result<impl AsyncRead> {
+/// Fetch content from a URL or a file, possibly compressed. Supports gzip and zstd.
+pub async fn open_file_async(src: &str, compression: Option<Compression>) -> Result<Box<dyn AsyncRead + Send + Unpin>> {
+    if is_url(src) {
+        return Ok(Box::new(open_url_async(Url::parse(src).unwrap()).await?));
+    }
+
+    let reader = tokio::io::BufReader::new(tokio::fs::File::open(src).await?);
+
+    let compression = compression.or_else(|| detect_compression(src));
+    let reader: Box<dyn AsyncRead + Send + Unpin> = match compression {
+        Some(Compression::Gzip) => Box::new(GzipDecoder::new(reader)),
+        Some(Compression::Zstd) => Box::new(ZstdDecoder::new(reader)),
+        None => Box::new(reader),
+    };
+    Ok(reader)
+}
+
+pub fn is_url(src: &str) -> bool {
+    if let Ok(url) = Url::parse(src) {
+        if !url.cannot_be_a_base() {
+            return true;
+        }
+    }
+    return false;
+}
+
+async fn open_url_async(url: Url) -> Result<impl AsyncRead> {
     // Create a client with automatic redirect following
     let client = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::limited(10)) // Follow up to 10 redirects
@@ -109,32 +143,6 @@ impl TryFrom<&PathBuf> for Compression {
             Err(anyhow!("unsupported compression: {:?}", path))
         }
     }
-}
-
-pub fn open_file_for_write<P: AsRef<Path>>(
-    filename: P,
-    compression: Option<Compression>,
-    compression_level: Option<u32>,
-    num_threads: u32,
-) -> Result<Box<dyn Write + Send>> {
-    let buffer = BufWriter::new(
-        File::create(&filename)
-            .with_context(|| format!("cannot create file: {}", filename.as_ref().display()))?,
-    );
-    let writer: Box<dyn Write + Send> = match compression {
-        None => Box::new(buffer),
-        Some(Compression::Gzip) => Box::new(flate2::write::GzEncoder::new(
-            buffer,
-            flate2::Compression::new(compression_level.unwrap_or(6)),
-        )),
-        Some(Compression::Zstd) => {
-            let mut zstd =
-                zstd::stream::Encoder::new(buffer, compression_level.unwrap_or(9) as i32)?;
-            zstd.multithread(num_threads)?;
-            Box::new(zstd.auto_finish())
-        }
-    };
-    Ok(writer)
 }
 
 pub fn rev_compl(seq: &[u8]) -> Vec<u8> {

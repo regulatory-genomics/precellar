@@ -277,7 +277,7 @@ impl Onlist {
         let mut cache = Cache::new()?;
         cache.dir = home::home_dir().unwrap().join(".cache/seqspec");
         let file = cache.cached_path(&self.url)?;
-        let reader = std::io::BufReader::new(crate::utils::open_file_for_read(file)?);
+        let reader = std::io::BufReader::new(crate::utils::open_file(file)?);
         reader.lines().map(|x| Ok(x?.into_bytes())).collect()
     }
 
