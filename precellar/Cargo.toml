@@ -6,7 +6,7 @@ edition = "2021"
 [dependencies]
 anyhow = "1.0"
 bed-utils = "0.5.1"
-bwa-mem2 = { git = "https://github.com/regulatory-genomics/bwa-mem2-rust.git", rev = "de9b0af1c4077b70c31d9129da1d3f4229a125c7" }
+bwa-mem2 = { git = "https://github.com/regulatory-genomics/bwa-mem2-rust.git", rev = "8de06bcc0a2145fd819232ffb2bf100fb795db30" }
 star-aligner = { git = "https://github.com/regulatory-genomics/star-aligner", rev = "faef1085eaf26e6e8d5875fcbc641c3af9444d89" }
 bstr = "1.0"
 either = "1.13"

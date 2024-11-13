@@ -51,17 +51,17 @@ impl AsIterator for Vec<RecordBuf> {
 pub trait Aligner {
     type AlignOutput: AsIterator<Item = RecordBuf>;
 
-    fn chunk_size(&self) -> usize;
-
     fn header(&self) -> sam::Header;
 
     fn align_reads(
         &mut self,
+        num_threads: u16,
         records: Vec<AnnotatedRecord>,
     ) -> Vec<Self::AlignOutput>;
 
     fn align_read_pairs(
         &mut self,
+        num_threads: u16,
         records: Vec<AnnotatedRecord>,
     ) -> Vec<(Self::AlignOutput, Self::AlignOutput)>;
 }
@@ -71,20 +71,17 @@ pub struct DummyAligner;
 impl Aligner for DummyAligner {
     type AlignOutput = RecordBuf;
 
-    fn chunk_size(&self) -> usize {
-        0
-    }
-
     fn header(&self) -> sam::Header {
         sam::Header::default()
     }
 
-    fn align_reads(&mut self, _: Vec<AnnotatedRecord>) -> Vec<Self::AlignOutput> {
+    fn align_reads(&mut self, _: u16, _: Vec<AnnotatedRecord>) -> Vec<Self::AlignOutput> {
         Vec::new()
     }
 
     fn align_read_pairs(
         &mut self,
+        _: u16,
         _: Vec<AnnotatedRecord>,
     ) -> Vec<(Self::AlignOutput, Self::AlignOutput)> {
         Vec::new()
@@ -94,16 +91,13 @@ impl Aligner for DummyAligner {
 impl Aligner for BurrowsWheelerAligner {
     type AlignOutput = RecordBuf;
 
-    fn chunk_size(&self) -> usize {
-        self.chunk_size()
-    }
-
     fn header(&self) -> sam::Header {
         self.get_sam_header()
     }
 
     fn align_reads(
         &mut self,
+        num_threads: u16,
         records: Vec<AnnotatedRecord>,
     ) -> Vec<Self::AlignOutput> {
         let (info, mut reads): (Vec<_>, Vec<_>) = records
@@ -112,7 +106,7 @@ impl Aligner for BurrowsWheelerAligner {
             .unzip();
 
         // TODO: add UMI
-        self.align_reads(reads.as_mut_slice())
+        self.align_reads(num_threads, reads.as_mut_slice())
             .enumerate()
             .map(|(i, mut alignment)| {
                 let (bc, umi) = info.get(i).unwrap();
@@ -129,6 +123,7 @@ impl Aligner for BurrowsWheelerAligner {
 
     fn align_read_pairs(
         &mut self,
+        num_threads: u16,
         records: Vec<AnnotatedRecord>,
     ) -> Vec<(Self::AlignOutput, Self::AlignOutput)> {
         let (info, mut reads): (Vec<_>, Vec<_>) = records
@@ -140,7 +135,7 @@ impl Aligner for BurrowsWheelerAligner {
                 )
             })
             .unzip();
-        self.align_read_pairs(&mut reads)
+        self.align_read_pairs(num_threads, &mut reads)
             .enumerate()
             .map(|(i, (mut ali1, mut ali2))| {
                 let (bc, umi) = info.get(i).unwrap();
@@ -165,20 +160,16 @@ impl Aligner for BurrowsWheelerAligner {
 impl Aligner for StarAligner {
     type AlignOutput = Vec<RecordBuf>;
 
-    fn chunk_size(&self) -> usize {
-        0
-    }
-
     fn header(&self) -> sam::Header {
         self.get_header().clone()
     }
 
     fn align_reads(
         &mut self,
+        num_threads: u16,
         records: Vec<AnnotatedRecord>,
     ) -> Vec<Self::AlignOutput> {
-        let num_threads = 8;
-        let chunk_size = get_chunk_size(records.len(), num_threads);
+        let chunk_size = get_chunk_size(records.len(), num_threads as usize);
 
         records.par_chunks(chunk_size).flat_map_iter(|chunk| {
             let mut aligner = self.clone();
@@ -200,10 +191,10 @@ impl Aligner for StarAligner {
 
     fn align_read_pairs(
         &mut self,
+        num_threads: u16,
         records: Vec<AnnotatedRecord>,
     ) -> Vec<(Self::AlignOutput, Self::AlignOutput)> {
-        let num_threads = 8;
-        let chunk_size = get_chunk_size(records.len(), num_threads);
+        let chunk_size = get_chunk_size(records.len(), num_threads as usize);
 
         records.par_chunks(chunk_size).flat_map_iter(|chunk| {
             let mut aligner = self.clone();
@@ -297,8 +288,23 @@ impl<A: Aligner> FastqProcessor<A> {
         metrics
     }
 
+    /// Align reads and return the alignments.
+    /// If the fastq file is paired-end, the alignments will be returned as a tuple.
+    /// Otherwise, the alignments will be returned as a single vector.
+    /// 
+    /// # Arguments
+    /// 
+    /// * `num_threads` - The number of threads to use for alignment.
+    /// * `chunk_size` - The maximum number of bases in a chunk.
+    /// 
+    /// # Returns
+    /// 
+    /// An iterator of alignments. If the fastq file is paired-end, the alignments will be returned as a tuple.
+    /// Otherwise, the alignments will be returned as a single vector.
     pub fn gen_barcoded_alignments(
         &mut self,
+        num_threads: u16,
+        chunk_size: usize,
     ) -> impl Iterator<Item = Either<Vec<A::AlignOutput>, Vec<(A::AlignOutput, A::AlignOutput)>>> + '_
     {
         let fq_reader = self.gen_barcoded_fastq(true);
@@ -316,11 +322,11 @@ impl<A: Aligner> FastqProcessor<A> {
         );
 
         let mut progress_bar = tqdm!(total = fq_reader.total_reads.unwrap_or(0));
-        let fq_reader = VectorChunk::new(fq_reader, self.aligner.chunk_size());
+        let fq_reader = VectorChunk::new(fq_reader, chunk_size);
         fq_reader.map(move |data| {
             let align_qc = self.align_qc.get_mut(&modality).unwrap();
             if is_paired {
-                let results: Vec<_> = self.aligner.align_read_pairs(data);
+                let results: Vec<_> = self.aligner.align_read_pairs(num_threads, data);
                 results.iter().for_each(|(ali1, ali2)| {
                     ali1.as_iter().for_each(|x| align_qc.update(x, &header));
                     ali2.as_iter().for_each(|x| align_qc.update(x, &header));
@@ -328,7 +334,7 @@ impl<A: Aligner> FastqProcessor<A> {
                 progress_bar.update(results.len()).unwrap();
                 Either::Right(results)
             } else {
-                let results: Vec<_> = self.aligner.align_reads(data);
+                let results: Vec<_> = self.aligner.align_reads(num_threads, data);
                 results.iter().for_each(|ali| {
                     ali.as_iter().for_each(|x| align_qc.update(x, &header));
                 });
@@ -687,6 +693,7 @@ pub struct AnnotatedRecord {
 }
 
 impl AnnotatedRecord {
+    /// The total number of bases, including read1 and read2, in the record.
     pub fn len(&self) -> usize {
         self.read1.as_ref().map_or(0, |x| x.sequence().len())
             + self.read2.as_ref().map_or(0, |x| x.sequence().len())
@@ -734,7 +741,7 @@ impl AnnotatedRecord {
 
 pub struct VectorChunk<I> {
     inner: I,
-    chunk_size: usize,
+    chunk_size: usize,  // The maximum number of bases in a chunk
 }
 
 impl<I> VectorChunk<I> {
@@ -880,7 +887,7 @@ mod tests {
         );
         let mut processor = FastqProcessor::new(spec, aligner).with_modality(Modality::ATAC);
 
-        processor.gen_barcoded_alignments().take(6).for_each(|x| {
+        processor.gen_barcoded_alignments(8, 50000).take(6).for_each(|x| {
             println!("{:?}", x);
         });
 
