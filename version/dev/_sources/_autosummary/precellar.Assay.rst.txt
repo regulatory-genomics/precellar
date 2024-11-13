@@ -1,0 +1,33 @@
+﻿precellar.Assay
+===============
+
+.. currentmodule:: precellar
+
+.. autoclass:: Assay
+
+   
+   
+   .. rubric:: Attributes
+
+   .. autosummary::
+      :toctree: .
+   
+      ~Assay.filename
+   
+   
+
+   
+   
+   .. rubric:: Methods
+
+   .. autosummary::
+      :toctree: .
+   
+      ~Assay.add_illumina_reads
+      ~Assay.delete_read
+      ~Assay.save
+      ~Assay.to_yaml
+      ~Assay.update_read
+      ~Assay.validate
+   
+   
