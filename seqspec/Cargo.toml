@@ -11,9 +11,14 @@ indexmap = "2.5"
 log = "0.4"
 hamming = "0.1"
 home = "0.5"
-noodles = { version = "0.80", features = ["core", "fastq", "async"] }
-reqwest = { version = "0.12", features = ["blocking"] }
+noodles = { version = "0.85", features = ["core", "fastq", "async"] }
+url = "2.5"
+reqwest = { version = "0.12", features = ["stream", "blocking"] }
 serde = { version = "1.0", features = ["derive", "rc"] }
 serde_yaml = "0.9"
 zstd = { version = "0.13", features = ["zstdmt"] }
 multi_reader = "0.1"
+tokio = "1.41"
+tokio-util = "0.7"
+futures = "0.3"
+async-compression = { version = "0.4", features = ["gzip", "zstd", "tokio"] }

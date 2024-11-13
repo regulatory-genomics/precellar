@@ -21,7 +21,7 @@ use ::precellar::{
 };
 use pyseqspec::Assay;
 use seqspec::{
-    utils::{open_file_for_write, Compression},
+    utils::{create_file, Compression},
     Modality,
 };
 
@@ -78,6 +78,9 @@ fn make_genome_index(fasta: PathBuf, genome_prefix: PathBuf) -> Result<()> {
 ///     The temporary directory to use.
 /// num_threads: int
 ///     The number of threads to use.
+/// chunk_size: int
+///     This parameter is used to control the number of bases processed in each chunk.
+///     The actual value is determined by: chunk_size * num_threads.
 ///
 /// Returns
 /// -------
@@ -91,14 +94,14 @@ fn make_genome_index(fasta: PathBuf, genome_prefix: PathBuf) -> Result<()> {
         mito_dna=vec!["chrM".to_owned(), "M".to_owned()],
         shift_left=4, shift_right=-5,
         compression=None, compression_level=None,
-        temp_dir=None, num_threads=8,
+        temp_dir=None, num_threads=8, chunk_size=10000000,
     ),
     text_signature = "(assay, genome_index, *,
         modality, output_bam=None, output_fragment=None,
         mito_dna=['chrM', 'M'],
         shift_left=4, shift_right=-5,
         compression=None, compression_level=None,
-        temp_dir=None, num_threads=8)",
+        temp_dir=None, num_threads=8, chunk_size=10000000)",
 )]
 fn align(
     py: Python<'_>,
@@ -113,7 +116,8 @@ fn align(
     compression: Option<&str>,
     compression_level: Option<u32>,
     temp_dir: Option<PathBuf>,
-    num_threads: u32,
+    num_threads: u16,
+    chunk_size: usize,
 ) -> Result<HashMap<String, f64>> {
     assert!(
         output_bam.is_some() || output_fragment.is_some(),
@@ -128,7 +132,7 @@ fn align(
 
     let aligner = BurrowsWheelerAligner::new(
         FMIndex::read(genome_index).unwrap(),
-        AlignerOpts::default().with_n_threads(num_threads as usize),
+        AlignerOpts::default(),
         PairedEndStats::default(),
     );
     let header = aligner.header();
@@ -150,21 +154,23 @@ fn align(
                 anyhow::Ok(writer)
             })
             .transpose()?;
-        let alignments = processor.gen_barcoded_alignments().map(|data| {
-            py.check_signals().unwrap();
-            if let Some(writer) = &mut bam_writer {
-                match data.as_ref() {
-                    Either::Left(chunk) => chunk
-                        .iter()
-                        .for_each(|x| writer.write_alignment_record(&header, x).unwrap()),
-                    Either::Right(chunk) => chunk.iter().for_each(|(a, b)| {
-                        writer.write_alignment_record(&header, a).unwrap();
-                        writer.write_alignment_record(&header, b).unwrap();
-                    }),
-                };
-            }
-            data
-        });
+        let alignments = processor
+            .gen_barcoded_alignments(num_threads, chunk_size)
+            .map(|data| {
+                py.check_signals().unwrap();
+                if let Some(writer) = &mut bam_writer {
+                    match data.as_ref() {
+                        Either::Left(chunk) => chunk
+                            .iter()
+                            .for_each(|x| writer.write_alignment_record(&header, x).unwrap()),
+                        Either::Right(chunk) => chunk.iter().for_each(|(a, b)| {
+                            writer.write_alignment_record(&header, a).unwrap();
+                            writer.write_alignment_record(&header, b).unwrap();
+                        }),
+                    };
+                }
+                data
+            });
 
         let fragment_writer = output_fragment
             .as_ref()
@@ -172,7 +178,7 @@ fn align(
                 let compression = compression
                     .map(|x| Compression::from_str(x).unwrap())
                     .or(output.try_into().ok());
-                open_file_for_write(output, compression, compression_level, num_threads)
+                create_file(output, compression, compression_level, num_threads as u32)
             })
             .transpose()?;
         if let Some(mut writer) = fragment_writer {
@@ -264,7 +270,7 @@ fn make_fragment(
     let compression = compression
         .map(|x| Compression::from_str(x).unwrap())
         .or((&output).try_into().ok());
-    let mut writer = open_file_for_write(output, compression, compression_level, num_threads)?;
+    let mut writer = create_file(output, compression, compression_level, num_threads)?;
 
     let mut fragment_generator = FragmentGenerator::default();
     if let Some(dir) = temp_dir {
@@ -325,11 +331,11 @@ fn make_fastq(
 
     std::fs::create_dir_all(&out_dir)?;
     let read1_fq = out_dir.join("R1.fq.zst");
-    let read1_writer = open_file_for_write(read1_fq, Some(Compression::Zstd), None, 8)?;
+    let read1_writer = create_file(read1_fq, Some(Compression::Zstd), None, 8)?;
     let mut read1_writer = Writer::new(BufWriter::new(read1_writer));
     let mut read2_writer = if fq_reader.is_paired_end() {
         let read2_fq = out_dir.join("R2.fq.zst");
-        let read2_writer = open_file_for_write(read2_fq, Some(Compression::Zstd), None, 8)?;
+        let read2_writer = create_file(read2_fq, Some(Compression::Zstd), None, 8)?;
         let read2_writer = Writer::new(BufWriter::new(read2_writer));
         Some(read2_writer)
     } else {

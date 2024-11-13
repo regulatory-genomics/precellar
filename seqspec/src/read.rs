@@ -296,12 +296,12 @@ impl File {
     /// The base_dir is used to resolve relative paths.
     pub fn open(&self) -> Result<Box<dyn std::io::Read>> {
         match self.urltype {
-            UrlType::Local => Ok(Box::new(crate::utils::open_file_for_read(&self.url)?)),
+            UrlType::Local => Ok(Box::new(crate::utils::open_file(&self.url)?)),
             _ => {
                 let mut cache = Cache::new().unwrap();
                 cache.dir = home::home_dir().unwrap().join(".cache/seqspec");
                 let file = cache.cached_path(&self.url).unwrap();
-                Ok(Box::new(crate::utils::open_file_for_read(file)?))
+                Ok(Box::new(crate::utils::open_file(file)?))
             }
         }
     }
