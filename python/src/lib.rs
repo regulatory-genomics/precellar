@@ -2,19 +2,16 @@ mod pyseqspec;
 mod utils;
 
 use anyhow::Result;
-use bwa_mem2::{AlignerOpts, BurrowsWheelerAligner, FMIndex, PairedEndStats};
 use either::Either;
 use itertools::Itertools;
 use log::info;
-use noodles::bam;
-use noodles::fastq::io::Writer;
-use noodles::{bgzf, sam::alignment::io::Write};
+use noodles::{bam, bgzf, fastq, sam::{self, alignment::{io::Write, RecordBuf}}};
 use pyo3::prelude::*;
 use std::{collections::HashMap, io::BufWriter, path::PathBuf, str::FromStr};
 
 use ::precellar::{
     align::{
-        extend_fastq_record, Aligner, Barcode, DummyAligner, FastqProcessor, NameCollatedRecords,
+        extend_fastq_record, Aligner, AsIterator, Barcode, BurrowsWheelerAligner, DummyAligner, FastqProcessor, NameCollatedRecords
     },
     fragment::FragmentGenerator,
     qc::{AlignQC, FragmentQC, Metrics},
@@ -43,8 +40,8 @@ static GLOBAL: Jemalloc = Jemalloc;
 ///   File path to the genome index.
 #[pyfunction]
 fn make_genome_index(fasta: PathBuf, genome_prefix: PathBuf) -> Result<()> {
-    FMIndex::new(fasta, genome_prefix).unwrap();
-    Ok(())
+    //FMIndex::new(fasta, genome_prefix).unwrap();
+    todo!()
 }
 
 /// Align fastq reads to the reference genome and generate unique fragments.
@@ -125,18 +122,14 @@ fn align(
     );
 
     let modality = Modality::from_str(modality).unwrap();
-    let spec = match assay.extract::<PathBuf>() {
+    let assay = match assay.extract::<PathBuf>() {
         Ok(p) => seqspec::Assay::from_path(&p).unwrap(),
         _ => assay.extract::<PyRef<Assay>>()?.0.clone(),
     };
 
-    let aligner = BurrowsWheelerAligner::new(
-        FMIndex::read(genome_index).unwrap(),
-        AlignerOpts::default(),
-        PairedEndStats::default(),
-    );
+    let aligner = BurrowsWheelerAligner::from_path(genome_index);
     let header = aligner.header();
-    let mut processor = FastqProcessor::new(spec, aligner)
+    let mut processor = FastqProcessor::new(assay, aligner)
         .with_modality(modality)
         .with_barcode_correct_prob(0.9);
     let mut fragment_qc = FragmentQC::default();
@@ -155,22 +148,8 @@ fn align(
             })
             .transpose()?;
         let alignments = processor
-            .gen_barcoded_alignments(num_threads, chunk_size)
-            .map(|data| {
-                py.check_signals().unwrap();
-                if let Some(writer) = &mut bam_writer {
-                    match data.as_ref() {
-                        Either::Left(chunk) => chunk
-                            .iter()
-                            .for_each(|x| writer.write_alignment_record(&header, x).unwrap()),
-                        Either::Right(chunk) => chunk.iter().for_each(|(a, b)| {
-                            writer.write_alignment_record(&header, a).unwrap();
-                            writer.write_alignment_record(&header, b).unwrap();
-                        }),
-                    };
-                }
-                data
-            });
+            .gen_barcoded_alignments(num_threads, chunk_size);
+        let alignments = write_alignments(py, &mut bam_writer, &header, alignments);
 
         let fragment_writer = output_fragment
             .as_ref()
@@ -206,6 +185,32 @@ fn align(
         fragment_qc.report(&mut report);
     }
     Ok(report.into())
+}
+
+fn write_alignments<'a, A: AsIterator<Item = RecordBuf>>(
+    py: Python<'a>,
+    bam_writer: &'a mut Option<bam::io::Writer<impl std::io::Write>>,
+    header: &'a sam::Header,
+    alignments: impl Iterator<Item = Either<Vec<A>, Vec<(A, A)>>> + 'a,
+) -> impl Iterator<Item = Either<Vec<A>, Vec<(A, A)>>> + 'a
+{
+    alignments.map(move |data| {
+        py.check_signals().unwrap();
+        if let Some(writer) = bam_writer.as_mut() {
+            match data.as_ref() {
+                Either::Left(chunk) => chunk
+                    .iter()
+                    .for_each(|a| a.as_iter().for_each(|x|
+                        writer.write_alignment_record(&header, x).unwrap()
+                    )),
+                Either::Right(chunk) => chunk.iter().for_each(|(a, b)| {
+                    a.as_iter().for_each(|x| writer.write_alignment_record(&header, x).unwrap());
+                    b.as_iter().for_each(|x| writer.write_alignment_record(&header, x).unwrap());
+                }),
+            };
+        }
+        data
+    })
 }
 
 #[pyfunction]
@@ -332,11 +337,11 @@ fn make_fastq(
     std::fs::create_dir_all(&out_dir)?;
     let read1_fq = out_dir.join("R1.fq.zst");
     let read1_writer = create_file(read1_fq, Some(Compression::Zstd), None, 8)?;
-    let mut read1_writer = Writer::new(BufWriter::new(read1_writer));
+    let mut read1_writer = fastq::Writer::new(BufWriter::new(read1_writer));
     let mut read2_writer = if fq_reader.is_paired_end() {
         let read2_fq = out_dir.join("R2.fq.zst");
         let read2_writer = create_file(read2_fq, Some(Compression::Zstd), None, 8)?;
-        let read2_writer = Writer::new(BufWriter::new(read2_writer));
+        let read2_writer = fastq::Writer::new(BufWriter::new(read2_writer));
         Some(read2_writer)
     } else {
         None

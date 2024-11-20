@@ -64,22 +64,28 @@ impl AnnotatedAlignment {
 }
 
 #[derive(Debug, Clone)]
-pub struct AnnotationParams {
-    pub chemistry_strandedness: Strand,
-    pub chemistry_endedness: WhichEnd,
-    pub intergenic_trim_bases: i64,
-    pub intronic_trim_bases: i64,
-    pub junction_trim_bases: i64,
-    pub region_min_overlap: f64,
-}
-
-#[derive(Debug)]
 pub struct AlignmentAnnotator {
-    params: AnnotationParams,
     transcripts: GIntervalMap<Transcript>,
+    chemistry_strandedness: Strand,
+    intergenic_trim_bases: u64,
+    intronic_trim_bases: u64,
+    junction_trim_bases: u64,
+    region_min_overlap: f64,
 }
 
 impl AlignmentAnnotator {
+    pub fn new(transcripts: impl IntoIterator<Item = Transcript>) -> Self {
+        let transcripts = transcripts.into_iter().map(|x| (GenomicRange::new(&x.chrom, x.start, x.end), x)).collect();
+        Self {
+            transcripts,
+            chemistry_strandedness: Strand::Forward,
+            intergenic_trim_bases: 0,
+            intronic_trim_bases: 0,
+            junction_trim_bases: 0,
+            region_min_overlap: 0.5,
+        }
+    }
+
     /// Annotate the alignments by mapping them to the transcriptome. If multiple
     /// alignments are present, we will try to find the confident ones and promote
     /// them to primary. A read may align to multiple transcripts and genes, but
@@ -224,12 +230,12 @@ impl AlignmentAnnotator {
         // figure out coordinates
         let tx_start = transcript.start;
         let tx_end = transcript.end;
-        let genomic_start = read.alignment_start().unwrap().get() as i64;
-        let genomic_end = read.alignment_end().unwrap().get() as i64;
+        let genomic_start = read.alignment_start().unwrap().get() as u64;
+        let genomic_end = read.alignment_end().unwrap().get() as u64;
 
         // compute region
         let splice_segments = SpliceSegments::from(read);
-        let is_exonic = splice_segments.is_exonic(transcript, self.params.region_min_overlap);
+        let is_exonic = splice_segments.is_exonic(transcript, self.region_min_overlap);
         let is_intronic =
             !is_exonic && get_overlap(genomic_start, genomic_end, tx_start, tx_end) >= 1.0;
         if !(is_exonic || is_intronic) {
@@ -243,7 +249,7 @@ impl AlignmentAnnotator {
         if flags.is_segmented() && flags.is_last_segment() {
             read_reverse_strand = !read_reverse_strand;
         };
-        let is_antisense = match self.params.chemistry_strandedness {
+        let is_antisense = match self.chemistry_strandedness {
             Strand::Forward => tx_reverse_strand != read_reverse_strand,
             Strand::Reverse => tx_reverse_strand == read_reverse_strand,
         };
@@ -276,9 +282,9 @@ impl AlignmentAnnotator {
         // align the read to the exons
         let Some((mut tx_cigar, tx_aligned_bases)) = splice_segments.align_junctions(
             transcript,
-            self.params.junction_trim_bases,
-            self.params.intergenic_trim_bases,
-            self.params.intronic_trim_bases,
+            self.junction_trim_bases,
+            self.intergenic_trim_bases,
+            self.intronic_trim_bases,
         ) else {
             return Some(gene_aln);
         };
@@ -289,12 +295,6 @@ impl AlignmentAnnotator {
             tx_cigar.as_mut().reverse();
         };
 
-        // Apparent insert size, assuming a SE read coming from this transcript
-        let se_insert_size = match self.params.chemistry_endedness {
-            WhichEnd::FivePrime => tx_offset + tx_aligned_bases,
-            WhichEnd::ThreePrime => tx_length - tx_offset,
-        } as u32;
-
         let alignment = TranscriptAlignment {
             gene,
             strand: tx_strand,
@@ -303,7 +303,6 @@ impl AlignmentAnnotator {
                 pos: tx_offset,
                 cigar: tx_cigar,
                 alen: tx_aligned_bases,
-                se_insert_size,
             }),
         };
 
@@ -448,13 +447,6 @@ fn rescue_alignments_pe(pairs: &mut [AnnotatedAlignment]) -> bool {
     rescued
 }
 
-/// Which end of a transcript reads come from
-#[derive(Debug, Copy, Clone, PartialEq, Eq)]
-pub enum WhichEnd {
-    ThreePrime,
-    FivePrime,
-}
-
 #[derive(Eq, PartialEq, Ord, PartialOrd, Debug, Clone, Copy, Hash)]
 pub enum AnnotationRegion {
     Exonic,
@@ -506,17 +498,16 @@ impl TranscriptAlignment {
 #[derive(Eq, PartialEq, Debug)]
 pub struct TxAlignProperties {
     pub id: String,
-    pub pos: i64,
+    pub pos: u64,
     pub cigar: Cigar,
-    pub alen: i64,
-    pub se_insert_size: u32,
+    pub alen: u64,
 }
 
 /// Fraction of read interval covered by ref interval
-fn get_overlap(read_start: i64, read_end: i64, ref_start: i64, ref_end: i64) -> f64 {
-    let mut overlap_bases = cmp::min(ref_end, read_end) - cmp::max(ref_start, read_start);
-    if overlap_bases < 0 {
-        overlap_bases = 0;
+fn get_overlap(read_start: u64, read_end: u64, ref_start: u64, ref_end: u64) -> f64 {
+    let mut overlap_bases = cmp::min(ref_end, read_end) as f64 - cmp::max(ref_start, read_start) as f64;
+    if overlap_bases < 0.0 {
+        overlap_bases = 0.0;
     }
-    (overlap_bases as f64) / ((read_end - read_start) as f64)
+    overlap_bases / ((read_end - read_start) as f64)
 }

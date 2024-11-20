@@ -11,13 +11,13 @@ use noodles::sam::alignment::record_buf::RecordBuf;
 use std::cmp;
 
 /// 0-based, half-open
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Transcript {
     id: String,
     name: String,
     chrom: String,
-    start: i64,
-    end: i64, // exclusive
+    start: u64,
+    end: u64, // exclusive
     strand: Strand,
     gene: Gene,
     exons: Exons,
@@ -25,7 +25,7 @@ pub struct Transcript {
 
 impl Transcript {
     /// Transcript length is the sum of the lengths of the exons.
-    pub fn len(&self) -> i64 {
+    pub fn len(&self) -> u64 {
         self.exons().iter().map(|x| x.len()).sum()
     }
 
@@ -36,7 +36,7 @@ impl Transcript {
     /// Convert a coordinate in the genome to a coordinate in the exons/transcript.
     /// The coordinate starts at the beginning of the transcript.
     /// Returns None if the coordinate is not in the transcript.
-    fn get_offset(&self, coord: i64) -> Option<i64> {
+    fn get_offset(&self, coord: u64) -> Option<u64> {
         if coord < self.start || coord >= self.end {
             None
         } else {
@@ -52,24 +52,24 @@ impl Transcript {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Exons(Vec<Exon>);
 
 impl Exons {
-    fn new(iter: impl IntoIterator<Item = (i64, i64)>) -> Result<Self> {
-        let mut prev_end = -1;
+    fn new(iter: impl IntoIterator<Item = (u64, u64)>) -> Result<Self> {
+        let mut prev_end = None;
         let exon = iter
             .into_iter()
             .map(|(start, end)| {
                 ensure!(
-                    start >= prev_end,
+                    prev_end.is_none() || start >= prev_end.unwrap(),
                     "Exons must be non-overlapping and in order"
                 );
                 ensure!(
                     end > start,
                     "End coordinate must be greater than start coordinate"
                 );
-                prev_end = end;
+                prev_end = Some(end);
                 Ok(Exon { start, end })
             })
             .collect::<Result<Vec<_>>>()?;
@@ -86,12 +86,12 @@ impl AsRef<[Exon]> for Exons {
 /// Exon coordinates are 0-based, half-open. The position is relative to the start of the transcript.
 #[derive(Eq, PartialEq, Debug, Clone, Ord, PartialOrd)]
 pub struct Exon {
-    start: i64,
-    end: i64,
+    start: u64,
+    end: u64,
 }
 
 impl Exon {
-    pub fn len(&self) -> i64 {
+    pub fn len(&self) -> u64 {
         self.end - self.start
     }
 }
@@ -106,8 +106,8 @@ pub struct Gene {
 /// any "Skip" sections. The SpliceSegment is 0-based, half-open with respect to the reference.
 #[derive(Debug)]
 struct SpliceSegment {
-    start: i64,
-    end: i64,
+    start: u64,
+    end: u64,
     cigar: Cigar,
 }
 
@@ -121,13 +121,13 @@ pub struct SpliceSegments {
 
 impl SpliceSegments {
     /// The leftmost position of all segments.
-    pub fn start(&self) -> i64 {
-        self.segments.first().map_or(-1, |segment| segment.start)
+    pub fn start(&self) -> u64 {
+        self.segments.first().map_or(0, |segment| segment.start)
     }
 
     /// The rightmost position of all segments.
-    pub fn end(&self) -> i64 {
-        self.segments.last().map_or(-1, |segment| segment.end)
+    pub fn end(&self) -> u64 {
+        self.segments.last().map_or(0, |segment| segment.end)
     }
 
     /// Determine if the read aligns to exonic regions of a transcript. A read is considered exonic
@@ -149,10 +149,10 @@ impl SpliceSegments {
     pub fn align_junctions(
         &self,
         transcript: &Transcript,
-        tolerance: i64,
-        intergenic_trim_bases: i64,
-        intronic_trim_bases: i64,
-    ) -> Option<(Cigar, i64)> {
+        tolerance: u64,
+        intergenic_trim_bases: u64,
+        intronic_trim_bases: u64,
+    ) -> Option<(Cigar, u64)> {
         let (ex_start, ex_end) = find_exons(
             &transcript.exons(),
             self.start(),
@@ -164,7 +164,7 @@ impl SpliceSegments {
     }
 
     /// Align the read to the exons. Returns the aligned cigar and the number of aligned bases.
-    fn _align_junctions_helper(&self, exons: &[Exon], tolerance: i64) -> Option<(Cigar, i64)> {
+    fn _align_junctions_helper(&self, exons: &[Exon], tolerance: u64) -> Option<(Cigar, u64)> {
         // check if the number of segments matches the number of exons
         if self.segments.len() != exons.len() {
             return None;
@@ -180,7 +180,7 @@ impl SpliceSegments {
             let mut tmp_cigar = curr_segment.cigar.clone();
 
             // align the start
-            let start_diff = curr_exon.start - curr_segment.start;
+            let start_diff = curr_exon.start as i64 - curr_segment.start as i64;
             if i == 0 {
                 // first segment
                 if start_diff > 0 {
@@ -192,9 +192,9 @@ impl SpliceSegments {
                     );
                 } else if start_diff < 0 {
                     // underhang -> decrement aligned bases
-                    aligned_bases -= start_diff.abs();
+                    aligned_bases -= start_diff.unsigned_abs();
                 }
-            } else if start_diff.abs() > tolerance {
+            } else if start_diff.unsigned_abs() > tolerance {
                 return None; // can't align properly
             } else if start_diff > 0 {
                 // overhang -> mark as insertion
@@ -213,7 +213,7 @@ impl SpliceSegments {
             }
 
             // align the end
-            let end_diff = curr_segment.end - curr_exon.end - 1;
+            let end_diff = curr_segment.end as i64 - curr_exon.end as i64 - 1;
             if i == self.segments.len() - 1 {
                 // last segment
                 if end_diff > 0 {
@@ -225,9 +225,9 @@ impl SpliceSegments {
                     );
                 } else if end_diff < 0 {
                     // underhang -> decrement aligned bases
-                    aligned_bases -= end_diff.abs();
+                    aligned_bases -= end_diff.unsigned_abs();
                 }
-            } else if end_diff.abs() > tolerance {
+            } else if end_diff.unsigned_abs() > tolerance {
                 return None; // can't align properly
             } else if end_diff > 0 {
                 // overhang -> mark as insertion
@@ -257,15 +257,15 @@ impl SpliceSegments {
 impl From<&RecordBuf> for SpliceSegments {
     fn from(read: &RecordBuf) -> Self {
         let cigar = read.cigar();
-        let alignment_start = read.alignment_start().unwrap().get() as i64;
+        let alignment_start = read.alignment_start().unwrap().get();
 
         let mut left_clip: Vec<Op> = Vec::new();
         let mut right_clip: Vec<Op> = Vec::new();
         let mut splice_segments: Vec<SpliceSegment> = Vec::new();
         let mut seen_nonclips = false; // whether we've seen non-clip bases yet
         let mut curr_segment = SpliceSegment {
-            start: alignment_start,
-            end: alignment_start,
+            start: alignment_start as u64,
+            end: alignment_start as u64,
             cigar: Vec::new().into(),
         };
 
@@ -280,7 +280,7 @@ impl From<&RecordBuf> for SpliceSegments {
                 }
                 Kind::Skip => {
                     seen_nonclips = true;
-                    let next_start = curr_segment.end + c.len() as i64;
+                    let next_start = curr_segment.end + c.len() as u64;
                     splice_segments.push(curr_segment);
                     curr_segment = SpliceSegment {
                         start: next_start,
@@ -294,7 +294,7 @@ impl From<&RecordBuf> for SpliceSegments {
                 }
                 Kind::Match | Kind::Deletion | Kind::SequenceMatch | Kind::SequenceMismatch => {
                     seen_nonclips = true;
-                    curr_segment.end += c.len() as i64;
+                    curr_segment.end += c.len() as u64;
                     curr_segment.cigar.as_mut().push(*c);
                 }
                 Kind::Pad => unreachable!(),
@@ -311,21 +311,21 @@ impl From<&RecordBuf> for SpliceSegments {
 }
 
 /// Fraction of read interval covered by ref interval
-fn get_overlap(read_start: i64, read_end: i64, ref_start: i64, ref_end: i64) -> f64 {
-    let mut overlap_bases = cmp::min(ref_end, read_end) - cmp::max(ref_start, read_start);
-    if overlap_bases < 0 {
-        overlap_bases = 0;
+fn get_overlap(read_start: u64, read_end: u64, ref_start: u64, ref_end: u64) -> f64 {
+    let mut overlap_bases = cmp::min(ref_end, read_end) as f64 - cmp::max(ref_start, read_start) as f64;
+    if overlap_bases < 0.0 {
+        overlap_bases = 0.0;
     }
-    (overlap_bases as f64) / ((read_end - read_start) as f64)
+    overlap_bases / ((read_end - read_start) as f64)
 }
 
 /// Find the exons that the read aligns to. Returns the indices of the first and last exons.
 fn find_exons(
     exon_info: &[Exon],
-    read_start: i64,
-    read_end: i64, // inclusive
-    intergenic_trim_bases: i64,
-    intronic_trim_bases: i64,
+    read_start: u64,
+    read_end: u64, // inclusive
+    intergenic_trim_bases: u64,
+    intronic_trim_bases: u64,
 ) -> Option<(usize, usize)> {
     // find first exon that ends to the right of the read start
     let ex_start = exon_info
@@ -425,7 +425,7 @@ mod tests {
 
     #[allow(dead_code)]
     struct TranscriptomeTest {
-        chrom_starts: Vec<i64>,
+        chrom_starts: Vec<u64>,
         transcript_info: Vec<Transcript>,
         exon_info: Vec<Exon>,
     }
