@@ -56,13 +56,13 @@ pub trait Aligner {
     fn align_reads(
         &mut self,
         num_threads: u16,
-        records: Vec<AnnotatedRecord>,
+        records: Vec<AnnotatedFastq>,
     ) -> Vec<Self::AlignOutput>;
 
     fn align_read_pairs(
         &mut self,
         num_threads: u16,
-        records: Vec<AnnotatedRecord>,
+        records: Vec<AnnotatedFastq>,
     ) -> Vec<(Self::AlignOutput, Self::AlignOutput)>;
 }
 
@@ -75,14 +75,14 @@ impl Aligner for DummyAligner {
         sam::Header::default()
     }
 
-    fn align_reads(&mut self, _: u16, _: Vec<AnnotatedRecord>) -> Vec<Self::AlignOutput> {
+    fn align_reads(&mut self, _: u16, _: Vec<AnnotatedFastq>) -> Vec<Self::AlignOutput> {
         Vec::new()
     }
 
     fn align_read_pairs(
         &mut self,
         _: u16,
-        _: Vec<AnnotatedRecord>,
+        _: Vec<AnnotatedFastq>,
     ) -> Vec<(Self::AlignOutput, Self::AlignOutput)> {
         Vec::new()
     }
@@ -98,7 +98,7 @@ impl Aligner for BurrowsWheelerAligner {
     fn align_reads(
         &mut self,
         num_threads: u16,
-        records: Vec<AnnotatedRecord>,
+        records: Vec<AnnotatedFastq>,
     ) -> Vec<Self::AlignOutput> {
         let (info, mut reads): (Vec<_>, Vec<_>) = records
             .into_iter()
@@ -124,7 +124,7 @@ impl Aligner for BurrowsWheelerAligner {
     fn align_read_pairs(
         &mut self,
         num_threads: u16,
-        records: Vec<AnnotatedRecord>,
+        records: Vec<AnnotatedFastq>,
     ) -> Vec<(Self::AlignOutput, Self::AlignOutput)> {
         let (info, mut reads): (Vec<_>, Vec<_>) = records
             .into_iter()
@@ -167,7 +167,7 @@ impl Aligner for StarAligner {
     fn align_reads(
         &mut self,
         num_threads: u16,
-        records: Vec<AnnotatedRecord>,
+        records: Vec<AnnotatedFastq>,
     ) -> Vec<Self::AlignOutput> {
         let chunk_size = get_chunk_size(records.len(), num_threads as usize);
 
@@ -192,7 +192,7 @@ impl Aligner for StarAligner {
     fn align_read_pairs(
         &mut self,
         num_threads: u16,
-        records: Vec<AnnotatedRecord>,
+        records: Vec<AnnotatedFastq>,
     ) -> Vec<(Self::AlignOutput, Self::AlignOutput)> {
         let chunk_size = get_chunk_size(records.len(), num_threads as usize);
 
@@ -518,7 +518,7 @@ impl FromIterator<(FastqAnnotator, fastq::Reader<Box<dyn BufRead>>)> for Annotat
 }
 
 impl Iterator for AnnotatedFastqReader {
-    type Item = AnnotatedRecord;
+    type Item = AnnotatedFastq;
 
     fn next(&mut self) -> Option<Self::Item> {
         let mut missing = None;
@@ -604,7 +604,7 @@ impl FastqAnnotator {
         }
     }
 
-    fn annotate(&self, record: &fastq::Record) -> Result<AnnotatedRecord> {
+    fn annotate(&self, record: &fastq::Record) -> Result<AnnotatedFastq> {
         let n = record.sequence().len();
         if n < self.min_len || n > self.max_len {
             bail!(
@@ -655,7 +655,7 @@ impl FastqAnnotator {
                 }
             }
         });
-        Ok(AnnotatedRecord {
+        Ok(AnnotatedFastq {
             barcode,
             umi,
             read1,
@@ -685,14 +685,14 @@ impl Barcode {
 pub type UMI = fastq::Record;
 
 /// An annotated fastq record with barcode, UMI, and sequence.
-pub struct AnnotatedRecord {
+pub struct AnnotatedFastq {
     pub barcode: Option<Barcode>,
     pub umi: Option<UMI>,
     pub read1: Option<fastq::Record>,
     pub read2: Option<fastq::Record>,
 }
 
-impl AnnotatedRecord {
+impl AnnotatedFastq {
     /// The total number of bases, including read1 and read2, in the record.
     pub fn len(&self) -> usize {
         self.read1.as_ref().map_or(0, |x| x.sequence().len())
@@ -703,7 +703,7 @@ impl AnnotatedRecord {
     }
 }
 
-impl AnnotatedRecord {
+impl AnnotatedFastq {
     pub fn join(&mut self, other: Self) {
         if let Some(bc) = &mut self.barcode {
             if let Some(x) = other.barcode.as_ref() {
@@ -750,7 +750,7 @@ impl<I> VectorChunk<I> {
     }
 }
 
-impl<I: Iterator<Item = AnnotatedRecord>> Iterator for VectorChunk<I> {
+impl<I: Iterator<Item = AnnotatedFastq>> Iterator for VectorChunk<I> {
     type Item = Vec<I::Item>;
 
     fn next(&mut self) -> Option<Self::Item> {

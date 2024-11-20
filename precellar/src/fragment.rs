@@ -1,11 +1,11 @@
-mod deduplicate;
+mod de_dups;
 
 use anyhow::Result;
 use bed_utils::{
     bed::{BEDLike, ParseError, Strand},
     extsort::ExternalSorterBuilder,
 };
-use deduplicate::{remove_duplicates, AlignmentInfo};
+use de_dups::{remove_duplicates, AlignmentInfo};
 use either::Either;
 use itertools::Itertools;
 use noodles::sam::{
