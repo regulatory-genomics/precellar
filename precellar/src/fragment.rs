@@ -16,6 +16,8 @@ use rayon::prelude::ParallelSliceMut;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+use crate::align::MultiMap;
+
 pub type CellBarcode = String;
 
 /// Fragments from single-cell ATAC-seq experiment. Each fragment is represented
@@ -173,20 +175,20 @@ impl FragmentGenerator {
         impl FnMut(&AlignmentInfo) -> String + 'a,
     >
     where
-        I: Iterator<Item = Either<Vec<R>, Vec<(R, R)>>> + 'a,
+        I: Iterator<Item = Either<Vec<MultiMap<R>>, Vec<(MultiMap<R>, MultiMap<R>)>>> + 'a,
         R: Record + 'a,
     {
         let data = records.flat_map(|x| match x {
             Either::Left(chunk) => Box::new(chunk.into_iter().flat_map(|r| {
-                if filter_read(&r, self.mapq) {
-                    AlignmentInfo::from_read(&r, header).unwrap()
+                if filter_read(&r.primary, self.mapq) {
+                    AlignmentInfo::from_read(&r.primary, header).unwrap()
                 } else {
                     None
                 }
             })) as Box<dyn Iterator<Item = AlignmentInfo>>,
             Either::Right(chunk) => Box::new(chunk.into_iter().flat_map(|(r1, r2)| {
-                if filter_read_pair((&r1, &r2), self.mapq) {
-                    AlignmentInfo::from_read_pair((&r1, &r2), header).unwrap()
+                if filter_read_pair((&r1.primary, &r2.primary), self.mapq) {
+                    AlignmentInfo::from_read_pair((&r1.primary, &r2.primary), header).unwrap()
                 } else {
                     None
                 }

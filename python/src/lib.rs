@@ -5,13 +5,13 @@ use anyhow::Result;
 use either::Either;
 use itertools::Itertools;
 use log::info;
-use noodles::{bam, bgzf, fastq, sam::{self, alignment::{io::Write, RecordBuf}}};
+use noodles::{bam, bgzf, fastq, sam::{self, alignment::io::Write}};
 use pyo3::prelude::*;
-use std::{collections::HashMap, io::BufWriter, path::PathBuf, str::FromStr};
+use std::{collections::HashMap, io::BufWriter, path::{Path, PathBuf}, str::FromStr};
 
 use ::precellar::{
     align::{
-        extend_fastq_record, Aligner, AsIterator, Barcode, BurrowsWheelerAligner, DummyAligner, FastqProcessor, NameCollatedRecords
+        extend_fastq_record, Aligner, AlignerBuilder, Barcode, BurrowsWheelerAligner, DummyAligner, FastqProcessor, MultiMapR, NameCollatedRecords, StarAligner
     },
     fragment::FragmentGenerator,
     qc::{AlignQC, FragmentQC, Metrics},
@@ -66,6 +66,8 @@ fn make_genome_index(fasta: PathBuf, genome_prefix: PathBuf) -> Result<()> {
 ///     The number of bases to shift the left end of the fragment.
 /// shift_right: int
 ///     The number of bases to shift the right end of the fragment.
+/// aligner: str | None
+///     The aligner to use for the alignment. If None, the aligner will be inferred from the modality.
 /// compression: str | None
 ///     The compression algorithm to use for the output fragment file.
 ///     If None, the compression algorithm will be inferred from the file extension.
@@ -89,14 +91,14 @@ fn make_genome_index(fasta: PathBuf, genome_prefix: PathBuf) -> Result<()> {
         assay, genome_index, *,
         modality, output_bam=None, output_fragment=None,
         mito_dna=vec!["chrM".to_owned(), "M".to_owned()],
-        shift_left=4, shift_right=-5,
+        shift_left=4, shift_right=-5, aligner=None,
         compression=None, compression_level=None,
         temp_dir=None, num_threads=8, chunk_size=10000000,
     ),
     text_signature = "(assay, genome_index, *,
         modality, output_bam=None, output_fragment=None,
         mito_dna=['chrM', 'M'],
-        shift_left=4, shift_right=-5,
+        shift_left=4, shift_right=-5, aligner=None,
         compression=None, compression_level=None,
         temp_dir=None, num_threads=8, chunk_size=10000000)",
 )]
@@ -110,6 +112,7 @@ fn align(
     mito_dna: Vec<String>,
     shift_left: i64,
     shift_right: i64,
+    aligner: Option<&str>,
     compression: Option<&str>,
     compression_level: Option<u32>,
     temp_dir: Option<PathBuf>,
@@ -118,7 +121,7 @@ fn align(
 ) -> Result<HashMap<String, f64>> {
     assert!(
         output_bam.is_some() || output_fragment.is_some(),
-        "either output_bam or output_fragment must be provided"
+        "one of the following parameters must be provided: output_bam, output_fragment"
     );
 
     let modality = Modality::from_str(modality).unwrap();
@@ -127,7 +130,11 @@ fn align(
         _ => assay.extract::<PyRef<Assay>>()?.0.clone(),
     };
 
-    let aligner = BurrowsWheelerAligner::from_path(genome_index);
+    let aligner = if let Some(name) = aligner {
+        get_aligner_by_name(name, genome_index)
+    } else {
+        get_aligner_by_modality(modality, genome_index)
+    };
     let header = aligner.header();
     let mut processor = FastqProcessor::new(assay, aligner)
         .with_modality(modality)
@@ -177,6 +184,10 @@ fn align(
                         writeln!(writer.as_mut(), "{}", frag).unwrap();
                     })
                 });
+        } else {
+            // alignments is a lazy iterator, so we need to consume it if no other
+            // output is generated.
+            alignments.for_each(drop);
         }
     }
 
@@ -187,12 +198,28 @@ fn align(
     Ok(report.into())
 }
 
-fn write_alignments<'a, A: AsIterator<Item = RecordBuf>>(
+fn get_aligner_by_modality<P: AsRef<Path>>(modality: Modality, path: P) -> Box<dyn Aligner> {
+    match modality {
+        Modality::RNA => Box::new(StarAligner::from_path(path)),
+        Modality::ATAC => Box::new(BurrowsWheelerAligner::from_path(path)),
+        _ => unimplemented!(),
+    }
+}
+
+fn get_aligner_by_name<P: AsRef<Path>>(name: &str, path: P) -> Box<dyn Aligner> {
+    match name.to_lowercase().as_str() {
+        "star" => Box::new(StarAligner::from_path(path)),
+        "bwa" => Box::new(BurrowsWheelerAligner::from_path(path)),
+        _ => unimplemented!(),
+    }
+}
+
+fn write_alignments<'a>(
     py: Python<'a>,
     bam_writer: &'a mut Option<bam::io::Writer<impl std::io::Write>>,
     header: &'a sam::Header,
-    alignments: impl Iterator<Item = Either<Vec<A>, Vec<(A, A)>>> + 'a,
-) -> impl Iterator<Item = Either<Vec<A>, Vec<(A, A)>>> + 'a
+    alignments: impl Iterator<Item = Either<Vec<MultiMapR>, Vec<(MultiMapR, MultiMapR)>>> + 'a,
+) -> impl Iterator<Item = Either<Vec<MultiMapR>, Vec<(MultiMapR, MultiMapR)>>> + 'a
 {
     alignments.map(move |data| {
         py.check_signals().unwrap();
@@ -200,12 +227,12 @@ fn write_alignments<'a, A: AsIterator<Item = RecordBuf>>(
             match data.as_ref() {
                 Either::Left(chunk) => chunk
                     .iter()
-                    .for_each(|a| a.as_iter().for_each(|x|
+                    .for_each(|a| a.iter().for_each(|x|
                         writer.write_alignment_record(&header, x).unwrap()
                     )),
                 Either::Right(chunk) => chunk.iter().for_each(|(a, b)| {
-                    a.as_iter().for_each(|x| writer.write_alignment_record(&header, x).unwrap());
-                    b.as_iter().for_each(|x| writer.write_alignment_record(&header, x).unwrap());
+                    a.iter().for_each(|x| writer.write_alignment_record(&header, x).unwrap());
+                    b.iter().for_each(|x| writer.write_alignment_record(&header, x).unwrap());
                 }),
             };
         }
@@ -263,8 +290,7 @@ fn make_fragment(
 
     let chunks = NameCollatedRecords::new(reader.records())
         .map(|x| {
-            align_qc.update(&x.0, &header);
-            align_qc.update(&x.1, &header);
+            align_qc.add(&header, &x.0, Some(&x.1)).unwrap();
             x
         })
         .chunks(chunk_size);
@@ -321,7 +347,7 @@ fn make_fastq(
     };
 
     let aligner = DummyAligner;
-    let mut processor = FastqProcessor::new(spec, aligner).with_modality(modality);
+    let mut processor = FastqProcessor::new(spec, Box::new(aligner)).with_modality(modality);
     let fq_reader = processor.gen_barcoded_fastq(correct_barcode);
 
     info!(

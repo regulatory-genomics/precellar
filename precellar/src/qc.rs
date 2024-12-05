@@ -4,7 +4,9 @@ use noodles::sam::alignment::{record::data::field::tag::Tag, Record};
 use std::collections::{HashMap, HashSet};
 use std::fmt::Display;
 use std::ops::{Deref, DerefMut};
+use anyhow::Result;
 
+use crate::align::MultiMap;
 use crate::fragment::Fragment;
 
 #[derive(Debug, Default, Clone)]
@@ -45,112 +47,99 @@ impl Display for Metrics {
     }
 }
 
-/// Alignment record statistics.
 #[derive(Debug, Default)]
-pub struct FlagStat {
-    pub read: u64,
-    pub primary: u64,
-    pub secondary: u64,
-    pub supplementary: u64,
-    pub duplicate: u64,
-    pub primary_duplicate: u64,
-    pub mapped: u64,
-    pub primary_mapped: u64,
-    pub paired: u64,
-    pub read_1: u64,
-    pub read_2: u64,
-    pub proper_pair: u64,
-    pub mate_mapped: u64,
-    pub singleton: u64,
-    pub mate_reference_sequence_id_mismatch: u64,
+struct AlignStat {
+    total: u64, // Total number of reads
+    mapped: u64, // Number of mapped reads
+    high_quality: u64, // Number of high-quality mapped reads: unique, non-duplicate, and mapping quality >= 30
+    multimapped: u64, // Number of reads with multiple alignments
+    duplicate: u64, // Number of duplicate reads
 }
 
-impl FlagStat {
-    pub fn add(&mut self, other: &FlagStat) {
-        self.read += other.read;
-        self.primary += other.primary;
-        self.secondary += other.secondary;
-        self.supplementary += other.supplementary;
-        self.duplicate += other.duplicate;
-        self.primary_duplicate += other.primary_duplicate;
-        self.mapped += other.mapped;
-        self.primary_mapped += other.primary_mapped;
-        self.paired += other.paired;
-        self.read_1 += other.read_1;
-        self.read_2 += other.read_2;
-        self.proper_pair += other.proper_pair;
-        self.mate_mapped += other.mate_mapped;
-        self.singleton += other.singleton;
-        self.mate_reference_sequence_id_mismatch += other.mate_reference_sequence_id_mismatch;
-    }
-
-    pub fn update<R: Record>(&mut self, header: &sam::Header, record: &R) {
-        self.read += 1;
-        let flags = record.flags().unwrap();
-
+impl AlignStat {
+    pub fn add<R: Record>(&mut self, record: &MultiMap<R>) -> Result<()> {
+        self.total += 1;
+        let flags = record.primary.flags()?;
         if flags.is_duplicate() {
             self.duplicate += 1;
         }
-
         if !flags.is_unmapped() {
             self.mapped += 1;
-        }
-
-        if flags.is_secondary() {
-            self.secondary += 1;
-        } else if flags.is_supplementary() {
-            self.supplementary += 1;
-        } else {
-            self.primary += 1;
-
-            if !flags.is_unmapped() {
-                self.primary_mapped += 1;
-            }
-
-            if flags.is_duplicate() {
-                self.primary_duplicate += 1;
-            }
-
-            if flags.is_segmented() {
-                self.paired += 1;
-
-                if flags.is_first_segment() {
-                    self.read_1 += 1;
-                }
-
-                if flags.is_last_segment() {
-                    self.read_2 += 1;
-                }
-
-                if !flags.is_unmapped() {
-                    if flags.is_properly_segmented() {
-                        self.proper_pair += 1;
-                    }
-
-                    if flags.is_mate_unmapped() {
-                        self.singleton += 1;
-                    } else {
-                        self.mate_mapped += 1;
-                        let rec_id = record.mate_reference_sequence_id(header).unwrap().unwrap();
-                        let mat_id = record.reference_sequence_id(header).unwrap().unwrap();
-
-                        if mat_id != rec_id {
-                            self.mate_reference_sequence_id_mismatch += 1;
-                        }
-                    }
+            if record.others.is_some() {
+                self.multimapped += 1;
+            } else {
+                let q = record.primary.mapping_quality().transpose()?.map(|x| x.get()).unwrap_or(60);
+                if q >= 30 {
+                    self.high_quality += 1;
                 }
             }
         }
+        Ok(())
+    }
+
+    pub fn combine(&mut self, other: &Self) {
+        self.total += other.total;
+        self.mapped += other.mapped;
+        self.high_quality += other.high_quality;
+        self.multimapped += other.multimapped;
+        self.duplicate += other.duplicate;
+    }
+}
+
+#[derive(Debug, Default)]
+struct PairAlignStat {
+    read1: AlignStat,
+    read2: AlignStat,
+    proper_pairs: u64,
+}
+
+impl PairAlignStat {
+    fn total_reads(&self) -> u64 {
+        self.read1.total + self.read2.total
+    }
+
+    fn total_pairs(&self) -> u64 {
+        self.read2.total
+    }
+
+    fn total_mapped(&self) -> u64 {
+        self.read1.mapped + self.read2.mapped
+    }
+
+    fn total_high_quality(&self) -> u64 {
+        self.read1.high_quality + self.read2.high_quality
+    }
+
+    fn total_duplicate(&self) -> u64 {
+        self.read1.duplicate + self.read2.duplicate
+    }
+
+    fn add<R: Record>(&mut self, record: &MultiMap<R>) -> Result<()> {
+        self.read1.add(record)
+    }
+
+    fn add_pair<R: Record>(&mut self, record1: &MultiMap<R>, record2: &MultiMap<R>) -> Result<()> {
+        self.read1.add(record1)?;
+        self.read2.add(record2)?;
+        if record1.primary.flags()?.is_properly_segmented() {
+            self.proper_pairs += 1;
+        }
+        Ok(())
+    }
+
+    fn combine(&mut self, other: &Self) {
+        self.read1.combine(&other.read1);
+        self.read2.combine(&other.read2);
+        self.proper_pairs += other.proper_pairs;
     }
 }
 
 #[derive(Debug, Default)]
 pub struct AlignQC {
     pub(crate) mito_dna: HashSet<usize>, // Mitochondrial DNA reference sequence IDs
-    pub(crate) all_reads_flagstat: FlagStat,
-    pub(crate) barcoded_reads_flagstat: FlagStat,
-    pub(crate) hq_flagstat: FlagStat,
-    pub(crate) mito_flagstat: FlagStat,
+    stat_all: PairAlignStat,
+    stat_barcoded: PairAlignStat,
+    stat_mito: PairAlignStat,
     pub(crate) num_read1_bases: u64,
     pub(crate) num_read1_q30_bases: u64,
     pub(crate) num_read2_bases: u64,
@@ -162,82 +151,58 @@ impl AlignQC {
         self.mito_dna.insert(mito_dna);
     }
 
-    pub fn update<R: Record>(&mut self, record: &R, header: &sam::Header) {
-        let mut flagstat = FlagStat::default();
-        flagstat.update(header, record);
-        if flagstat.paired == 1 && flagstat.read_2 == 1 {
-            self.num_read2_bases += record.sequence().len() as u64;
-            self.num_read2_q30_bases += record
+    pub fn add<R: Record>(&mut self, header: &sam::Header, record1: &MultiMap<R>, record2: Option<&MultiMap<R>>) -> Result<()> {
+        let mut stat= PairAlignStat::default();
+
+        self.num_read1_bases += record1.primary.sequence().len() as u64;
+        self.num_read1_q30_bases += record1.primary
+            .quality_scores()
+            .iter()
+            .filter(|s| s.as_ref().map(|x| *x >= 30).unwrap_or(false))
+            .count() as u64;
+
+        if let Some(record2) = record2 {
+            self.num_read2_bases += record2.primary.sequence().len() as u64;
+            self.num_read2_q30_bases += record2.primary
                 .quality_scores()
                 .iter()
                 .filter(|s| s.as_ref().map(|x| *x >= 30).unwrap_or(false))
                 .count() as u64;
+            stat.add_pair(record1, record2)?;
         } else {
-            self.num_read1_bases += record.sequence().len() as u64;
-            self.num_read1_q30_bases += record
-                .quality_scores()
-                .iter()
-                .filter(|s| s.as_ref().map(|x| *x >= 30).unwrap_or(false))
-                .count() as u64;
+            stat.add(record1)?;
         }
 
-        self.all_reads_flagstat.add(&flagstat);
-        let is_hq = record
-            .mapping_quality()
-            .map_or(true, |x| x.unwrap().get() >= 30);
-        if is_hq {
-            self.hq_flagstat.add(&flagstat);
-        }
-
-        if record
+        self.stat_all.combine(&stat);
+ 
+        if record1.primary
             .data()
             .get(&Tag::CELL_BARCODE_ID)
             .transpose()
             .unwrap()
             .is_some()
         {
-            self.barcoded_reads_flagstat.add(&flagstat);
-            if let Some(rid) = record.reference_sequence_id(header) {
-                if is_hq && self.mito_dna.contains(&rid.unwrap()) {
-                    self.mito_flagstat.add(&flagstat);
+            self.stat_barcoded.combine(&stat);
+            if let Some(rid) = record1.primary.reference_sequence_id(header) {
+                if self.mito_dna.contains(&rid.unwrap()) {
+                    self.stat_mito.combine(&stat);
                 }
             }
         }
+        Ok(())
     }
 
     pub fn report(&self, metric: &mut Metrics) {
-        let flagstat_all = &self.all_reads_flagstat;
-        let flagstat_barcoded = &self.barcoded_reads_flagstat;
-        let num_reads = flagstat_all.read;
-        let num_pairs = flagstat_all.paired / 2;
-        let num_barcoded_reads = flagstat_barcoded.read;
-        let num_barcoded_pairs = flagstat_barcoded.paired / 2;
-        let mapped_pairs = flagstat_barcoded.mate_mapped / 2;
-        let is_paired = num_pairs > 0;
+        let stat_all = &self.stat_all;
+        let stat_barcoded = &self.stat_barcoded;
 
-        let fraction_unmapped = if is_paired {
-            1.0 - mapped_pairs as f64 / num_barcoded_pairs as f64
-        } else {
-            1.0 - flagstat_barcoded.mapped as f64 / num_barcoded_reads as f64
-        };
-        let valid_barcode = if is_paired {
-            num_barcoded_pairs as f64 / num_pairs as f64
-        } else {
-            num_barcoded_reads as f64 / num_reads as f64
-        };
-        let fraction_confidently_mapped = if is_paired {
-            (self.hq_flagstat.paired / 2) as f64 / num_pairs as f64
-        } else {
-            self.hq_flagstat.read as f64 / num_reads as f64
-        };
-        let fraction_nonnuclear = if is_paired {
-            (self.mito_flagstat.paired / 2) as f64 / num_pairs as f64
-        } else {
-            self.mito_flagstat.read as f64 / num_reads as f64
-        };
+        let fraction_unmapped = 1.0 - stat_barcoded.total_mapped() as f64 / stat_barcoded.total_reads() as f64;
+        let valid_barcode = stat_barcoded.total_reads() as f64 / stat_all.total_reads() as f64;
+        let fraction_confidently_mapped = 1.0 - stat_barcoded.total_high_quality() as f64 / stat_barcoded.total_reads() as f64;
+        let fraction_nonnuclear = self.stat_mito.total_reads() as f64 / stat_barcoded.total_reads() as f64;
 
-        metric.insert("sequenced_reads".to_string(), num_reads as f64);
-        metric.insert("sequenced_read_pairs".to_string(), num_pairs as f64);
+        metric.insert("sequenced_reads".to_string(), stat_all.total_reads() as f64);
+        metric.insert("sequenced_read_pairs".to_string(), stat_all.total_pairs() as f64);
         metric.insert(
             "frac_q30_bases_read1".to_string(),
             self.num_read1_q30_bases as f64 / self.num_read1_bases as f64,

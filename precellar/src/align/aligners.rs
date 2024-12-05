@@ -1,5 +1,7 @@
-use super::AnnotatedFastq;
+use super::fastq::AnnotatedFastq;
+use anyhow::{bail, ensure};
 pub use bwa_mem2::BurrowsWheelerAligner;
+use noodles::sam::alignment::Record;
 pub use star_aligner::StarAligner;
 
 use noodles::sam::alignment::record_buf::{data::field::value::Value, RecordBuf};
@@ -10,67 +12,93 @@ use rayon::slice::ParallelSlice;
 use bwa_mem2::{AlignerOpts, FMIndex, PairedEndStats};
 use star_aligner::StarOpts;
 
-pub trait AsIterator {
-    type Item;
-    type AsIter<'a>: Iterator<Item = &'a Self::Item>
-    where
-        Self: 'a;
+pub type MultiMapR = MultiMap<RecordBuf>;
 
-    fn as_iter(&self) -> Self::AsIter<'_>;
+/// `MultiMap` represents a set of alignments for a single read.
+#[derive(Debug, Clone)]
+pub struct MultiMap<R> {
+    pub primary: R,
+    pub others: Option<Vec<R>>,
 }
 
-impl AsIterator for RecordBuf {
-    type Item = RecordBuf;
-    type AsIter<'a> = std::iter::Once<&'a RecordBuf>;
+impl<R> MultiMap<R> {
+    pub fn new(primary: R, others: Option<Vec<R>>) -> Self {
+        Self { primary, others }
+    }
 
-    fn as_iter(&self) -> Self::AsIter<'_> {
-        std::iter::once(&self)
+    pub fn into_primary(self) -> R {
+        self.primary
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = &R> {
+        std::iter::once(&self.primary).chain(self.others.iter().flatten())
     }
 }
 
-impl AsIterator for Vec<RecordBuf> {
-    type Item = RecordBuf;
-    type AsIter<'a> = std::slice::Iter<'a, RecordBuf>;
+impl<R> From<R> for MultiMap<R> {
+    fn from(record: R) -> Self {
+        Self {
+            primary: record,
+            others: None,
+        }
+    }
+}
 
-    fn as_iter(&self) -> Self::AsIter<'_> {
-        self.iter()
+impl<R: Record> TryFrom<Vec<R>> for MultiMap<R> {
+    type Error = anyhow::Error;
+
+    fn try_from(mut vec: Vec<R>) -> Result<Self, Self::Error> {
+        let n = vec.len();
+        if n == 0 {
+            Err(anyhow::anyhow!("No alignments"))
+        } else if n == 1 {
+            Ok(MultiMap::from(vec.into_iter().next().unwrap()))
+        } else {
+            let mut primary = None;
+            vec.iter().enumerate().try_for_each(|(i, rec)| {
+                if !rec.flags()?.is_secondary() {
+                    if primary.is_some() {
+                        bail!("Multiple primary alignments");
+                    } else {
+                        primary = Some(i);
+                    }
+                }
+                Ok(())
+            })?;
+            ensure!(primary.is_some(), "No primary alignment");
+
+            Ok(MultiMap::new(
+                vec.swap_remove(primary.unwrap()),
+                Some(vec),
+            ))
+        }
     }
 }
 
 pub trait Aligner {
-    type AlignOutput: AsIterator<Item = RecordBuf>;
-
-    fn from_path<P: AsRef<std::path::Path>>(path: P) -> Self;
-
     fn header(&self) -> sam::Header;
 
     fn align_reads(
         &mut self,
         num_threads: u16,
         records: Vec<AnnotatedFastq>,
-    ) -> Vec<Self::AlignOutput>;
+    ) -> Vec<MultiMapR>;
 
     fn align_read_pairs(
         &mut self,
         num_threads: u16,
         records: Vec<AnnotatedFastq>,
-    ) -> Vec<(Self::AlignOutput, Self::AlignOutput)>;
+    ) -> Vec<(MultiMapR, MultiMapR)>;
 }
 
 pub struct DummyAligner;
 
 impl Aligner for DummyAligner {
-    type AlignOutput = RecordBuf;
-
     fn header(&self) -> sam::Header {
         sam::Header::default()
     }
 
-    fn from_path<P: AsRef<std::path::Path>>(_path: P) -> Self {
-        Self
-    }
-
-    fn align_reads(&mut self, _: u16, _: Vec<AnnotatedFastq>) -> Vec<Self::AlignOutput> {
+    fn align_reads(&mut self, _: u16, _: Vec<AnnotatedFastq>) -> Vec<MultiMapR> {
         Vec::new()
     }
 
@@ -78,31 +106,21 @@ impl Aligner for DummyAligner {
         &mut self,
         _: u16,
         _: Vec<AnnotatedFastq>,
-    ) -> Vec<(Self::AlignOutput, Self::AlignOutput)> {
+    ) -> Vec<(MultiMapR, MultiMapR)> {
         Vec::new()
     }
 }
 
 impl Aligner for BurrowsWheelerAligner {
-    type AlignOutput = RecordBuf;
-
     fn header(&self) -> sam::Header {
         self.get_sam_header()
-    }
-
-    fn from_path<P: AsRef<std::path::Path>>(path: P) -> Self {
-        BurrowsWheelerAligner::new(
-            FMIndex::read(path).unwrap(),
-            AlignerOpts::default(),
-            PairedEndStats::default(),
-        )
     }
 
     fn align_reads(
         &mut self,
         num_threads: u16,
         records: Vec<AnnotatedFastq>,
-    ) -> Vec<Self::AlignOutput> {
+    ) -> Vec<MultiMapR> {
         let (info, mut reads): (Vec<_>, Vec<_>) = records
             .into_iter()
             .map(|rec| ((rec.barcode.unwrap(), rec.umi), rec.read1.unwrap()))
@@ -121,7 +139,7 @@ impl Aligner for BurrowsWheelerAligner {
                 if let Some(umi) = umi {
                     add_umi(&mut alignment, umi.sequence(), umi.quality_scores());
                 }
-                alignment
+                alignment.into()
             })
             .collect()
     }
@@ -130,7 +148,7 @@ impl Aligner for BurrowsWheelerAligner {
         &mut self,
         num_threads: u16,
         records: Vec<AnnotatedFastq>,
-    ) -> Vec<(Self::AlignOutput, Self::AlignOutput)> {
+    ) -> Vec<(MultiMapR, MultiMapR)> {
         let (info, mut reads): (Vec<_>, Vec<_>) = records
             .into_iter()
             .map(|rec| {
@@ -160,29 +178,22 @@ impl Aligner for BurrowsWheelerAligner {
                     add_umi(&mut ali1, umi.sequence(), umi.quality_scores());
                     add_umi(&mut ali2, umi.sequence(), umi.quality_scores());
                 }
-                (ali1, ali2)
+                (ali1.into(), ali2.into())
             })
             .collect()
     }
 }
 
 impl Aligner for StarAligner {
-    type AlignOutput = Vec<RecordBuf>;
-
     fn header(&self) -> sam::Header {
         self.get_header().clone()
-    }
-
-    fn from_path<P: AsRef<std::path::Path>>(path: P) -> Self {
-        let opts = StarOpts::new(path);
-        StarAligner::new(opts).unwrap()
     }
 
     fn align_reads(
         &mut self,
         num_threads: u16,
         records: Vec<AnnotatedFastq>,
-    ) -> Vec<Self::AlignOutput> {
+    ) -> Vec<MultiMapR> {
         let chunk_size = get_chunk_size(records.len(), num_threads as usize);
 
         records.par_chunks(chunk_size).flat_map_iter(|chunk| {
@@ -201,7 +212,7 @@ impl Aligner for StarAligner {
                         add_umi(alignment, umi.sequence(), umi.quality_scores());
                     };
                 });
-                ali
+                ali.try_into().unwrap()
             })
         }).collect()
     }
@@ -210,7 +221,7 @@ impl Aligner for StarAligner {
         &mut self,
         num_threads: u16,
         records: Vec<AnnotatedFastq>,
-    ) -> Vec<(Self::AlignOutput, Self::AlignOutput)> {
+    ) -> Vec<(MultiMapR, MultiMapR)> {
         let chunk_size = get_chunk_size(records.len(), num_threads as usize);
 
         records.par_chunks(chunk_size).flat_map_iter(|chunk| {
@@ -232,7 +243,7 @@ impl Aligner for StarAligner {
                         add_umi(alignment, umi.sequence(), umi.quality_scores());
                     };
                 });
-                (ali1, ali2)
+                (ali1.try_into().unwrap(), ali2.try_into().unwrap())
             }).collect::<Vec<_>>()
         }).collect()
     }
@@ -281,4 +292,25 @@ fn add_umi(
         Tag::UMI_QUALITY_SCORES,
         Value::String(qual.into()),
     );
+}
+
+pub trait AlignerBuilder: Aligner {
+    fn from_path<P: AsRef<std::path::Path>>(path: P) -> Self;
+}
+
+impl AlignerBuilder for BurrowsWheelerAligner {
+    fn from_path<P: AsRef<std::path::Path>>(path: P) -> Self {
+        BurrowsWheelerAligner::new(
+            FMIndex::read(path).unwrap(),
+            AlignerOpts::default(),
+            PairedEndStats::default(),
+        )
+    }
+}
+
+impl AlignerBuilder for StarAligner {
+    fn from_path<P: AsRef<std::path::Path>>(path: P) -> Self {
+        let opts = StarOpts::new(path);
+        StarAligner::new(opts).unwrap()
+    }
 }

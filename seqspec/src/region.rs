@@ -237,6 +237,16 @@ impl RegionType {
         matches!(self, RegionType::Gdna | RegionType::Cdna)
     }
 
+    pub fn is_poly_nucl(&self) -> Option<u8> {
+        match self {
+            RegionType::PolyA => Some(b'A'),
+            RegionType::PolyG => Some(b'G'),
+            RegionType::PolyT => Some(b'T'),
+            RegionType::PolyC => Some(b'C'),
+            _ => None,
+        }
+    }
+
     pub fn is_sequencing_primer(&self) -> bool {
         matches!(
             self,

@@ -20,7 +20,7 @@ sequence_spec:
   modality: rna
   primer_id: rna-truseq_read1
   min_len: 28
-  max_len: 28
+  max_len: 98
   strand: pos
 - !Read
   read_id: rna-I1
@@ -136,9 +136,20 @@ library_spec:
     parent_id: rna
   - !Region
     parent_id: rna
+    region_id: rna-polyT
+    region_type: poly_t
+    name: rna-polyT
+    sequence_type: random
+    sequence: XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
+    min_len: 10
+    max_len: 250
+    onlist: null
+    regions: null
+  - !Region
+    parent_id: rna
     region_id: rna-cDNA
     region_type: cdna
-    name: RNA-cDNA
+    name: rna-cDNA
     sequence_type: random
     sequence: XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
     min_len: 1
