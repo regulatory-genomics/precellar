@@ -19,9 +19,8 @@ use std::{
 
 pub struct FastqProcessor {
     assay: Assay,
-    aligner: Box<dyn Aligner>,
     current_modality: Option<Modality>,
-    mito_dna: HashSet<usize>,
+    mito_dna: HashSet<String>,
     metrics: HashMap<Modality, Metrics>,
     align_qc: HashMap<Modality, AlignQC>,
     barcode_correct_prob: f64, // if the posterior probability of a correction
@@ -31,10 +30,9 @@ pub struct FastqProcessor {
 }
 
 impl FastqProcessor {
-    pub fn new(assay: Assay, aligner: Box<dyn Aligner>) -> Self {
+    pub fn new(assay: Assay) -> Self {
         Self {
             assay,
-            aligner,
             current_modality: None,
             metrics: HashMap::new(),
             align_qc: HashMap::new(),
@@ -54,12 +52,8 @@ impl FastqProcessor {
             .expect("modality not set, please call set_modality first")
     }
 
-    pub fn add_mito_dna(&mut self, mito_dna: &str) {
-        self.aligner
-            .header()
-            .reference_sequences()
-            .get_index_of(&BString::from(mito_dna))
-            .map(|x| self.mito_dna.insert(x));
+    pub fn add_mito_dna(&mut self, mito_dna: impl Into<String>) {
+        self.mito_dna.insert(mito_dna.into());
     }
 
     pub fn with_modality(mut self, modality: Modality) -> Self {
@@ -91,20 +85,25 @@ impl FastqProcessor {
     ///
     /// An iterator of alignments. If the fastq file is paired-end, the alignments will be returned as a tuple.
     /// Otherwise, the alignments will be returned as a single vector.
-    pub fn gen_barcoded_alignments(
-        &mut self,
+    pub fn gen_barcoded_alignments<'a, A: Aligner>(
+        &'a mut self,
+        aligner: &'a mut A,
         num_threads: u16,
         chunk_size: usize,
-    ) -> impl Iterator<Item = Either<Vec<MultiMapR>, Vec<(MultiMapR, MultiMapR)>>> + '_ {
+    ) -> impl Iterator<Item = Either<Vec<MultiMapR>, Vec<(MultiMapR, MultiMapR)>>> + 'a {
         let fq_reader = self.gen_barcoded_fastq(true);
         let is_paired = fq_reader.is_paired_end();
         let total_reads = fq_reader.total_reads.unwrap_or(0);
 
         let modality = self.modality();
         info!("Aligning {} reads...", total_reads);
-        let header = self.aligner.header();
+        let header = aligner.header();
         let mut qc = AlignQC::default();
-        qc.mito_dna = self.mito_dna.clone();
+        self.mito_dna.iter().for_each(|mito| {
+            header.reference_sequences()
+                .get_index_of(&BString::from(mito.as_str()))
+                .map(|x| qc.mito_dna.insert(x));
+        });
         self.align_qc.insert(modality, qc);
 
         let mut progress_bar = tqdm!(total = total_reads);
@@ -112,14 +111,14 @@ impl FastqProcessor {
         fq_reader.map(move |data| {
             let align_qc = self.align_qc.get_mut(&modality).unwrap();
             if is_paired {
-                let results: Vec<_> = self.aligner.align_read_pairs(num_threads, data);
+                let results: Vec<_> = aligner.align_read_pairs(num_threads, data);
                 results
                     .iter()
                     .for_each(|(ali1, ali2)| align_qc.add(&header, ali1, Some(ali2)).unwrap());
                 progress_bar.update(results.len()).unwrap();
                 Either::Right(results)
             } else {
-                let results: Vec<_> = self.aligner.align_reads(num_threads, data);
+                let results: Vec<_> = aligner.align_reads(num_threads, data);
                 results
                     .iter()
                     .for_each(|ali| align_qc.add(&header, ali, None).unwrap());
@@ -451,7 +450,8 @@ impl FastqAnnotator {
                             fq = slice_fastq_record(&fq, idx, fq.sequence().len());
                         }
                     }
-                    if fq.sequence().len() > 0 {
+                    // Only keep reads with length >= 8
+                    if fq.sequence().len() >= 8 {
                         if self.is_reverse {
                             read2 = Some(fq);
                         } else {
@@ -668,16 +668,15 @@ mod tests {
     #[test]
     fn test_seqspec_io() {
         let spec = Assay::from_path("tests/data/spec.yaml").unwrap();
-        let aligner = BurrowsWheelerAligner::new(
+        let mut aligner = BurrowsWheelerAligner::new(
             FMIndex::read("tests/data/hg38").unwrap(),
             AlignerOpts::default(),
             PairedEndStats::default(),
         );
-        let mut processor =
-            FastqProcessor::new(spec, Box::new(aligner)).with_modality(Modality::ATAC);
+        let mut processor = FastqProcessor::new(spec).with_modality(Modality::ATAC);
 
         processor
-            .gen_barcoded_alignments(8, 50000)
+            .gen_barcoded_alignments(&mut aligner, 8, 50000)
             .take(6)
             .for_each(|x| {
                 println!("{:?}", x);

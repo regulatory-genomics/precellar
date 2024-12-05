@@ -1,18 +1,22 @@
+mod aligner;
 mod pyseqspec;
 mod utils;
+
+use aligner::AlignerType;
 
 use anyhow::Result;
 use either::Either;
 use itertools::Itertools;
 use log::info;
-use noodles::{bam, bgzf, fastq, sam::{self, alignment::io::Write}};
+use noodles::{
+    bam, bgzf, fastq,
+    sam::{self, alignment::io::Write},
+};
 use pyo3::prelude::*;
-use std::{collections::HashMap, io::BufWriter, path::{Path, PathBuf}, str::FromStr};
+use std::{collections::HashMap, io::BufWriter, path::PathBuf, str::FromStr};
 
 use ::precellar::{
-    align::{
-        extend_fastq_record, Aligner, AlignerBuilder, Barcode, BurrowsWheelerAligner, DummyAligner, FastqProcessor, MultiMapR, NameCollatedRecords, StarAligner
-    },
+    align::{extend_fastq_record, Barcode, FastqProcessor, MultiMapR, NameCollatedRecords},
     fragment::FragmentGenerator,
     qc::{AlignQC, FragmentQC, Metrics},
 };
@@ -130,13 +134,13 @@ fn align(
         _ => assay.extract::<PyRef<Assay>>()?.0.clone(),
     };
 
-    let aligner = if let Some(name) = aligner {
-        get_aligner_by_name(name, genome_index)
+    let mut aligner = if let Some(name) = aligner {
+        AlignerType::from_name(name, genome_index)
     } else {
-        get_aligner_by_modality(modality, genome_index)
+        AlignerType::from_modality(modality, genome_index)
     };
     let header = aligner.header();
-    let mut processor = FastqProcessor::new(assay, aligner)
+    let mut processor = FastqProcessor::new(assay)
         .with_modality(modality)
         .with_barcode_correct_prob(0.9);
     let mut fragment_qc = FragmentQC::default();
@@ -154,8 +158,16 @@ fn align(
                 anyhow::Ok(writer)
             })
             .transpose()?;
-        let alignments = processor
-            .gen_barcoded_alignments(num_threads, chunk_size);
+
+        let alignments: Box<dyn Iterator<Item = _>> = match aligner {
+            AlignerType::STAR(ref mut aligner) => {
+                Box::new(processor.gen_barcoded_alignments(aligner, num_threads, chunk_size))
+            }
+            AlignerType::BWA(ref mut aligner) => {
+                Box::new(processor.gen_barcoded_alignments(aligner, num_threads, chunk_size))
+            }
+        };
+
         let alignments = write_alignments(py, &mut bam_writer, &header, alignments);
 
         let fragment_writer = output_fragment
@@ -198,41 +210,25 @@ fn align(
     Ok(report.into())
 }
 
-fn get_aligner_by_modality<P: AsRef<Path>>(modality: Modality, path: P) -> Box<dyn Aligner> {
-    match modality {
-        Modality::RNA => Box::new(StarAligner::from_path(path)),
-        Modality::ATAC => Box::new(BurrowsWheelerAligner::from_path(path)),
-        _ => unimplemented!(),
-    }
-}
-
-fn get_aligner_by_name<P: AsRef<Path>>(name: &str, path: P) -> Box<dyn Aligner> {
-    match name.to_lowercase().as_str() {
-        "star" => Box::new(StarAligner::from_path(path)),
-        "bwa" => Box::new(BurrowsWheelerAligner::from_path(path)),
-        _ => unimplemented!(),
-    }
-}
-
 fn write_alignments<'a>(
     py: Python<'a>,
     bam_writer: &'a mut Option<bam::io::Writer<impl std::io::Write>>,
     header: &'a sam::Header,
     alignments: impl Iterator<Item = Either<Vec<MultiMapR>, Vec<(MultiMapR, MultiMapR)>>> + 'a,
-) -> impl Iterator<Item = Either<Vec<MultiMapR>, Vec<(MultiMapR, MultiMapR)>>> + 'a
-{
+) -> impl Iterator<Item = Either<Vec<MultiMapR>, Vec<(MultiMapR, MultiMapR)>>> + 'a {
     alignments.map(move |data| {
         py.check_signals().unwrap();
         if let Some(writer) = bam_writer.as_mut() {
             match data.as_ref() {
-                Either::Left(chunk) => chunk
-                    .iter()
-                    .for_each(|a| a.iter().for_each(|x|
-                        writer.write_alignment_record(&header, x).unwrap()
-                    )),
+                Either::Left(chunk) => chunk.iter().for_each(|a| {
+                    a.iter()
+                        .for_each(|x| writer.write_alignment_record(&header, x).unwrap())
+                }),
                 Either::Right(chunk) => chunk.iter().for_each(|(a, b)| {
-                    a.iter().for_each(|x| writer.write_alignment_record(&header, x).unwrap());
-                    b.iter().for_each(|x| writer.write_alignment_record(&header, x).unwrap());
+                    a.iter()
+                        .for_each(|x| writer.write_alignment_record(&header, x).unwrap());
+                    b.iter()
+                        .for_each(|x| writer.write_alignment_record(&header, x).unwrap());
                 }),
             };
         }
@@ -346,8 +342,7 @@ fn make_fastq(
         _ => assay.extract::<PyRef<Assay>>()?.0.clone(),
     };
 
-    let aligner = DummyAligner;
-    let mut processor = FastqProcessor::new(spec, Box::new(aligner)).with_modality(modality);
+    let mut processor = FastqProcessor::new(spec).with_modality(modality);
     let fq_reader = processor.gen_barcoded_fastq(correct_barcode);
 
     info!(

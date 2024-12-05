@@ -76,6 +76,8 @@ impl<R: Record> TryFrom<Vec<R>> for MultiMap<R> {
 }
 
 pub trait Aligner {
+    fn from_path<P: AsRef<std::path::Path>>(path: P) -> Self;
+
     fn header(&self) -> sam::Header;
 
     fn align_reads(
@@ -91,27 +93,15 @@ pub trait Aligner {
     ) -> Vec<(MultiMapR, MultiMapR)>;
 }
 
-pub struct DummyAligner;
-
-impl Aligner for DummyAligner {
-    fn header(&self) -> sam::Header {
-        sam::Header::default()
-    }
-
-    fn align_reads(&mut self, _: u16, _: Vec<AnnotatedFastq>) -> Vec<MultiMapR> {
-        Vec::new()
-    }
-
-    fn align_read_pairs(
-        &mut self,
-        _: u16,
-        _: Vec<AnnotatedFastq>,
-    ) -> Vec<(MultiMapR, MultiMapR)> {
-        Vec::new()
-    }
-}
-
 impl Aligner for BurrowsWheelerAligner {
+    fn from_path<P: AsRef<std::path::Path>>(path: P) -> Self {
+        BurrowsWheelerAligner::new(
+            FMIndex::read(path).unwrap(),
+            AlignerOpts::default(),
+            PairedEndStats::default(),
+        )
+    }
+
     fn header(&self) -> sam::Header {
         self.get_sam_header()
     }
@@ -185,6 +175,11 @@ impl Aligner for BurrowsWheelerAligner {
 }
 
 impl Aligner for StarAligner {
+    fn from_path<P: AsRef<std::path::Path>>(path: P) -> Self {
+        let opts = StarOpts::new(path);
+        StarAligner::new(opts).unwrap()
+    }
+
     fn header(&self) -> sam::Header {
         self.get_header().clone()
     }
@@ -292,25 +287,4 @@ fn add_umi(
         Tag::UMI_QUALITY_SCORES,
         Value::String(qual.into()),
     );
-}
-
-pub trait AlignerBuilder: Aligner {
-    fn from_path<P: AsRef<std::path::Path>>(path: P) -> Self;
-}
-
-impl AlignerBuilder for BurrowsWheelerAligner {
-    fn from_path<P: AsRef<std::path::Path>>(path: P) -> Self {
-        BurrowsWheelerAligner::new(
-            FMIndex::read(path).unwrap(),
-            AlignerOpts::default(),
-            PairedEndStats::default(),
-        )
-    }
-}
-
-impl AlignerBuilder for StarAligner {
-    fn from_path<P: AsRef<std::path::Path>>(path: P) -> Self {
-        let opts = StarOpts::new(path);
-        StarAligner::new(opts).unwrap()
-    }
 }
