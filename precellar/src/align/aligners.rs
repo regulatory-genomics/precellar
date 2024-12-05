@@ -84,13 +84,7 @@ pub trait Aligner {
         &mut self,
         num_threads: u16,
         records: Vec<AnnotatedFastq>,
-    ) -> Vec<MultiMapR>;
-
-    fn align_read_pairs(
-        &mut self,
-        num_threads: u16,
-        records: Vec<AnnotatedFastq>,
-    ) -> Vec<(MultiMapR, MultiMapR)>;
+    ) -> Vec<(MultiMapR, Option<MultiMapR>)>;
 }
 
 impl Aligner for BurrowsWheelerAligner {
@@ -110,67 +104,63 @@ impl Aligner for BurrowsWheelerAligner {
         &mut self,
         num_threads: u16,
         records: Vec<AnnotatedFastq>,
-    ) -> Vec<MultiMapR> {
-        let (info, mut reads): (Vec<_>, Vec<_>) = records
-            .into_iter()
-            .map(|rec| ((rec.barcode.unwrap(), rec.umi), rec.read1.unwrap()))
-            .unzip();
+    ) -> Vec<(MultiMapR, Option<MultiMapR>)> {
+        if records[0].read2.is_some() {
+            let (info, mut reads): (Vec<_>, Vec<_>) = records
+                .into_iter()
+                .map(|rec| {
+                    (
+                        (rec.barcode.unwrap(), rec.umi),
+                        (rec.read1.unwrap(), rec.read2.unwrap()),
+                    )
+                })
+                .unzip();
+            self.align_read_pairs(num_threads, &mut reads)
+                .enumerate()
+                .map(|(i, (mut ali1, mut ali2))| {
+                    let (bc, umi) = info.get(i).unwrap();
+                    add_cell_barcode(
+                        &mut ali1,
+                        bc.raw.sequence(),
+                        bc.raw.quality_scores(),
+                        bc.corrected.as_deref(),
+                    );
+                    add_cell_barcode(
+                        &mut ali2,
+                        bc.raw.sequence(),
+                        bc.raw.quality_scores(),
+                        bc.corrected.as_deref(),
+                    );
+                    if let Some(umi) = umi {
+                        add_umi(&mut ali1, umi.sequence(), umi.quality_scores());
+                        add_umi(&mut ali2, umi.sequence(), umi.quality_scores());
+                    }
+                    (ali1.into(), Some(ali2.into()))
+                })
+                .collect()
+        } else {
+            let (info, mut reads): (Vec<_>, Vec<_>) = records
+                .into_iter()
+                .map(|rec| ((rec.barcode.unwrap(), rec.umi), rec.read1.unwrap()))
+                .unzip();
 
-        self.align_reads(num_threads, reads.as_mut_slice())
-            .enumerate()
-            .map(|(i, mut alignment)| {
-                let (bc, umi) = info.get(i).unwrap();
-                add_cell_barcode(
-                    &mut alignment,
-                    bc.raw.sequence(),
-                    bc.raw.quality_scores(),
-                    bc.corrected.as_deref(),
-                );
-                if let Some(umi) = umi {
-                    add_umi(&mut alignment, umi.sequence(), umi.quality_scores());
-                }
-                alignment.into()
-            })
-            .collect()
-    }
-
-    fn align_read_pairs(
-        &mut self,
-        num_threads: u16,
-        records: Vec<AnnotatedFastq>,
-    ) -> Vec<(MultiMapR, MultiMapR)> {
-        let (info, mut reads): (Vec<_>, Vec<_>) = records
-            .into_iter()
-            .map(|rec| {
-                (
-                    (rec.barcode.unwrap(), rec.umi),
-                    (rec.read1.unwrap(), rec.read2.unwrap()),
-                )
-            })
-            .unzip();
-        self.align_read_pairs(num_threads, &mut reads)
-            .enumerate()
-            .map(|(i, (mut ali1, mut ali2))| {
-                let (bc, umi) = info.get(i).unwrap();
-                add_cell_barcode(
-                    &mut ali1,
-                    bc.raw.sequence(),
-                    bc.raw.quality_scores(),
-                    bc.corrected.as_deref(),
-                );
-                add_cell_barcode(
-                    &mut ali2,
-                    bc.raw.sequence(),
-                    bc.raw.quality_scores(),
-                    bc.corrected.as_deref(),
-                );
-                if let Some(umi) = umi {
-                    add_umi(&mut ali1, umi.sequence(), umi.quality_scores());
-                    add_umi(&mut ali2, umi.sequence(), umi.quality_scores());
-                }
-                (ali1.into(), ali2.into())
-            })
-            .collect()
+            self.align_reads(num_threads, reads.as_mut_slice())
+                .enumerate()
+                .map(|(i, mut alignment)| {
+                    let (bc, umi) = info.get(i).unwrap();
+                    add_cell_barcode(
+                        &mut alignment,
+                        bc.raw.sequence(),
+                        bc.raw.quality_scores(),
+                        bc.corrected.as_deref(),
+                    );
+                    if let Some(umi) = umi {
+                        add_umi(&mut alignment, umi.sequence(), umi.quality_scores());
+                    }
+                    (alignment.into(), None)
+                })
+                .collect()
+        }
     }
 }
 
@@ -188,58 +178,55 @@ impl Aligner for StarAligner {
         &mut self,
         num_threads: u16,
         records: Vec<AnnotatedFastq>,
-    ) -> Vec<MultiMapR> {
+    ) -> Vec<(MultiMapR, Option<MultiMapR>)> {
         let chunk_size = get_chunk_size(records.len(), num_threads as usize);
 
         records.par_chunks(chunk_size).flat_map_iter(|chunk| {
             let mut aligner = self.clone();
             chunk.iter().map(move |rec| {
                 let bc = rec.barcode.as_ref().unwrap();
-                let mut ali = aligner.align_read(&rec.read1.as_ref().unwrap()).unwrap();
-                ali.iter_mut().for_each(|alignment| {
-                    add_cell_barcode(
-                        alignment,
-                        bc.raw.sequence(),
-                        bc.raw.quality_scores(),
-                        bc.corrected.as_deref(),
-                    );
-                    if let Some(umi) = &rec.umi {
-                        add_umi(alignment, umi.sequence(), umi.quality_scores());
-                    };
-                });
-                ali.try_into().unwrap()
+                let read1;
+                let mut read2 = None;
+                if rec.read1.is_some() {
+                    read1 = rec.read1.as_ref().unwrap();
+                    read2 = rec.read2.as_ref();
+                } else {
+                    read1 = rec.read2.as_ref().unwrap();
+                }
+
+                if read2.is_some() {
+                    let (mut ali1, mut ali2) = aligner.align_read_pair(
+                        read1,
+                        &read2.unwrap()
+                    ).unwrap();
+                    ali1.iter_mut().chain(ali2.iter_mut()).for_each(|alignment| {
+                        add_cell_barcode(
+                            alignment,
+                            bc.raw.sequence(),
+                            bc.raw.quality_scores(),
+                            bc.corrected.as_deref(),
+                        );
+                        if let Some(umi) = &rec.umi {
+                            add_umi(alignment, umi.sequence(), umi.quality_scores());
+                        };
+                    });
+                    (ali1.try_into().unwrap(), Some(ali2.try_into().unwrap()))
+                } else {
+                    let mut ali = aligner.align_read(read1).unwrap();
+                    ali.iter_mut().for_each(|alignment| {
+                        add_cell_barcode(
+                            alignment,
+                            bc.raw.sequence(),
+                            bc.raw.quality_scores(),
+                            bc.corrected.as_deref(),
+                        );
+                        if let Some(umi) = &rec.umi {
+                            add_umi(alignment, umi.sequence(), umi.quality_scores());
+                        };
+                    });
+                    (ali.try_into().unwrap(), None)
+                }
             })
-        }).collect()
-    }
-
-    fn align_read_pairs(
-        &mut self,
-        num_threads: u16,
-        records: Vec<AnnotatedFastq>,
-    ) -> Vec<(MultiMapR, MultiMapR)> {
-        let chunk_size = get_chunk_size(records.len(), num_threads as usize);
-
-        records.par_chunks(chunk_size).flat_map_iter(|chunk| {
-            let mut aligner = self.clone();
-            chunk.iter().map(move |rec| {
-                let bc = rec.barcode.as_ref().unwrap();
-                let (mut ali1, mut ali2) = aligner.align_read_pair(
-                    &rec.read1.as_ref().unwrap(),
-                    &rec.read2.as_ref().unwrap()
-                ).unwrap();
-                ali1.iter_mut().chain(ali2.iter_mut()).for_each(|alignment| {
-                    add_cell_barcode(
-                        alignment,
-                        bc.raw.sequence(),
-                        bc.raw.quality_scores(),
-                        bc.corrected.as_deref(),
-                    );
-                    if let Some(umi) = &rec.umi {
-                        add_umi(alignment, umi.sequence(), umi.quality_scores());
-                    };
-                });
-                (ali1.try_into().unwrap(), ali2.try_into().unwrap())
-            }).collect::<Vec<_>>()
         }).collect()
     }
 }

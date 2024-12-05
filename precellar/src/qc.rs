@@ -198,7 +198,7 @@ impl AlignQC {
 
         let fraction_unmapped = 1.0 - stat_barcoded.total_mapped() as f64 / stat_barcoded.total_reads() as f64;
         let valid_barcode = stat_barcoded.total_reads() as f64 / stat_all.total_reads() as f64;
-        let fraction_confidently_mapped = 1.0 - stat_barcoded.total_high_quality() as f64 / stat_barcoded.total_reads() as f64;
+        let fraction_confidently_mapped = stat_barcoded.total_high_quality() as f64 / stat_barcoded.total_reads() as f64;
         let fraction_nonnuclear = self.stat_mito.total_reads() as f64 / stat_barcoded.total_reads() as f64;
 
         metric.insert("sequenced_reads".to_string(), stat_all.total_reads() as f64);

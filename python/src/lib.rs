@@ -5,7 +5,6 @@ mod utils;
 use aligner::AlignerType;
 
 use anyhow::Result;
-use either::Either;
 use itertools::Itertools;
 use log::info;
 use noodles::{
@@ -214,28 +213,25 @@ fn write_alignments<'a>(
     py: Python<'a>,
     bam_writer: &'a mut Option<bam::io::Writer<impl std::io::Write>>,
     header: &'a sam::Header,
-    alignments: impl Iterator<Item = Either<Vec<MultiMapR>, Vec<(MultiMapR, MultiMapR)>>> + 'a,
-) -> impl Iterator<Item = Either<Vec<MultiMapR>, Vec<(MultiMapR, MultiMapR)>>> + 'a {
+    alignments: impl Iterator<Item = Vec<(MultiMapR, Option<MultiMapR>)>> + 'a,
+) -> impl Iterator<Item = Vec<(MultiMapR, Option<MultiMapR>)>> + 'a {
     alignments.map(move |data| {
         py.check_signals().unwrap();
         if let Some(writer) = bam_writer.as_mut() {
-            match data.as_ref() {
-                Either::Left(chunk) => chunk.iter().for_each(|a| {
-                    a.iter()
+            data.iter().for_each(|(a, b)| {
+                a.iter()
+                    .for_each(|x| writer.write_alignment_record(&header, x).unwrap());
+                b.as_ref().map(|x| {
+                    x.iter()
                         .for_each(|x| writer.write_alignment_record(&header, x).unwrap())
-                }),
-                Either::Right(chunk) => chunk.iter().for_each(|(a, b)| {
-                    a.iter()
-                        .for_each(|x| writer.write_alignment_record(&header, x).unwrap());
-                    b.iter()
-                        .for_each(|x| writer.write_alignment_record(&header, x).unwrap());
-                }),
-            };
+                });
+            });
         }
         data
     })
 }
 
+/*
 #[pyfunction]
 #[pyo3(
     signature = (
@@ -320,6 +316,7 @@ fn make_fragment(
     fragment_qc.report(&mut report);
     Ok(report.into())
 }
+    */
 
 /// Generate consolidated fastq files from the sequencing specification.
 /// The barcodes and UMIs are concatenated to the read 1 sequence.
@@ -406,7 +403,7 @@ fn precellar(m: &Bound<'_, PyModule>) -> PyResult<()> {
 
     m.add_function(wrap_pyfunction!(make_genome_index, m)?)?;
     m.add_function(wrap_pyfunction!(align, m)?)?;
-    m.add_function(wrap_pyfunction!(make_fragment, m)?)?;
+    //m.add_function(wrap_pyfunction!(make_fragment, m)?)?;
     m.add_function(wrap_pyfunction!(make_fastq, m)?)?;
 
     utils::register_submodule(m)?;

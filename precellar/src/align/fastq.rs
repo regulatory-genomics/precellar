@@ -5,7 +5,6 @@ use crate::barcode::{BarcodeCorrector, OligoFrequncy, Whitelist};
 use crate::qc::{AlignQC, Metrics};
 use anyhow::{bail, Result};
 use bstr::BString;
-use either::Either;
 use indexmap::IndexMap;
 use kdam::{tqdm, BarExt};
 use log::info;
@@ -90,9 +89,8 @@ impl FastqProcessor {
         aligner: &'a mut A,
         num_threads: u16,
         chunk_size: usize,
-    ) -> impl Iterator<Item = Either<Vec<MultiMapR>, Vec<(MultiMapR, MultiMapR)>>> + 'a {
+    ) -> impl Iterator<Item = Vec<(MultiMapR, Option<MultiMapR>)>> + 'a {
         let fq_reader = self.gen_barcoded_fastq(true);
-        let is_paired = fq_reader.is_paired_end();
         let total_reads = fq_reader.total_reads.unwrap_or(0);
 
         let modality = self.modality();
@@ -110,21 +108,12 @@ impl FastqProcessor {
         let fq_reader = VectorChunk::new(fq_reader, chunk_size);
         fq_reader.map(move |data| {
             let align_qc = self.align_qc.get_mut(&modality).unwrap();
-            if is_paired {
-                let results: Vec<_> = aligner.align_read_pairs(num_threads, data);
-                results
-                    .iter()
-                    .for_each(|(ali1, ali2)| align_qc.add(&header, ali1, Some(ali2)).unwrap());
-                progress_bar.update(results.len()).unwrap();
-                Either::Right(results)
-            } else {
-                let results: Vec<_> = aligner.align_reads(num_threads, data);
-                results
-                    .iter()
-                    .for_each(|ali| align_qc.add(&header, ali, None).unwrap());
-                progress_bar.update(results.len()).unwrap();
-                Either::Left(results)
-            }
+            let results: Vec<_> = aligner.align_reads(num_threads, data);
+            results
+                .iter()
+                .for_each(|(ali1, ali2)| align_qc.add(&header, ali1, ali2.as_ref()).unwrap());
+            progress_bar.update(results.len()).unwrap();
+            results
         })
     }
 

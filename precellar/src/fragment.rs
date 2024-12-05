@@ -6,7 +6,6 @@ use bed_utils::{
     extsort::ExternalSorterBuilder,
 };
 use de_dups::{remove_duplicates, AlignmentInfo};
-use either::Either;
 use itertools::Itertools;
 use noodles::sam::{
     alignment::{record::Flags, Record},
@@ -175,25 +174,25 @@ impl FragmentGenerator {
         impl FnMut(&AlignmentInfo) -> String + 'a,
     >
     where
-        I: Iterator<Item = Either<Vec<MultiMap<R>>, Vec<(MultiMap<R>, MultiMap<R>)>>> + 'a,
+        I: Iterator<Item = Vec<(MultiMap<R>, Option<MultiMap<R>>)>> + 'a,
         R: Record + 'a,
     {
-        let data = records.flat_map(|x| match x {
-            Either::Left(chunk) => Box::new(chunk.into_iter().flat_map(|r| {
-                if filter_read(&r.primary, self.mapq) {
-                    AlignmentInfo::from_read(&r.primary, header).unwrap()
-                } else {
-                    None
-                }
-            })) as Box<dyn Iterator<Item = AlignmentInfo>>,
-            Either::Right(chunk) => Box::new(chunk.into_iter().flat_map(|(r1, r2)| {
+        let data = records.flat_map(|chunk|
+            chunk.into_iter().flat_map(|(r1, r2)| if r2.is_some() {
+                let r2 = r2.unwrap();
                 if filter_read_pair((&r1.primary, &r2.primary), self.mapq) {
                     AlignmentInfo::from_read_pair((&r1.primary, &r2.primary), header).unwrap()
                 } else {
                     None
                 }
-            })) as Box<dyn Iterator<Item = AlignmentInfo>>,
-        });
+            } else {
+                if filter_read(&r1.primary, self.mapq) {
+                    AlignmentInfo::from_read(&r1.primary, header).unwrap()
+                } else {
+                    None
+                }
+            }
+        ));
 
         let sorted = sort_by_barcode(data, self.temp_dir.clone(), self.chunk_size);
         UniqueFragments {
