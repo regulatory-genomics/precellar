@@ -59,3 +59,81 @@ pub struct BarcodeDupMarker<'a> {
     /// with **less than** r reads and not include them in UMI counts.
     targeted_umi_min_read_count: Option<u64>,
 }
+
+impl<'a> BarcodeDupMarker<'a> {
+    pub fn new(
+        mut umigene_counts: HashMap<(&'a [u8], Gene), u64>,
+        mut umigene_min_key: HashMap<(&'a [u8], Gene), UmiSelectKey>,
+        filter_umis: bool,
+        targeted_umi_min_read_count: Option<u64>,
+    ) -> Self {
+        // Determine which UMIs need to be corrected
+        let umi_corrections: HashMap<(UmiSeq, Gene), UmiSeq> = match umi_correction {
+            UmiCorrection::Enable => correct_umis(&umigene_counts),
+            UmiCorrection::Disable => HashMap::new(),
+        };
+
+        let umi_correction_counts = umi_corrections
+            .iter()
+            .map(|(raw_key, corrected_umi)| {
+                (
+                    raw_key,
+                    (*corrected_umi, raw_key.1),
+                    umigene_counts[raw_key],
+                )
+            })
+            .collect::<Vec<_>>();
+
+        // Before determining low-support UMI-genes, count one read of each corrected UMI
+        // to match the behaviour of Cell Ranger 3.
+        for (raw_key, corrected_key, _raw_count) in &umi_correction_counts {
+            // One read has been counted before determining low-support UMI-genes.
+            *umigene_counts.get_mut(raw_key).unwrap() -= 1;
+            *umigene_counts.get_mut(corrected_key).unwrap() += 1;
+        }
+
+        // Determine low-support UMI-genes.
+        let low_support_umigenes = if filter_umis {
+            determine_low_support_umigenes(&umigene_counts)
+        } else {
+            HashSet::new()
+        };
+
+        // After determining low-support UMI-genes, count the remaining reads of each corrected UMI.
+        for (raw_key, corrected_key, raw_count) in &umi_correction_counts {
+            // One read has already been counted before determining low-support UMI-genes.
+            *umigene_counts.get_mut(raw_key).unwrap() -= raw_count - 1;
+            *umigene_counts.get_mut(corrected_key).unwrap() += raw_count - 1;
+        }
+
+        // Which is the lowest raw UMI lexicographicaly that would be corrected to (UmiSeq, Gene)
+        // and would potentially be a "UMI count".
+        let mut min_raw_umis: HashMap<(UmiSeq, Gene), UmiSeq> = HashMap::new();
+        for ((raw_seq, gene), corr_seq) in &umi_corrections {
+            if raw_seq < corr_seq || umi_corrections.contains_key(&(*corr_seq, *gene)) {
+                let min_umi = match min_raw_umis.remove(&(*corr_seq, *gene)) {
+                    Some(prev_min) => prev_min.min(*raw_seq),
+                    None => *raw_seq,
+                };
+                min_raw_umis.insert((*corr_seq, *gene), min_umi);
+            }
+        }
+        // The min UmiSelectKey after correction
+        let mut min_umi_key_corrections = HashMap::new();
+        for ((corr_seq, gene), raw_seq) in min_raw_umis {
+            min_umi_key_corrections
+                .insert((corr_seq, gene), umigene_min_key[&(raw_seq, gene)].clone());
+        }
+        for (key, umi_key) in min_umi_key_corrections {
+            umigene_min_key.insert(key, umi_key.clone());
+        }
+
+        Self {
+            umigene_counts,
+            umi_corrections,
+            low_support_umigenes,
+            umigene_min_key,
+            targeted_umi_min_read_count,
+        }
+    }
+}

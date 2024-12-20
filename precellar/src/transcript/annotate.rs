@@ -1,3 +1,6 @@
+/// This module provides utilities for annotating bam records by mapping them to a transcriptome.
+/// It supports both single-end and paired-end alignments and uses transcript annotations for gene-level
+/// and exon-level classification.
 use crate::transcript::{Gene, SpliceSegments, Transcript};
 
 use anyhow::{ensure, Result};
@@ -11,10 +14,24 @@ use noodles::sam::alignment::record_buf::RecordBuf;
 use std::cmp;
 use std::collections::{BTreeMap, HashSet};
 
-/// BAM record with annotation
+#[derive(Eq, PartialEq, Debug)]
+pub struct Annotation {
+    pub aln_sense: Vec<TranscriptAlignment>,
+    pub aln_antisense: Vec<TranscriptAlignment>,
+    pub genes: Vec<Gene>,
+    pub region: AnnotationRegion,
+    pub rescued: bool,
+    pub chrom: String,
+}
+
+/// Represents an annotated BAM record.
+#[derive(Debug)]
 pub enum AnnotatedAlignment {
+    /// Represents an unmapped read.
     Unmapped(RecordBuf, Option<RecordBuf>),
+    /// Represents a single-end mapped read with annotation.
     SeMapped(RecordBuf, Annotation),
+    /// Represents a paired-end mapped read with annotations for each end.
     PeMapped(
         RecordBuf,
         Annotation,
@@ -25,6 +42,7 @@ pub enum AnnotatedAlignment {
 }
 
 impl AnnotatedAlignment {
+    /// Returns references to records.
     pub fn rec(&self) -> (&RecordBuf, Option<&RecordBuf>) {
         match self {
             AnnotatedAlignment::Unmapped(ref rec, ref rec2) => (rec, rec2.as_ref()),
@@ -33,6 +51,7 @@ impl AnnotatedAlignment {
         }
     }
 
+    /// Returns mutable references to records.
     pub fn mut_rec(&mut self) -> (&mut RecordBuf, Option<&mut RecordBuf>) {
         match self {
             AnnotatedAlignment::Unmapped(ref mut rec1, ref mut rec2) => (rec1, rec2.as_mut()),
@@ -41,6 +60,7 @@ impl AnnotatedAlignment {
         }
     }
 
+    /// Returns references to the annotations for single-end or paired-end reads.
     pub fn annotation(&self) -> (Option<&Annotation>, Option<&Annotation>) {
         match self {
             AnnotatedAlignment::SeMapped(_, ref anno) => (Some(anno), None),
@@ -51,6 +71,7 @@ impl AnnotatedAlignment {
         }
     }
 
+    /// Marks the alignment as rescued.
     fn set_rescued(&mut self) {
         match self {
             AnnotatedAlignment::SeMapped(_, ref mut anno) => anno.rescued = true,
@@ -63,19 +84,30 @@ impl AnnotatedAlignment {
     }
 }
 
+/// Manages the annotation of alignments using transcriptome data.
 #[derive(Debug, Clone)]
 pub struct AlignmentAnnotator {
+    /// Map of genomic intervals to transcripts.
     transcripts: GIntervalMap<Transcript>,
+    /// Indicates the strandedness of the chemistry used in the experiment.
     chemistry_strandedness: Strand,
+    /// Number of bases to trim from intergenic alignments.
     intergenic_trim_bases: u64,
+    /// Number of bases to trim from intronic alignments.
     intronic_trim_bases: u64,
+    /// Number of bases to trim from junction alignments.
     junction_trim_bases: u64,
+    /// Minimum overlap fraction required for a region to be considered mapped.
     region_min_overlap: f64,
 }
 
 impl AlignmentAnnotator {
+    /// Creates a new `AlignmentAnnotator` with the provided transcripts.
     pub fn new(transcripts: impl IntoIterator<Item = Transcript>) -> Self {
-        let transcripts = transcripts.into_iter().map(|x| (GenomicRange::new(&x.chrom, x.start, x.end), x)).collect();
+        let transcripts = transcripts
+            .into_iter()
+            .map(|x| (GenomicRange::new(&x.chrom, x.start, x.end), x))
+            .collect();
         Self {
             transcripts,
             chemistry_strandedness: Strand::Forward,
@@ -91,6 +123,10 @@ impl AlignmentAnnotator {
     /// them to primary. A read may align to multiple transcripts and genes, but
     /// it is only considered confidently mapped to the transcriptome if it is
     /// mapped to a single gene.
+    ///
+    /// # Arguments
+    /// * `header` - Reference to the SAM header.
+    /// * `rec` - Vector of single-end alignment records.
     pub fn annotate_alignments_se(
         &self,
         header: &sam::Header,
@@ -104,6 +140,12 @@ impl AlignmentAnnotator {
         results
     }
 
+    /// Annotates a batch of paired-end alignments.
+    ///
+    /// # Arguments
+    /// * `header` - Reference to the SAM header.
+    /// * `rec1` - Vector of first-end alignment records.
+    /// * `rec2` - Vector of second-end alignment records.
     pub fn annotate_alignments_pe(
         &self,
         header: &sam::Header,
@@ -125,7 +167,7 @@ impl AlignmentAnnotator {
         result
     }
 
-    /// Create annotation for a single alignment
+    /// Annotates a single-end alignment record.
     fn annotate_alignment_se(&self, header: &sam::Header, rec: RecordBuf) -> AnnotatedAlignment {
         if rec.flags().is_unmapped() {
             AnnotatedAlignment::Unmapped(rec, None)
@@ -176,11 +218,11 @@ impl AlignmentAnnotator {
         let mut seen_genes = HashSet::new();
         let mut transcripts = BTreeMap::new();
         let mut antisense = BTreeMap::new();
-        let mut annotation_data = Annotation::new(chrom);
+        let annotation_region;
         if alignments.is_empty() {
-            annotation_data.region = AnnotationRegion::Intergenic;
+            annotation_region = AnnotationRegion::Intergenic;
         } else if alignments.iter().any(|x| x.is_exonic()) {
-            annotation_data.region = AnnotationRegion::Exonic;
+            annotation_region = AnnotationRegion::Exonic;
             // Check if there are transcriptome compatible alignments
             alignments.into_iter().rev().for_each(|aln| {
                 if let Some(tx_align) = &aln.exon_align {
@@ -198,7 +240,7 @@ impl AlignmentAnnotator {
                 }
             });
         } else {
-            annotation_data.region = AnnotationRegion::Intronic;
+            annotation_region = AnnotationRegion::Intronic;
             alignments
                 .into_iter()
                 .rev()
@@ -213,15 +255,21 @@ impl AlignmentAnnotator {
                 });
         }
 
-        annotation_data.aln_sense = transcripts.into_values().collect::<Vec<_>>();
-        annotation_data.aln_antisense = antisense.into_values().collect::<Vec<_>>();
-        annotation_data.genes = seen_genes.into_iter().collect::<Vec<Gene>>();
+        let mut annotation = Annotation {
+            aln_sense: transcripts.into_values().collect::<Vec<_>>(),
+            aln_antisense: antisense.into_values().collect::<Vec<_>>(),
+            genes: seen_genes.into_iter().collect::<Vec<Gene>>(),
+            region: annotation_region,
+            rescued: false,
+            chrom,
+        };
         // Sorting this makes life easier later.
-        annotation_data.genes.sort_unstable();
+        annotation.genes.sort_unstable();
 
-        Ok(annotation_data)
+        Ok(annotation)
     }
 
+    /// Aligns a read to a transcript and determines the region type (exonic, intronic, or intergenic).
     fn align_to_transcript(
         &self,
         read: &RecordBuf,
@@ -232,86 +280,73 @@ impl AlignmentAnnotator {
         let tx_end = transcript.end;
         let genomic_start = read.alignment_start().unwrap().get() as u64;
         let genomic_end = read.alignment_end().unwrap().get() as u64;
-
-        // compute region
         let splice_segments = SpliceSegments::from(read);
+
         let is_exonic = splice_segments.is_exonic(transcript, self.region_min_overlap);
-        let is_intronic =
-            !is_exonic && get_overlap(genomic_start, genomic_end, tx_start, tx_end) >= 1.0;
-        if !(is_exonic || is_intronic) {
-            // If neither exonic nor intronic => intergenic.
-            return None;
-        }
-        // compute strand
-        let tx_reverse_strand = transcript.strand == Strand::Reverse;
-        let flags = read.flags();
-        let mut read_reverse_strand = flags.is_reverse_complemented();
-        if flags.is_segmented() && flags.is_last_segment() {
-            read_reverse_strand = !read_reverse_strand;
-        };
-        let is_antisense = match self.chemistry_strandedness {
-            Strand::Forward => tx_reverse_strand != read_reverse_strand,
-            Strand::Reverse => tx_reverse_strand == read_reverse_strand,
-        };
+        if is_exonic || get_overlap(genomic_start, genomic_end, tx_start, tx_end) >= 1.0 {
+            // compute strand
+            let tx_reverse_strand = transcript.strand == Strand::Reverse;
+            let flags = read.flags();
+            let mut read_reverse_strand = flags.is_reverse_complemented();
+            if flags.is_segmented() && flags.is_last_segment() {
+                read_reverse_strand = !read_reverse_strand;
+            };
+            let is_antisense = match self.chemistry_strandedness {
+                Strand::Forward => tx_reverse_strand != read_reverse_strand,
+                Strand::Reverse => tx_reverse_strand == read_reverse_strand,
+            };
+            let tx_strand = if is_antisense {
+                Strand::Reverse
+            } else {
+                Strand::Forward
+            };
 
-        let tx_strand = if is_antisense {
-            Strand::Reverse
+            let gene = transcript.gene.clone();
+            let mut alignment = TranscriptAlignment {
+                gene: gene.clone(),
+                strand: tx_strand,
+                exon_align: None,
+            };
+
+            if is_exonic {
+                // compute offsets
+                let mut tx_offset = transcript.get_offset(genomic_start).unwrap().max(0) as u64;
+                let tx_length = transcript.len();
+
+                // align the read to the exons
+                if let Some((mut tx_cigar, tx_aligned_bases)) = splice_segments.align_junctions(
+                    transcript,
+                    self.junction_trim_bases,
+                    self.intergenic_trim_bases,
+                    self.intronic_trim_bases,
+                ) {
+                    // flip reverse strand
+                    if tx_reverse_strand {
+                        tx_offset = tx_length - (tx_offset + tx_aligned_bases);
+                        tx_cigar.as_mut().reverse();
+                    };
+                    alignment = TranscriptAlignment {
+                        gene,
+                        strand: tx_strand,
+                        exon_align: Some(TxAlignProperties {
+                            id: transcript.id.clone(),
+                            pos: tx_offset,
+                            cigar: tx_cigar,
+                            alen: tx_aligned_bases,
+                        }),
+                    };
+                }
+            }
+            Some(alignment)
         } else {
-            Strand::Forward
-        };
-
-        // Prior to aligning to the transcript we have a gene alignment
-        let gene = transcript.gene.clone();
-        let gene_aln = TranscriptAlignment {
-            gene: gene.clone(),
-            strand: tx_strand,
-            exon_align: None,
-        };
-        // if intronic return region and strand
-        if is_intronic {
-            return Some(gene_aln);
-        };
-
-        // must be exonic to continue
-        assert!(is_exonic);
-
-        // compute offsets
-        let mut tx_offset = transcript.get_offset(genomic_start).unwrap();
-        let tx_length = transcript.len();
-
-        // align the read to the exons
-        let Some((mut tx_cigar, tx_aligned_bases)) = splice_segments.align_junctions(
-            transcript,
-            self.junction_trim_bases,
-            self.intergenic_trim_bases,
-            self.intronic_trim_bases,
-        ) else {
-            return Some(gene_aln);
-        };
-
-        // flip reverse strand
-        if tx_reverse_strand {
-            tx_offset = tx_length - (tx_offset + tx_aligned_bases);
-            tx_cigar.as_mut().reverse();
-        };
-
-        let alignment = TranscriptAlignment {
-            gene,
-            strand: tx_strand,
-            exon_align: Some(TxAlignProperties {
-                id: transcript.id.clone(),
-                pos: tx_offset,
-                cigar: tx_cigar,
-                alen: tx_aligned_bases,
-            }),
-        };
-
-        Some(alignment)
+            None
+        }
     }
 }
 
 #[derive(Eq, PartialEq, Debug)]
 pub struct PairAnnotationData {
+    /// Genes associated with the pair of alignments.
     pub genes: Vec<Gene>,
 }
 
@@ -391,8 +426,7 @@ fn rescue_alignments_se(recs: &mut [AnnotatedAlignment]) -> bool {
     rescued
 }
 
-/// Use transcriptome alignments to promote a single genome alignment
-/// when none are confidently mapped to the genome.
+/// Attempts to rescue paired-end alignments using transcript annotations.
 /// Returns true if rescue took place.
 fn rescue_alignments_pe(pairs: &mut [AnnotatedAlignment]) -> bool {
     let mut rescued = false;
@@ -424,7 +458,8 @@ fn rescue_alignments_pe(pairs: &mut [AnnotatedAlignment]) -> bool {
                     // Track number of distinct genes we're aligned to
                     seen_genes.extend(genes);
                 }
-                _ => unimplemented!("Only paired-end alignments can be rescued"),
+                AnnotatedAlignment::Unmapped(_, _) => {}
+                _ => unimplemented!(),
             }
         }
 
@@ -436,12 +471,13 @@ fn rescue_alignments_pe(pairs: &mut [AnnotatedAlignment]) -> bool {
         }
 
         // Promote a single alignment
-        let promote_index = promote_index.expect("No primary alignment found!");
-        let pair = &mut pairs[promote_index];
-        pair.set_rescued();
-        let (aln1, aln2) = pair.mut_rec();
-        aln1.flags_mut().set(Flags::SECONDARY, false);
-        aln2.unwrap().flags_mut().set(Flags::SECONDARY, false);
+        if let Some(promote_index) = promote_index {
+            let pair = &mut pairs[promote_index];
+            pair.set_rescued();
+            let (aln1, aln2) = pair.mut_rec();
+            aln1.flags_mut().set(Flags::SECONDARY, false);
+            aln2.unwrap().flags_mut().set(Flags::SECONDARY, false);
+        }
     }
 
     rescued
@@ -452,29 +488,6 @@ pub enum AnnotationRegion {
     Exonic,
     Intronic,
     Intergenic,
-}
-
-#[derive(Eq, PartialEq, Debug)]
-pub struct Annotation {
-    pub aln_sense: Vec<TranscriptAlignment>,
-    pub aln_antisense: Vec<TranscriptAlignment>,
-    pub genes: Vec<Gene>,
-    pub region: AnnotationRegion,
-    pub rescued: bool,
-    pub chrom: String,
-}
-
-impl Annotation {
-    fn new(genome: String) -> Annotation {
-        Annotation {
-            aln_sense: Vec::new(),
-            aln_antisense: Vec::new(),
-            genes: Vec::new(),
-            region: AnnotationRegion::Intergenic,
-            rescued: false,
-            chrom: genome,
-        }
-    }
 }
 
 #[derive(Eq, PartialEq, Debug)]
@@ -505,7 +518,8 @@ pub struct TxAlignProperties {
 
 /// Fraction of read interval covered by ref interval
 fn get_overlap(read_start: u64, read_end: u64, ref_start: u64, ref_end: u64) -> f64 {
-    let mut overlap_bases = cmp::min(ref_end, read_end) as f64 - cmp::max(ref_start, read_start) as f64;
+    let mut overlap_bases =
+        cmp::min(ref_end, read_end) as f64 - cmp::max(ref_start, read_start) as f64;
     if overlap_bases < 0.0 {
         overlap_bases = 0.0;
     }

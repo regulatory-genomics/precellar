@@ -18,6 +18,7 @@ use ::precellar::{
     align::{extend_fastq_record, Barcode, FastqProcessor, MultiMapR, NameCollatedRecords},
     fragment::FragmentGenerator,
     qc::{AlignQC, FragmentQC, Metrics},
+    transcript::{self, Quantifier},
 };
 use pyseqspec::Assay;
 use seqspec::{
@@ -92,14 +93,14 @@ fn make_genome_index(fasta: PathBuf, genome_prefix: PathBuf) -> Result<()> {
 #[pyo3(
     signature = (
         assay, genome_index, *,
-        modality, output_bam=None, output_fragment=None,
+        modality, output_bam=None, output_quantification=None, output_fragment=None,
         mito_dna=vec!["chrM".to_owned(), "M".to_owned()],
         shift_left=4, shift_right=-5, aligner=None,
         compression=None, compression_level=None,
         temp_dir=None, num_threads=8, chunk_size=10000000,
     ),
     text_signature = "(assay, genome_index, *,
-        modality, output_bam=None, output_fragment=None,
+        modality, output_bam=None, output_quantification=None, output_fragment=None,
         mito_dna=['chrM', 'M'],
         shift_left=4, shift_right=-5, aligner=None,
         compression=None, compression_level=None,
@@ -111,6 +112,7 @@ fn align(
     genome_index: PathBuf,
     modality: &str,
     output_bam: Option<PathBuf>,
+    output_quantification: Option<PathBuf>,
     output_fragment: Option<PathBuf>,
     mito_dna: Vec<String>,
     shift_left: i64,
@@ -123,8 +125,12 @@ fn align(
     chunk_size: usize,
 ) -> Result<HashMap<String, f64>> {
     assert!(
-        output_bam.is_some() || output_fragment.is_some(),
-        "one of the following parameters must be provided: output_bam, output_fragment"
+        output_bam.is_some() || output_fragment.is_some() || output_quantification.is_some(),
+        "one of the following parameters must be provided: output_bam, output_fragment, output_quantification"
+    );
+    assert!(
+        output_fragment.is_none() || output_quantification.is_none(),
+        "output_fragment and output_quantification cannot be used together"
     );
 
     let modality = Modality::from_str(modality).unwrap();
@@ -134,9 +140,9 @@ fn align(
     };
 
     let mut aligner = if let Some(name) = aligner {
-        AlignerType::from_name(name, genome_index)
+        AlignerType::from_name(name, &genome_index)
     } else {
-        AlignerType::from_modality(modality, genome_index)
+        AlignerType::from_modality(modality, &genome_index)
     };
     let header = aligner.header();
     let mut processor = FastqProcessor::new(assay)
@@ -147,8 +153,23 @@ fn align(
         processor.add_mito_dna(&x);
         fragment_qc.add_mito_dna(x);
     });
+    let mut transcript_annotator = None;
 
     {
+        let alignments: Box<dyn Iterator<Item = _>> = match aligner {
+            AlignerType::STAR(ref mut aligner) => {
+                let transcriptome = ::precellar::align::read_transcriptome_star(&genome_index)?;
+                transcript_annotator = Some(::precellar::transcript::AlignmentAnnotator::new(
+                    transcriptome,
+                ));
+                Box::new(processor.gen_barcoded_alignments(aligner, num_threads, chunk_size))
+            }
+            AlignerType::BWA(ref mut aligner) => {
+                Box::new(processor.gen_barcoded_alignments(aligner, num_threads, chunk_size))
+            }
+        };
+
+        // Write alignments
         let mut bam_writer = output_bam
             .map(|output| {
                 let mut writer =
@@ -157,16 +178,6 @@ fn align(
                 anyhow::Ok(writer)
             })
             .transpose()?;
-
-        let alignments: Box<dyn Iterator<Item = _>> = match aligner {
-            AlignerType::STAR(ref mut aligner) => {
-                Box::new(processor.gen_barcoded_alignments(aligner, num_threads, chunk_size))
-            }
-            AlignerType::BWA(ref mut aligner) => {
-                Box::new(processor.gen_barcoded_alignments(aligner, num_threads, chunk_size))
-            }
-        };
-
         let alignments = write_alignments(py, &mut bam_writer, &header, alignments);
 
         let fragment_writer = output_fragment
@@ -178,7 +189,13 @@ fn align(
                 create_file(output, compression, compression_level, num_threads as u32)
             })
             .transpose()?;
-        if let Some(mut writer) = fragment_writer {
+
+        if let Some(writer) = output_quantification {
+            // Write gene quantification
+            let quantifier = Quantifier::new(transcript_annotator.unwrap());
+            quantifier.quantify(&header, alignments);
+        } else if let Some(mut writer) = fragment_writer {
+            // Write fragments
             let mut fragment_generator = FragmentGenerator::default();
             if let Some(dir) = temp_dir {
                 fragment_generator.set_temp_dir(dir);
