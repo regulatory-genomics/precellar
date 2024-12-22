@@ -1,23 +1,24 @@
+mod aligner;
 mod pyseqspec;
 mod utils;
 
+use aligner::AlignerType;
+
 use anyhow::Result;
-use bwa_mem2::{AlignerOpts, BurrowsWheelerAligner, FMIndex, PairedEndStats};
-use either::Either;
 use itertools::Itertools;
 use log::info;
-use noodles::bam;
-use noodles::fastq::io::Writer;
-use noodles::{bgzf, sam::alignment::io::Write};
+use noodles::{
+    bam, fastq,
+    sam::{self, alignment::io::Write},
+};
 use pyo3::prelude::*;
 use std::{collections::HashMap, io::BufWriter, path::PathBuf, str::FromStr};
 
 use ::precellar::{
-    align::{
-        extend_fastq_record, Aligner, Barcode, DummyAligner, FastqProcessor, NameCollatedRecords,
-    },
+    align::{extend_fastq_record, Barcode, FastqProcessor, MultiMapR, NameCollatedRecords},
     fragment::FragmentGenerator,
     qc::{AlignQC, FragmentQC, Metrics},
+    transcript::{self, Quantifier},
 };
 use pyseqspec::Assay;
 use seqspec::{
@@ -43,8 +44,8 @@ static GLOBAL: Jemalloc = Jemalloc;
 ///   File path to the genome index.
 #[pyfunction]
 fn make_genome_index(fasta: PathBuf, genome_prefix: PathBuf) -> Result<()> {
-    FMIndex::new(fasta, genome_prefix).unwrap();
-    Ok(())
+    //FMIndex::new(fasta, genome_prefix).unwrap();
+    todo!()
 }
 
 /// Align fastq reads to the reference genome and generate unique fragments.
@@ -63,12 +64,16 @@ fn make_genome_index(fasta: PathBuf, genome_prefix: PathBuf) -> Result<()> {
 ///     File path to the output bam file. If None, the bam file will not be generated.
 /// output_fragment: Path | None
 ///     File path to the output fragment file. If None, the fragment file will not be generated.
+/// output_quantification: Path | None
+///     File path to the directory to store the gene quantifications. If None, the gene quantification will not be generated.
 /// mito_dna: list[str]
 ///     List of mitochondrial DNA names.
 /// shift_left: int
 ///     The number of bases to shift the left end of the fragment.
 /// shift_right: int
 ///     The number of bases to shift the right end of the fragment.
+/// aligner: str | None
+///     The aligner to use for the alignment. If None, the aligner will be inferred from the modality.
 /// compression: str | None
 ///     The compression algorithm to use for the output fragment file.
 ///     If None, the compression algorithm will be inferred from the file extension.
@@ -79,8 +84,8 @@ fn make_genome_index(fasta: PathBuf, genome_prefix: PathBuf) -> Result<()> {
 /// num_threads: int
 ///     The number of threads to use.
 /// chunk_size: int
-///     This parameter is used to control the number of bases processed in each chunk.
-///     The actual value is determined by: chunk_size * num_threads.
+///     This parameter is used to control the number of bases processed in each chunk per thread.
+///     The total number of bases in each chunk is determined by: chunk_size * num_threads.
 ///
 /// Returns
 /// -------
@@ -90,16 +95,16 @@ fn make_genome_index(fasta: PathBuf, genome_prefix: PathBuf) -> Result<()> {
 #[pyo3(
     signature = (
         assay, genome_index, *,
-        modality, output_bam=None, output_fragment=None,
+        modality, output_bam=None, output_quantification=None, output_fragment=None,
         mito_dna=vec!["chrM".to_owned(), "M".to_owned()],
-        shift_left=4, shift_right=-5,
+        shift_left=4, shift_right=-5, aligner=None,
         compression=None, compression_level=None,
         temp_dir=None, num_threads=8, chunk_size=10000000,
     ),
     text_signature = "(assay, genome_index, *,
-        modality, output_bam=None, output_fragment=None,
+        modality, output_bam=None, output_quantification=None, output_fragment=None,
         mito_dna=['chrM', 'M'],
-        shift_left=4, shift_right=-5,
+        shift_left=4, shift_right=-5, aligner=None,
         compression=None, compression_level=None,
         temp_dir=None, num_threads=8, chunk_size=10000000)",
 )]
@@ -109,10 +114,12 @@ fn align(
     genome_index: PathBuf,
     modality: &str,
     output_bam: Option<PathBuf>,
+    output_quantification: Option<PathBuf>,
     output_fragment: Option<PathBuf>,
     mito_dna: Vec<String>,
     shift_left: i64,
     shift_right: i64,
+    aligner: Option<&str>,
     compression: Option<&str>,
     compression_level: Option<u32>,
     temp_dir: Option<PathBuf>,
@@ -120,23 +127,27 @@ fn align(
     chunk_size: usize,
 ) -> Result<HashMap<String, f64>> {
     assert!(
-        output_bam.is_some() || output_fragment.is_some(),
-        "either output_bam or output_fragment must be provided"
+        output_bam.is_some() || output_fragment.is_some() || output_quantification.is_some(),
+        "one of the following parameters must be provided: output_bam, output_fragment, output_quantification"
+    );
+    assert!(
+        output_fragment.is_none() || output_quantification.is_none(),
+        "output_fragment and output_quantification cannot be used together"
     );
 
     let modality = Modality::from_str(modality).unwrap();
-    let spec = match assay.extract::<PathBuf>() {
+    let assay = match assay.extract::<PathBuf>() {
         Ok(p) => seqspec::Assay::from_path(&p).unwrap(),
         _ => assay.extract::<PyRef<Assay>>()?.0.clone(),
     };
 
-    let aligner = BurrowsWheelerAligner::new(
-        FMIndex::read(genome_index).unwrap(),
-        AlignerOpts::default(),
-        PairedEndStats::default(),
-    );
+    let mut aligner = if let Some(name) = aligner {
+        AlignerType::from_name(name, &genome_index)
+    } else {
+        AlignerType::from_modality(modality, &genome_index)
+    };
     let header = aligner.header();
-    let mut processor = FastqProcessor::new(spec, aligner)
+    let mut processor = FastqProcessor::new(assay)
         .with_modality(modality)
         .with_barcode_correct_prob(0.9);
     let mut fragment_qc = FragmentQC::default();
@@ -144,8 +155,29 @@ fn align(
         processor.add_mito_dna(&x);
         fragment_qc.add_mito_dna(x);
     });
+    let mut transcript_annotator = None;
 
     {
+        let alignments: Box<dyn Iterator<Item = _>> = match aligner {
+            AlignerType::STAR(ref mut aligner) => {
+                let transcriptome = ::precellar::align::read_transcriptome_star(&genome_index)?;
+                transcript_annotator = Some(::precellar::transcript::AlignmentAnnotator::new(
+                    transcriptome,
+                ));
+                Box::new(processor.gen_barcoded_alignments(
+                    aligner,
+                    num_threads,
+                    num_threads as usize * chunk_size,
+                ))
+            }
+            AlignerType::BWA(ref mut aligner) => Box::new(processor.gen_barcoded_alignments(
+                aligner,
+                num_threads,
+                num_threads as usize * chunk_size,
+            )),
+        };
+
+        // Write alignments
         let mut bam_writer = output_bam
             .map(|output| {
                 let mut writer =
@@ -154,23 +186,7 @@ fn align(
                 anyhow::Ok(writer)
             })
             .transpose()?;
-        let alignments = processor
-            .gen_barcoded_alignments(num_threads, chunk_size)
-            .map(|data| {
-                py.check_signals().unwrap();
-                if let Some(writer) = &mut bam_writer {
-                    match data.as_ref() {
-                        Either::Left(chunk) => chunk
-                            .iter()
-                            .for_each(|x| writer.write_alignment_record(&header, x).unwrap()),
-                        Either::Right(chunk) => chunk.iter().for_each(|(a, b)| {
-                            writer.write_alignment_record(&header, a).unwrap();
-                            writer.write_alignment_record(&header, b).unwrap();
-                        }),
-                    };
-                }
-                data
-            });
+        let alignments = write_alignments(py, &mut bam_writer, &header, alignments);
 
         let fragment_writer = output_fragment
             .as_ref()
@@ -181,7 +197,13 @@ fn align(
                 create_file(output, compression, compression_level, num_threads as u32)
             })
             .transpose()?;
-        if let Some(mut writer) = fragment_writer {
+
+        if let Some(quant_dir) = output_quantification {
+            // Write gene quantification
+            let quantifier = Quantifier::new(transcript_annotator.unwrap());
+            quantifier.quantify(&header, alignments, quant_dir);
+        } else if let Some(mut writer) = fragment_writer {
+            // Write fragments
             let mut fragment_generator = FragmentGenerator::default();
             if let Some(dir) = temp_dir {
                 fragment_generator.set_temp_dir(dir);
@@ -198,6 +220,10 @@ fn align(
                         writeln!(writer.as_mut(), "{}", frag).unwrap();
                     })
                 });
+        } else {
+            // alignments is a lazy iterator, so we need to consume it if no other
+            // output is generated.
+            alignments.for_each(drop);
         }
     }
 
@@ -208,6 +234,29 @@ fn align(
     Ok(report.into())
 }
 
+fn write_alignments<'a>(
+    py: Python<'a>,
+    bam_writer: &'a mut Option<bam::io::Writer<impl std::io::Write>>,
+    header: &'a sam::Header,
+    alignments: impl Iterator<Item = Vec<(MultiMapR, Option<MultiMapR>)>> + 'a,
+) -> impl Iterator<Item = Vec<(MultiMapR, Option<MultiMapR>)>> + 'a {
+    alignments.map(move |data| {
+        py.check_signals().unwrap();
+        if let Some(writer) = bam_writer.as_mut() {
+            data.iter().for_each(|(a, b)| {
+                a.iter()
+                    .for_each(|x| writer.write_alignment_record(&header, x).unwrap());
+                b.as_ref().map(|x| {
+                    x.iter()
+                        .for_each(|x| writer.write_alignment_record(&header, x).unwrap())
+                });
+            });
+        }
+        data
+    })
+}
+
+/*
 #[pyfunction]
 #[pyo3(
     signature = (
@@ -258,8 +307,7 @@ fn make_fragment(
 
     let chunks = NameCollatedRecords::new(reader.records())
         .map(|x| {
-            align_qc.update(&x.0, &header);
-            align_qc.update(&x.1, &header);
+            align_qc.add(&header, &x.0, Some(&x.1)).unwrap();
             x
         })
         .chunks(chunk_size);
@@ -293,6 +341,7 @@ fn make_fragment(
     fragment_qc.report(&mut report);
     Ok(report.into())
 }
+    */
 
 /// Generate consolidated fastq files from the sequencing specification.
 /// The barcodes and UMIs are concatenated to the read 1 sequence.
@@ -315,8 +364,7 @@ fn make_fastq(
         _ => assay.extract::<PyRef<Assay>>()?.0.clone(),
     };
 
-    let aligner = DummyAligner;
-    let mut processor = FastqProcessor::new(spec, aligner).with_modality(modality);
+    let mut processor = FastqProcessor::new(spec).with_modality(modality);
     let fq_reader = processor.gen_barcoded_fastq(correct_barcode);
 
     info!(
@@ -332,11 +380,11 @@ fn make_fastq(
     std::fs::create_dir_all(&out_dir)?;
     let read1_fq = out_dir.join("R1.fq.zst");
     let read1_writer = create_file(read1_fq, Some(Compression::Zstd), None, 8)?;
-    let mut read1_writer = Writer::new(BufWriter::new(read1_writer));
+    let mut read1_writer = fastq::Writer::new(BufWriter::new(read1_writer));
     let mut read2_writer = if fq_reader.is_paired_end() {
         let read2_fq = out_dir.join("R2.fq.zst");
         let read2_writer = create_file(read2_fq, Some(Compression::Zstd), None, 8)?;
-        let read2_writer = Writer::new(BufWriter::new(read2_writer));
+        let read2_writer = fastq::Writer::new(BufWriter::new(read2_writer));
         Some(read2_writer)
     } else {
         None
@@ -380,7 +428,7 @@ fn precellar(m: &Bound<'_, PyModule>) -> PyResult<()> {
 
     m.add_function(wrap_pyfunction!(make_genome_index, m)?)?;
     m.add_function(wrap_pyfunction!(align, m)?)?;
-    m.add_function(wrap_pyfunction!(make_fragment, m)?)?;
+    //m.add_function(wrap_pyfunction!(make_fragment, m)?)?;
     m.add_function(wrap_pyfunction!(make_fastq, m)?)?;
 
     utils::register_submodule(m)?;

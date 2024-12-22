@@ -5,8 +5,7 @@ pub mod utils;
 use log::warn;
 use noodles::fastq;
 use read::ReadValidator;
-pub use read::RegionIndex;
-pub use read::{File, Read, Strand, UrlType};
+pub use read::{SegmentInfo, SegmentInfoElem, File, Read, Strand, UrlType};
 use read::{ReadSpan, ValidateResult};
 use region::LibSpec;
 pub use region::{Onlist, Region, RegionId, RegionType, SequenceType};
@@ -323,14 +322,14 @@ impl Assay {
     }
 
     /// Get the index of atomic regions of each read in the sequence spec.
-    pub fn get_index_by_modality(
+    pub fn get_segments_by_modality(
         &self,
         modality: Modality,
-    ) -> impl Iterator<Item = (&Read, RegionIndex)> {
+    ) -> impl Iterator<Item = (&Read, SegmentInfo)> {
         self.sequence_spec.values().filter_map(move |read| {
             if read.modality == modality {
                 let parent_region_index = self
-                    .get_index(&read.read_id)
+                    .get_segments(&read.read_id)
                     .unwrap_or_else(|| panic!("Cannot find index for Read: {}", read.read_id));
                 Some((read, parent_region_index))
             } else {
@@ -339,11 +338,11 @@ impl Assay {
         })
     }
 
-    /// Get the index of atomic regions of a read in the sequence spec.
-    pub fn get_index(&self, read_id: &str) -> Option<RegionIndex> {
+    /// Get atomic regions of a read in the sequence spec.
+    pub fn get_segments(&self, read_id: &str) -> Option<SegmentInfo> {
         let read = self.sequence_spec.get(read_id)?;
         let library_parent_region = self.library_spec.get_parent(&read.primer_id)?;
-        read.get_index(&library_parent_region.read().unwrap())
+        read.get_segments(&library_parent_region.read().unwrap())
     }
 
     pub fn iter_reads(&self, modality: Modality) -> impl Iterator<Item = &Read> {
@@ -370,13 +369,13 @@ impl Assay {
                     .get_parent(&read.primer_id)
                     .ok_or_else(|| anyhow!("Primer not found: {}", read.primer_id))
                     .unwrap();
-                let index = read.get_index(&region.read().unwrap())?;
+                let index = read.get_segments(&region.read().unwrap())?;
                 let regions: Vec<_> = index
-                    .index
+                    .segments
                     .iter()
-                    .map(|(region_id, _, range)| {
-                        let region = self.library_spec.get(region_id).unwrap();
-                        (region.read().unwrap(), range.clone())
+                    .map(|elem_info| {
+                        let region = self.library_spec.get(&elem_info.region_id).unwrap();
+                        (region.read().unwrap(), elem_info.range.clone())
                     })
                     .collect();
                 Some((reader, (read, regions)))
@@ -459,13 +458,14 @@ impl Assay {
         Ok(())
     }
 
+    /// Verify reads in the sequence spec.
     fn verify(&self, read: &Read) -> Result<()> {
         let region = self
             .library_spec
             .get_parent(&read.primer_id)
             .ok_or_else(|| anyhow!("Primer not found: {}", read.primer_id))?;
         // Check if the primer exists
-        if let Some(index) = read.get_index(&region.read().unwrap()) {
+        if let Some(index) = read.get_segments(&region.read().unwrap()) {
             match index.readlen_info {
                 ReadSpan::Covered | ReadSpan::Span(_) => {}
                 ReadSpan::NotEnough => {
@@ -487,11 +487,11 @@ impl Assay {
 
             if let Some(mut reader) = read.open() {
                 let regions = index
-                    .index
+                    .segments
                     .iter()
-                    .map(|(region_id, _, range)| {
-                        let region = self.library_spec.get(region_id).unwrap();
-                        (region.read().unwrap(), range)
+                    .map(|info| {
+                        let region = self.library_spec.get(&info.region_id).unwrap();
+                        (region.read().unwrap(), &info.range)
                     })
                     .collect::<Vec<_>>();
                 let mut validators = regions
@@ -801,36 +801,36 @@ mod tests {
         let yaml_str = fs::read_to_string(YAML_FILE).expect("Failed to read file");
 
         let assay: Assay = serde_yaml::from_str(&yaml_str).expect("Failed to parse YAML");
-        for (read, index) in assay.get_index_by_modality(Modality::RNA) {
+        for (read, index) in assay.get_segments_by_modality(Modality::RNA) {
             println!(
                 "{}: {:?}",
                 read.read_id,
                 index
-                    .index
+                    .segments
                     .into_iter()
-                    .map(|x| (x.1, x.2))
+                    .map(|x| (x.region_type, x.range))
                     .collect::<Vec<_>>()
             );
         }
-        for (read, index) in assay.get_index_by_modality(Modality::ATAC) {
+        for (read, index) in assay.get_segments_by_modality(Modality::ATAC) {
             println!(
                 "{}: {:?}",
                 read.read_id,
                 index
-                    .index
+                    .segments
                     .into_iter()
-                    .map(|x| (x.1, x.2))
+                    .map(|x| (x.region_type, x.range))
                     .collect::<Vec<_>>()
             );
         }
-        for (read, index) in assay.get_index_by_modality(Modality::Protein) {
+        for (read, index) in assay.get_segments_by_modality(Modality::Protein) {
             println!(
                 "{}: {:?}",
                 read.read_id,
                 index
-                    .index
+                    .segments
                     .into_iter()
-                    .map(|x| (x.1, x.2))
+                    .map(|x| (x.region_type, x.range))
                     .collect::<Vec<_>>()
             );
         }

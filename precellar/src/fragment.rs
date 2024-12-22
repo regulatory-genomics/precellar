@@ -1,12 +1,11 @@
-mod deduplicate;
+mod de_dups;
 
 use anyhow::Result;
 use bed_utils::{
     bed::{BEDLike, ParseError, Strand},
     extsort::ExternalSorterBuilder,
 };
-use deduplicate::{remove_duplicates, AlignmentInfo};
-use either::Either;
+use de_dups::{remove_duplicates, AlignmentInfo};
 use itertools::Itertools;
 use noodles::sam::{
     alignment::{record::Flags, Record},
@@ -15,6 +14,8 @@ use noodles::sam::{
 use rayon::prelude::ParallelSliceMut;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+
+use crate::align::MultiMap;
 
 pub type CellBarcode = String;
 
@@ -173,25 +174,25 @@ impl FragmentGenerator {
         impl FnMut(&AlignmentInfo) -> String + 'a,
     >
     where
-        I: Iterator<Item = Either<Vec<R>, Vec<(R, R)>>> + 'a,
+        I: Iterator<Item = Vec<(MultiMap<R>, Option<MultiMap<R>>)>> + 'a,
         R: Record + 'a,
     {
-        let data = records.flat_map(|x| match x {
-            Either::Left(chunk) => Box::new(chunk.into_iter().flat_map(|r| {
-                if filter_read(&r, self.mapq) {
-                    AlignmentInfo::from_read(&r, header).unwrap()
+        let data = records.flat_map(|chunk|
+            chunk.into_iter().flat_map(|(r1, r2)| if r2.is_some() {
+                let r2 = r2.unwrap();
+                if filter_read_pair((&r1.primary, &r2.primary), self.mapq) {
+                    AlignmentInfo::from_read_pair((&r1.primary, &r2.primary), header).unwrap()
                 } else {
                     None
                 }
-            })) as Box<dyn Iterator<Item = AlignmentInfo>>,
-            Either::Right(chunk) => Box::new(chunk.into_iter().flat_map(|(r1, r2)| {
-                if filter_read_pair((&r1, &r2), self.mapq) {
-                    AlignmentInfo::from_read_pair((&r1, &r2), header).unwrap()
+            } else {
+                if filter_read(&r1.primary, self.mapq) {
+                    AlignmentInfo::from_read(&r1.primary, header).unwrap()
                 } else {
                     None
                 }
-            })) as Box<dyn Iterator<Item = AlignmentInfo>>,
-        });
+            }
+        ));
 
         let sorted = sort_by_barcode(data, self.temp_dir.clone(), self.chunk_size);
         UniqueFragments {

@@ -15,6 +15,7 @@ use std::{
     ops::Range,
 };
 
+/// Specification of a sequencing library.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SeqSpec(IndexMap<String, Read>);
 
@@ -110,47 +111,40 @@ impl Read {
         Ok(record.sequence().len())
     }
 
-    pub(crate) fn get_index<'a>(&'a self, region: &'a Region) -> Option<RegionIndex> {
+    /// Check if the read is reverse.
+    pub fn is_reverse(&self) -> bool {
+        match self.strand {
+            Strand::Neg => true,
+            Strand::Pos => false,
+        }
+    }
+
+    pub(crate) fn get_segments<'a>(&'a self, region: &'a Region) -> Option<SegmentInfo> {
         if region.sequence_type != SequenceType::Joined {
             return None;
         }
 
         let mut found_primer = false;
-
-        let result = if self.is_reverse() {
-            self.get_read_span(
-                region
-                    .subregions
-                    .iter()
-                    .rev()
-                    .skip_while(|region| {
-                        let region = region.read().unwrap();
-                        let found = region.region_type.is_sequencing_primer()
-                            && region.region_id == self.primer_id;
-                        if found {
-                            found_primer = true;
-                        }
-                        !found
-                    })
-                    .skip(1),
-            )
+        let subregions = region.subregions.iter();
+        let subregions: Box<dyn Iterator<Item = _>> = if self.is_reverse() {
+            Box::new(subregions.rev())
         } else {
-            self.get_read_span(
-                region
-                    .subregions
-                    .iter()
-                    .skip_while(|region| {
-                        let region = region.read().unwrap();
-                        let found = region.region_type.is_sequencing_primer()
-                            && region.region_id == self.primer_id;
-                        if found {
-                            found_primer = true;
-                        }
-                        !found
-                    })
-                    .skip(1),
-            )
+            Box::new(subregions)
         };
+
+        let result = self.get_read_span(
+            subregions
+                .skip_while(|region| {
+                    let region = region.read().unwrap();
+                    let found = region.region_type.is_sequencing_primer()
+                        && region.region_id == self.primer_id;
+                    if found {
+                        found_primer = true;
+                    }
+                    !found
+                })
+                .skip(1),
+        );
 
         if found_primer {
             Some(result)
@@ -160,74 +154,162 @@ impl Read {
     }
 
     /// Helper function to get the region index for a read.
-    fn get_read_span<'a, I>(&self, mut regions: I) -> RegionIndex
+    fn get_read_span<'a, I>(&self, mut regions: I) -> SegmentInfo
     where
         I: Iterator<Item = &'a Arc<RwLock<Region>>>,
     {
-        let mut index = Vec::new();
+        let mut segments = Vec::new();
         let read_len = self.max_len;
         let mut cur_pos = 0;
         let mut readlen_info = ReadSpan::Covered;
         while let Some(region) = regions.next() {
-            let region = region.read().unwrap();
-            let region_id = region.region_id.clone();
-            let region_type = region.region_type;
+            let mut region = region.read().unwrap();
+            let mut region_id = region.region_id.clone();
+            let mut region_type = SegmentType::R(region.region_type);
             if region.is_fixed_length() {
                 // Fixed-length region
                 let end = cur_pos + region.min_len;
                 if end >= read_len {
-                    index.push((region_id, region_type, cur_pos..read_len));
+                    segments.push(SegmentInfoElem::new(
+                        region_id,
+                        region_type,
+                        cur_pos..read_len,
+                    ));
                     if end > read_len {
                         readlen_info = ReadSpan::NotEnough;
                     }
                     break;
                 } else {
-                    index.push((region_id, region_type, cur_pos..end));
+                    segments.push(SegmentInfoElem::new(region_id, region_type, cur_pos..end));
                     cur_pos = end;
                 }
-            } else if cur_pos + region.min_len >= read_len {
-                // Variable-length region and read is shorter
-                index.push((region_id, region_type, cur_pos..read_len));
-                readlen_info = ReadSpan::Span((read_len - cur_pos) as usize);
-                break;
-            } else if cur_pos + region.max_len < read_len {
-                // Variable-length region and read is longer than max length
-                index.push((region_id, region_type, cur_pos..cur_pos + region.max_len));
-                if let Some(next_region) = regions.next() {
-                    let next_region = next_region.read().unwrap();
-                    readlen_info = ReadSpan::ReadThrough(next_region.region_id.clone());
-                }
-                break;
             } else {
-                // Variable-length region and read is within the length range
-                index.push((region_id, region_type, cur_pos..read_len));
-                if let Some(next_region) = regions.next() {
-                    let next_region = next_region.read().unwrap();
-                    readlen_info = ReadSpan::MayReadThrough(next_region.region_id.clone());
+                // Variable-length region
+                if let Some(nucl) = region.region_type.is_poly_nucl() {
+                    if let Some(next_region) = regions.next() {
+                        region = next_region.read().unwrap();
+                        region_id = region.region_id.clone();
+                        region_type = SegmentType::PolyNucl((nucl, region.region_type));
+                    }
                 }
-                break;
+                if cur_pos + region.min_len >= read_len {
+                    // Variable-length region and read is shorter
+                    segments.push(SegmentInfoElem::new(
+                        region_id,
+                        region_type,
+                        cur_pos..read_len,
+                    ));
+                    readlen_info = ReadSpan::Span((read_len - cur_pos) as usize);
+                    break;
+                } else if cur_pos + region.max_len < read_len {
+                    // Variable-length region and read is longer than max length
+                    segments.push(SegmentInfoElem::new(
+                        region_id,
+                        region_type,
+                        cur_pos..cur_pos + region.max_len,
+                    ));
+                    if let Some(next_region) = regions.next() {
+                        let next_region = next_region.read().unwrap();
+                        readlen_info = ReadSpan::ReadThrough(next_region.region_id.clone());
+                    }
+                    break;
+                } else {
+                    // Variable-length region and read is within the length range
+                    segments.push(SegmentInfoElem::new(
+                        region_id,
+                        region_type,
+                        cur_pos..read_len,
+                    ));
+                    if let Some(next_region) = regions.next() {
+                        let next_region = next_region.read().unwrap();
+                        readlen_info = ReadSpan::MayReadThrough(next_region.region_id.clone());
+                    }
+                    break;
+                }
             }
         }
-        RegionIndex {
-            index,
+        SegmentInfo {
+            segments,
             readlen_info,
         }
     }
+}
 
-    pub fn is_reverse(&self) -> bool {
-        match self.strand {
-            Strand::Neg => true,
-            Strand::Pos => false,
+/// A read may be divided into multiple segments, each corresponding to a region
+/// with biological meaning. SegmentInfo stores the information about the regions
+/// that the read is divided into.
+#[derive(Debug, Clone)]
+pub struct SegmentInfo {
+    pub segments: Vec<SegmentInfoElem>,
+    pub readlen_info: ReadSpan,
+}
+
+#[derive(Clone)]
+pub enum SegmentType {
+    R(RegionType),
+    PolyNucl((u8, RegionType)), // (nucleotide, region_type)
+}
+
+impl std::fmt::Debug for SegmentType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SegmentType::R(region_type) => write!(f, "{:?}", region_type),
+            SegmentType::PolyNucl((nucl, region_type)) => {
+                write!(f, "poly{}+{:?}", *nucl as char, region_type)
+            }
         }
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct RegionIndex {
-    pub index: Vec<(String, RegionType, Range<u32>)>,
-    pub readlen_info: ReadSpan,
+impl SegmentType {
+    pub fn is_barcode(&self) -> bool {
+        match self {
+            SegmentType::R(region_type) => region_type.is_barcode(),
+            _ => false,
+        }
+    }
+
+    pub fn is_umi(&self) -> bool {
+        match self {
+            SegmentType::R(region_type) => region_type.is_umi(),
+            _ => false,
+        }
+    }
+
+    pub fn is_target(&self) -> bool {
+        match self {
+            SegmentType::R(region_type) => region_type.is_target(),
+            SegmentType::PolyNucl((_, region_type)) => region_type.is_target(),
+        }
+    }
+
+    pub fn poly_nucl(&self) -> Option<u8> {
+        match self {
+            SegmentType::PolyNucl((nucl, _)) => Some(*nucl),
+            _ => None,
+        }
+    }
 }
 
+/// Information about a segment in a read.
+#[derive(Debug, Clone)]
+pub struct SegmentInfoElem {
+    pub region_id: String,
+    pub region_type: SegmentType,
+    pub range: Range<u32>,
+}
+
+impl SegmentInfoElem {
+    pub fn new(region_id: String, region_type: SegmentType, range: Range<u32>) -> Self {
+        Self {
+            region_id,
+            region_type: region_type,
+            range,
+        }
+    }
+}
+
+/// Information about the region index for a read.
 #[derive(Debug, Clone)]
 pub enum ReadSpan {
     Covered,                // The read is fully contained within the target region
