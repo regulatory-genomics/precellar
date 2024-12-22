@@ -57,6 +57,12 @@ impl<R: Record> MultiMap<R> {
         self.primary
     }
 
+    /// Whether the read is confidently mapped. A read is confidently mapped if it
+    /// is mapped to a single location.
+    pub fn is_confidently_mapped(&self) -> bool {
+        self.others.is_none() && !self.primary.flags().unwrap().is_unmapped()
+    }
+
     /// Returns an iterator over all alignments (primary and secondary).
     pub fn iter(&self) -> impl Iterator<Item = &R> {
         std::iter::once(&self.primary).chain(self.others.iter().flatten())

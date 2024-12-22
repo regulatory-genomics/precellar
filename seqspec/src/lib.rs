@@ -5,7 +5,7 @@ pub mod utils;
 use log::warn;
 use noodles::fastq;
 use read::ReadValidator;
-pub use read::{SegmentInfo, SegmentInfoElem, File, Read, Strand, UrlType};
+pub use read::{FastqReader, SegmentInfo, SegmentInfoElem, File, Read, Strand, UrlType};
 use read::{ReadSpan, ValidateResult};
 use region::LibSpec;
 pub use region::{Onlist, Region, RegionId, RegionType, SequenceType};

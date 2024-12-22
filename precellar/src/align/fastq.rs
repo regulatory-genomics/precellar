@@ -9,12 +9,9 @@ use indexmap::IndexMap;
 use kdam::{tqdm, BarExt};
 use log::info;
 use noodles::{bam, fastq};
-use seqspec::{Assay, Modality, Read, RegionId, SegmentInfo, SegmentInfoElem};
+use seqspec::{Assay, FastqReader, Modality, Read, RegionId, SegmentInfo, SegmentInfoElem};
 use smallvec::SmallVec;
-use std::{
-    collections::{HashMap, HashSet},
-    io::BufRead,
-};
+use std::collections::{HashMap, HashSet};
 
 pub struct FastqProcessor {
     assay: Assay,
@@ -98,7 +95,8 @@ impl FastqProcessor {
         let header = aligner.header();
         let mut qc = AlignQC::default();
         self.mito_dna.iter().for_each(|mito| {
-            header.reference_sequences()
+            header
+                .reference_sequences()
                 .get_index_of(&BString::from(mito.as_str()))
                 .map(|x| qc.mito_dna.insert(x));
         });
@@ -236,7 +234,7 @@ pub struct AnnotatedFastqReader {
     buffer: fastq::Record,
     total_reads: Option<usize>,
     trim_poly_a: bool,
-    inner: Vec<(FastqAnnotator, fastq::Reader<Box<dyn BufRead>>)>,
+    inner: Vec<(FastqAnnotator, FastqReader)>,
 }
 
 impl AnnotatedFastqReader {
@@ -289,10 +287,8 @@ impl AnnotatedFastqReader {
     }
 }
 
-impl FromIterator<(FastqAnnotator, fastq::Reader<Box<dyn BufRead>>)> for AnnotatedFastqReader {
-    fn from_iter<T: IntoIterator<Item = (FastqAnnotator, fastq::Reader<Box<dyn BufRead>>)>>(
-        iter: T,
-    ) -> Self {
+impl FromIterator<(FastqAnnotator, FastqReader)> for AnnotatedFastqReader {
+    fn from_iter<T: IntoIterator<Item = (FastqAnnotator, FastqReader)>>(iter: T) -> Self {
         Self {
             buffer: fastq::Record::default(),
             total_reads: None,

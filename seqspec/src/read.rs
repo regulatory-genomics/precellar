@@ -83,11 +83,61 @@ impl Default for Read {
     }
 }
 
+pub struct FastqReader {
+    reader: fastq::Reader<Box<dyn BufRead>>,
+    min_len: u32,
+    max_len: u32,
+}
+
+impl FastqReader {
+    pub fn new(reader: Box<dyn BufRead>, min_len: u32, max_len: u32) -> Self {
+        Self {
+            reader: fastq::Reader::new(reader),
+            min_len,
+            max_len,
+        }
+    }
+
+    pub fn read_record(&mut self, record: &mut fastq::Record) -> Result<usize> {
+        let n = self.reader.read_record(record)?;
+        if self.max_len > 0 {
+            record.quality_scores_mut().truncate(self.max_len as usize);
+            record.sequence_mut().truncate(self.max_len as usize);
+        }
+        Ok(n)
+    }
+
+    pub fn records(&mut self) -> FastqRecords {
+        FastqRecords {
+            inner: self,
+        }
+    }
+}
+
+pub struct FastqRecords<'a> {
+    inner: &'a mut FastqReader,
+}
+
+impl<'a> Iterator for FastqRecords<'a>
+{
+    type Item = Result<fastq::Record>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let mut buf = fastq::Record::default();
+
+        match self.inner.read_record(&mut buf) {
+            Ok(0) => None,
+            Ok(_) => Some(Ok(buf)),
+            Err(e) => Some(Err(e)),
+        }
+    }
+}
+
 impl Read {
     /// Open the fastq files for reading, and return a fastq reader.
     /// If the read has multiple fastq files, they will be concatenated.
     /// If the read has no fastq files, return None.
-    pub fn open(&self) -> Option<fastq::Reader<Box<dyn BufRead>>> {
+    pub fn open(&self) -> Option<FastqReader> {
         let files = self
             .files
             .clone()
@@ -100,12 +150,16 @@ impl Read {
         }
         let reader =
             multi_reader::MultiReader::new(files.into_iter().map(move |file| file.open().unwrap()));
-        Some(fastq::Reader::new(Box::new(BufReader::new(reader))))
+        Some(FastqReader::new(
+            Box::new(BufReader::new(reader)),
+            self.min_len,
+            self.max_len,
+        ))
     }
 
     /// Get the actual length of the read by reading the first record from the fastq file.
     pub fn actual_len(&self) -> Result<usize> {
-        let mut reader = self.open().unwrap();
+        let mut reader = self.open().unwrap().reader;
         let mut record = fastq::Record::default();
         reader.read_record(&mut record)?;
         Ok(record.sequence().len())
