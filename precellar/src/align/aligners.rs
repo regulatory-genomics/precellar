@@ -2,6 +2,7 @@ use std::path::Path;
 
 /// This module provides an abstraction for aligning sequencing reads using different alignment tools like BWA and STAR.
 use super::fastq::AnnotatedFastq;
+use crate::barcode::{get_barcode, get_umi};
 use crate::transcript::Transcript;
 
 use anyhow::{bail, ensure, Result};
@@ -28,7 +29,7 @@ pub struct MultiMap<R> {
     pub others: Option<Vec<R>>,
 }
 
-impl<R> MultiMap<R> {
+impl<R: Record> MultiMap<R> {
     /// Constructs a new `MultiMap`.
     ///
     /// # Arguments
@@ -36,6 +37,19 @@ impl<R> MultiMap<R> {
     /// * `others` - Optional secondary alignments for the read.
     pub fn new(primary: R, others: Option<Vec<R>>) -> Self {
         Self { primary, others }
+    }
+
+    /// Return the number of records.
+    pub fn len(&self) -> usize {
+        self.others.as_ref().map_or(0, |x| x.len()) + 1
+    }
+
+    pub fn barcode(&self) -> Result<Option<String>> {
+        get_barcode(&self.primary)
+    }
+
+    pub fn umi(&self) -> Result<Option<String>> {
+        get_umi(&self.primary)
     }
 
     /// Consumes the `MultiMap` and returns the primary alignment.

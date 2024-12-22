@@ -1,4 +1,9 @@
+use anyhow::Result;
 use core::f64;
+use noodles::sam::alignment::{
+    record::data::field::{Tag, Value},
+    Record,
+};
 use std::{
     collections::HashMap,
     ops::{Deref, DerefMut},
@@ -278,7 +283,7 @@ pub struct BarcodeCorrector {
     /// exceeds this threshold, the barcode will be corrected.
     bc_confidence_threshold: f64,
     /// The number of mismatches allowed in barcode
-    max_mismatch: usize, 
+    max_mismatch: usize,
 }
 
 impl Default for BarcodeCorrector {
@@ -345,4 +350,26 @@ impl BarcodeCorrector {
 fn error_probability(qual: u8) -> f64 {
     let offset = 33.0; // Illumina quality score offset
     10f64.powf(-((qual as f64 - offset) / 10.0))
+}
+
+pub(crate) fn get_barcode<R: Record>(rec: &R) -> Result<Option<String>> {
+    Ok(rec
+        .data()
+        .get(&Tag::CELL_BARCODE_ID)
+        .transpose()?
+        .and_then(|x| match x {
+            Value::String(barcode) => Some(barcode.to_string()),
+            _ => None,
+        }))
+}
+
+pub(crate) fn get_umi<R: Record>(rec: &R) -> Result<Option<String>> {
+    Ok(rec
+        .data()
+        .get(&Tag::UMI_SEQUENCE)
+        .transpose()?
+        .and_then(|x| match x {
+            Value::String(umi) => Some(umi.to_string()),
+            _ => None,
+        }))
 }

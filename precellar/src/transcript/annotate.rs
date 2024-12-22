@@ -1,3 +1,4 @@
+use crate::align::MultiMapR;
 /// This module provides utilities for annotating bam records by mapping them to a transcriptome.
 /// It supports both single-end and paired-end alignments and uses transcript annotations for gene-level
 /// and exon-level classification.
@@ -8,9 +9,9 @@ use bed_utils::bed::map::GIntervalMap;
 use bed_utils::bed::GenomicRange;
 use noodles::gtf::record::strand::Strand;
 use noodles::sam;
-use noodles::sam::alignment::record::Flags;
 use noodles::sam::alignment::record_buf::Cigar;
 use noodles::sam::alignment::record_buf::RecordBuf;
+use serde::{Deserialize, Serialize};
 use std::cmp;
 use std::collections::{BTreeMap, HashSet};
 
@@ -27,59 +28,35 @@ pub struct Annotation {
 /// Represents an annotated BAM record.
 #[derive(Debug)]
 pub enum AnnotatedAlignment {
-    /// Represents an unmapped read.
-    Unmapped(RecordBuf, Option<RecordBuf>),
     /// Represents a single-end mapped read with annotation.
-    SeMapped(RecordBuf, Annotation),
+    SeMapped(Annotation),
     /// Represents a paired-end mapped read with annotations for each end.
     PeMapped(
-        RecordBuf,
         Annotation,
-        RecordBuf,
         Annotation,
         PairAnnotationData,
     ),
 }
 
 impl AnnotatedAlignment {
-    /// Returns references to records.
-    pub fn rec(&self) -> (&RecordBuf, Option<&RecordBuf>) {
-        match self {
-            AnnotatedAlignment::Unmapped(ref rec, ref rec2) => (rec, rec2.as_ref()),
-            AnnotatedAlignment::SeMapped(ref rec, _) => (rec, None),
-            AnnotatedAlignment::PeMapped(ref rec1, _, ref rec2, _, _) => (rec1, Some(rec2)),
-        }
-    }
-
-    /// Returns mutable references to records.
-    pub fn mut_rec(&mut self) -> (&mut RecordBuf, Option<&mut RecordBuf>) {
-        match self {
-            AnnotatedAlignment::Unmapped(ref mut rec1, ref mut rec2) => (rec1, rec2.as_mut()),
-            AnnotatedAlignment::SeMapped(ref mut rec, _) => (rec, None),
-            AnnotatedAlignment::PeMapped(ref mut rec1, _, ref mut rec2, _, _) => (rec1, Some(rec2)),
-        }
-    }
-
     /// Returns references to the annotations for single-end or paired-end reads.
     pub fn annotation(&self) -> (Option<&Annotation>, Option<&Annotation>) {
         match self {
-            AnnotatedAlignment::SeMapped(_, ref anno) => (Some(anno), None),
-            AnnotatedAlignment::PeMapped(_, ref anno1, _, ref anno2, _) => {
+            AnnotatedAlignment::SeMapped(ref anno) => (Some(anno), None),
+            AnnotatedAlignment::PeMapped(ref anno1, ref anno2, _) => {
                 (Some(anno1), Some(anno2))
             }
-            AnnotatedAlignment::Unmapped(_, _) => (None, None),
         }
     }
 
     /// Marks the alignment as rescued.
     fn set_rescued(&mut self) {
         match self {
-            AnnotatedAlignment::SeMapped(_, ref mut anno) => anno.rescued = true,
-            AnnotatedAlignment::PeMapped(_, ref mut anno1, _, ref mut anno2, _) => {
+            AnnotatedAlignment::SeMapped(ref mut anno) => anno.rescued = true,
+            AnnotatedAlignment::PeMapped(ref mut anno1, ref mut anno2, _) => {
                 anno1.rescued = true;
                 anno2.rescued = true;
             }
-            AnnotatedAlignment::Unmapped(_, _) => panic!("Unmapped annotations cannot be rescued"),
         }
     }
 }
@@ -88,7 +65,7 @@ impl AnnotatedAlignment {
 #[derive(Debug, Clone)]
 pub struct AlignmentAnnotator {
     /// Map of genomic intervals to transcripts.
-    transcripts: GIntervalMap<Transcript>,
+    pub(crate) transcripts: GIntervalMap<Transcript>,
     /// Indicates the strandedness of the chemistry used in the experiment.
     chemistry_strandedness: Strand,
     /// Number of bases to trim from intergenic alignments.
@@ -122,7 +99,7 @@ impl AlignmentAnnotator {
     /// alignments are present, we will try to find the confident ones and promote
     /// them to primary. A read may align to multiple transcripts and genes, but
     /// it is only considered confidently mapped to the transcriptome if it is
-    /// mapped to a single gene.
+    /// mapped to a single gene. The confident alignment will be returned if found.
     ///
     /// # Arguments
     /// * `header` - Reference to the SAM header.
@@ -130,14 +107,13 @@ impl AlignmentAnnotator {
     pub fn annotate_alignments_se(
         &self,
         header: &sam::Header,
-        rec: Vec<RecordBuf>,
-    ) -> Vec<AnnotatedAlignment> {
-        let mut results = rec
-            .into_iter()
-            .map(|rec| self.annotate_alignment_se(header, rec))
+        rec: MultiMapR,
+    ) -> Option<AnnotatedAlignment> {
+        let results = rec
+            .iter()
+            .filter_map(|rec| self.annotate_alignment_se(header, rec))
             .collect::<Vec<_>>();
-        rescue_alignments_se(&mut results);
-        results
+        rescue_alignments_se(results)
     }
 
     /// Annotates a batch of paired-end alignments.
@@ -149,31 +125,25 @@ impl AlignmentAnnotator {
     pub fn annotate_alignments_pe(
         &self,
         header: &sam::Header,
-        rec1: Vec<RecordBuf>,
-        rec2: Vec<RecordBuf>,
-    ) -> Vec<AnnotatedAlignment> {
-        assert!(
-            !rec2.is_empty(),
-            "There should be at least one paired-end alignment"
-        );
-
+        rec1: MultiMapR,
+        rec2: MultiMapR,
+    ) -> Option<AnnotatedAlignment> {
         let pair_improper = rec1.len() != rec2.len();
-        let mut result: Vec<_> = rec1
-            .into_iter()
-            .zip(rec2)
-            .map(|(r1, r2)| self.annotate_alignment_pe(header, r1, r2))
+        let result: Vec<_> = rec1
+            .iter()
+            .zip(rec2.iter())
+            .filter_map(|(r1, r2)| self.annotate_alignment_pe(header, r1, r2))
             .collect();
-        rescue_alignments_pe(result.as_mut_slice());
-        result
+        rescue_alignments_pe(result)
     }
 
     /// Annotates a single-end alignment record.
-    fn annotate_alignment_se(&self, header: &sam::Header, rec: RecordBuf) -> AnnotatedAlignment {
+    fn annotate_alignment_se(&self, header: &sam::Header, rec: &RecordBuf) -> Option<AnnotatedAlignment> {
         if rec.flags().is_unmapped() {
-            AnnotatedAlignment::Unmapped(rec, None)
+            None
         } else {
-            let anno = self.annotate_alignment(header, &rec).unwrap();
-            AnnotatedAlignment::SeMapped(rec, anno)
+            let anno = self.annotate_alignment(header, rec).unwrap();
+            Some(AnnotatedAlignment::SeMapped(anno))
         }
     }
 
@@ -181,18 +151,18 @@ impl AlignmentAnnotator {
     fn annotate_alignment_pe(
         &self,
         header: &sam::Header,
-        rec1: RecordBuf,
-        rec2: RecordBuf,
-    ) -> AnnotatedAlignment {
+        rec1: &RecordBuf,
+        rec2: &RecordBuf,
+    ) -> Option<AnnotatedAlignment> {
         // STAR _shouldn't_ return pairs where only a single end is mapped,
         //   but if it does, consider the pair unmapped
         if rec1.flags().is_unmapped() || rec2.flags().is_unmapped() {
-            AnnotatedAlignment::Unmapped(rec1, Some(rec2))
+            None
         } else {
-            let anno1 = self.annotate_alignment(header, &rec1).unwrap();
-            let anno2 = self.annotate_alignment(header, &rec2).unwrap();
+            let anno1 = self.annotate_alignment(header, rec1).unwrap();
+            let anno2 = self.annotate_alignment(header, rec2).unwrap();
             let annop = PairAnnotationData::from_pair(&anno1, &anno2);
-            AnnotatedAlignment::PeMapped(rec1, anno1, rec2, anno2, annop)
+            Some(AnnotatedAlignment::PeMapped(anno1, anno2, annop))
         }
     }
 
@@ -373,25 +343,19 @@ impl PairAnnotationData {
 /// Use transcriptome alignments to promote a single genome alignment
 /// when none are confidently mapped to the genome.
 /// Returns true if rescue took place.
-fn rescue_alignments_se(recs: &mut [AnnotatedAlignment]) -> bool {
-    let mut rescued = false;
-
-    // If there are multiple alignments, we may need to rescue
-    if recs.len() > 1 {
+fn rescue_alignments_se(mut recs: Vec<AnnotatedAlignment>) -> Option<AnnotatedAlignment> {
+    let n = recs.len();
+    if n == 0 {
+        None
+    } else if n == 1 {
+        recs.pop()
+    } else {
         let mut promote_index: Option<usize> = None;
-        let mut ori_primary: Option<usize> = None;
         let mut seen_genes = HashSet::new();
 
-        for (i, rec) in recs.iter_mut().enumerate() {
+        for (i, rec) in recs.iter().enumerate() {
             match rec {
-                AnnotatedAlignment::SeMapped(aln, anno) => {
-                    if !aln.flags().is_secondary() {
-                        // Track the original primary alignment
-                        ori_primary = Some(i);
-                        // Make sure all mapped alignments are secondary
-                        aln.flags_mut().set(Flags::SECONDARY, true);
-                    }
-
+                AnnotatedAlignment::SeMapped(anno) => {
                     // Only consider transcriptomic alignments for rescue
                     if anno.aln_sense.iter().any(|x| x.is_exonic()) {
                         let genes = &anno.genes;
@@ -411,42 +375,31 @@ fn rescue_alignments_se(recs: &mut [AnnotatedAlignment]) -> bool {
 
         // The alignment can be rescued if there is only one uniquely mapped gene
         if seen_genes.len() == 1 && promote_index.is_some() {
-            rescued = true
+            let mut rec = recs.swap_remove(promote_index.unwrap());
+            rec.set_rescued();
+            Some(rec)
         } else {
-            promote_index = ori_primary;
+            None
         }
-
-        // Promote a single alignment
-        let promote_index = promote_index.expect("No primary alignment found!");
-        let rec = &mut recs[promote_index];
-        rec.set_rescued();
-        rec.mut_rec().0.flags_mut().set(Flags::SECONDARY, false);
     }
-
-    rescued
 }
 
 /// Attempts to rescue paired-end alignments using transcript annotations.
 /// Returns true if rescue took place.
-fn rescue_alignments_pe(pairs: &mut [AnnotatedAlignment]) -> bool {
-    let mut rescued = false;
-
-    if pairs.len() > 1 {
+fn rescue_alignments_pe(mut pairs: Vec<AnnotatedAlignment>) -> Option<AnnotatedAlignment> {
+    let n = pairs.len();
+    if n == 0 {
+        None
+    } else if n == 1 {
+        pairs.pop()
+    } else {
         // Check if rescue is appropriate and determine which record to promote
         let mut seen_genes = HashSet::new();
         let mut promote_index: Option<usize> = None;
-        let mut ori_primary: Option<usize> = None;
 
         for (i, pair) in pairs.iter_mut().enumerate() {
             match pair {
-                AnnotatedAlignment::PeMapped(aln1, _, aln2, _, anno) => {
-                    if !aln1.flags().is_secondary() {
-                        ori_primary = Some(i);
-                        // Make sure all mapped alignments are secondary
-                        aln1.flags_mut().set(Flags::SECONDARY, true);
-                        aln2.flags_mut().set(Flags::SECONDARY, true);
-                    }
-
+                AnnotatedAlignment::PeMapped(_, _, anno) => {
                     let genes = &anno.genes;
 
                     // Track which record/record-pair we should promote;
@@ -458,32 +411,22 @@ fn rescue_alignments_pe(pairs: &mut [AnnotatedAlignment]) -> bool {
                     // Track number of distinct genes we're aligned to
                     seen_genes.extend(genes);
                 }
-                AnnotatedAlignment::Unmapped(_, _) => {}
                 _ => unimplemented!(),
             }
         }
 
         // The alignment can be rescued if there is only one uniquely mapped gene
         if seen_genes.len() == 1 && promote_index.is_some() {
-            rescued = true
-        } else {
-            promote_index = ori_primary;
-        }
-
-        // Promote a single alignment
-        if let Some(promote_index) = promote_index {
-            let pair = &mut pairs[promote_index];
+            let mut pair = pairs.swap_remove(promote_index.unwrap());
             pair.set_rescued();
-            let (aln1, aln2) = pair.mut_rec();
-            aln1.flags_mut().set(Flags::SECONDARY, false);
-            aln2.unwrap().flags_mut().set(Flags::SECONDARY, false);
+            Some(pair)
+        } else {
+            None
         }
     }
-
-    rescued
 }
 
-#[derive(Eq, PartialEq, Ord, PartialOrd, Debug, Clone, Copy, Hash)]
+#[derive(Serialize, Deserialize, Eq, PartialEq, Ord, PartialOrd, Debug, Clone, Copy, Hash)]
 pub enum AnnotationRegion {
     Exonic,
     Intronic,

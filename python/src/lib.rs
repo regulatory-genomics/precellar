@@ -8,7 +8,7 @@ use anyhow::Result;
 use itertools::Itertools;
 use log::info;
 use noodles::{
-    bam, bgzf, fastq,
+    bam, fastq,
     sam::{self, alignment::io::Write},
 };
 use pyo3::prelude::*;
@@ -64,6 +64,8 @@ fn make_genome_index(fasta: PathBuf, genome_prefix: PathBuf) -> Result<()> {
 ///     File path to the output bam file. If None, the bam file will not be generated.
 /// output_fragment: Path | None
 ///     File path to the output fragment file. If None, the fragment file will not be generated.
+/// output_quantification: Path | None
+///     File path to the directory to store the gene quantifications. If None, the gene quantification will not be generated.
 /// mito_dna: list[str]
 ///     List of mitochondrial DNA names.
 /// shift_left: int
@@ -82,8 +84,8 @@ fn make_genome_index(fasta: PathBuf, genome_prefix: PathBuf) -> Result<()> {
 /// num_threads: int
 ///     The number of threads to use.
 /// chunk_size: int
-///     This parameter is used to control the number of bases processed in each chunk.
-///     The actual value is determined by: chunk_size * num_threads.
+///     This parameter is used to control the number of bases processed in each chunk per thread.
+///     The total number of bases in each chunk is determined by: chunk_size * num_threads.
 ///
 /// Returns
 /// -------
@@ -162,11 +164,17 @@ fn align(
                 transcript_annotator = Some(::precellar::transcript::AlignmentAnnotator::new(
                     transcriptome,
                 ));
-                Box::new(processor.gen_barcoded_alignments(aligner, num_threads, chunk_size))
+                Box::new(processor.gen_barcoded_alignments(
+                    aligner,
+                    num_threads,
+                    num_threads as usize * chunk_size,
+                ))
             }
-            AlignerType::BWA(ref mut aligner) => {
-                Box::new(processor.gen_barcoded_alignments(aligner, num_threads, chunk_size))
-            }
+            AlignerType::BWA(ref mut aligner) => Box::new(processor.gen_barcoded_alignments(
+                aligner,
+                num_threads,
+                num_threads as usize * chunk_size,
+            )),
         };
 
         // Write alignments
@@ -190,10 +198,10 @@ fn align(
             })
             .transpose()?;
 
-        if let Some(writer) = output_quantification {
+        if let Some(quant_dir) = output_quantification {
             // Write gene quantification
             let quantifier = Quantifier::new(transcript_annotator.unwrap());
-            quantifier.quantify(&header, alignments);
+            quantifier.quantify(&header, alignments, quant_dir);
         } else if let Some(mut writer) = fragment_writer {
             // Write fragments
             let mut fragment_generator = FragmentGenerator::default();

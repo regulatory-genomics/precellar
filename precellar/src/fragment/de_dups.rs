@@ -24,14 +24,12 @@ use itertools::Itertools;
 use noodles::sam::alignment::record::cigar::op::Kind;
 use noodles::sam::alignment::record::Flags;
 use noodles::sam::alignment::Record;
-use noodles::sam::{
-    alignment::record::data::field::{Tag, Value},
-    Header,
-};
+use noodles::sam::Header;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::hash::Hash;
 
+use crate::barcode::{get_barcode, get_umi};
 use crate::fragment::Fragment;
 
 // Library type    orientation   Vizualization according to first strand
@@ -340,26 +338,4 @@ where
             .or_insert(Fragment::from((ali, 1)));
     });
     result
-}
-
-fn get_barcode<R: Record>(rec: &R) -> Result<Option<String>> {
-    Ok(rec
-        .data()
-        .get(&Tag::CELL_BARCODE_ID)
-        .transpose()?
-        .and_then(|x| match x {
-            Value::String(barcode) => Some(barcode.to_string()),
-            _ => None,
-        }))
-}
-
-fn get_umi<R: Record>(rec: &R) -> Result<Option<String>> {
-    Ok(rec
-        .data()
-        .get(&Tag::UMI_ID)
-        .transpose()?
-        .and_then(|x| match x {
-            Value::String(umi) => Some(umi.to_string()),
-            _ => None,
-        }))
 }
