@@ -1,10 +1,12 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 
+use crate::transcript::annotate::AnnotationRegion;
+
 use super::quantification::GeneAlignment;
 
 type Gene = usize;
 
-pub fn count_unique_umi<I>(alignments: I) -> BTreeMap<Gene, usize>
+pub fn count_unique_umi<I>(alignments: I) -> (BTreeMap<Gene, usize>, BTreeMap<Gene, usize>)
 where
     I: IntoIterator<Item = GeneAlignment>,
 {
@@ -20,14 +22,19 @@ where
         uniq_counts.into_iter().map(|(gene, umis)| (gene, umis.len())).collect()
     }
 
-    let mut umigene_counts = HashMap::new();
+    let mut umigene_counts_exon = HashMap::new();
+    let mut umigene_counts_intron = HashMap::new();
     alignments.into_iter().for_each(|alignment| {
         let gene = alignment.idx;
         let umi = alignment.umi.unwrap().into_bytes();
-        *umigene_counts.entry((umi, gene)).or_insert(0) += 1u64;
+        match alignment.align_type {
+            AnnotationRegion::Exonic => *umigene_counts_exon.entry((umi, gene)).or_insert(0) += 1u64,
+            AnnotationRegion::Intronic => *umigene_counts_intron.entry((umi, gene)).or_insert(0) += 1u64,
+            _ => {},
+        }
     });
 
-    get_uniq_counts(umigene_counts)
+    (get_uniq_counts(umigene_counts_exon), get_uniq_counts(umigene_counts_intron))
 }
 
 /// Within each gene, correct Hamming-distance-one UMIs

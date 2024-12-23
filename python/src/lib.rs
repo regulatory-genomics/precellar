@@ -65,7 +65,7 @@ fn make_genome_index(fasta: PathBuf, genome_prefix: PathBuf) -> Result<()> {
 /// output_fragment: Path | None
 ///     File path to the output fragment file. If None, the fragment file will not be generated.
 /// output_quantification: Path | None
-///     File path to the directory to store the gene quantifications. If None, the gene quantification will not be generated.
+///     File path to the h5ad file to store the gene quantifications. If None, the gene quantification will not be generated.
 /// mito_dna: list[str]
 ///     List of mitochondrial DNA names.
 /// shift_left: int
@@ -151,8 +151,8 @@ fn align(
         .with_modality(modality)
         .with_barcode_correct_prob(0.9);
     let mut fragment_qc = FragmentQC::default();
-    mito_dna.into_iter().for_each(|x| {
-        processor.add_mito_dna(&x);
+    mito_dna.iter().for_each(|x| {
+        processor.add_mito_dna(x);
         fragment_qc.add_mito_dna(x);
     });
     let mut transcript_annotator = None;
@@ -200,8 +200,9 @@ fn align(
 
         if let Some(quant_dir) = output_quantification {
             // Write gene quantification
-            let quantifier = Quantifier::new(transcript_annotator.unwrap());
-            quantifier.quantify(&header, alignments, quant_dir);
+            let mut quantifier = Quantifier::new(transcript_annotator.unwrap());
+            mito_dna.iter().for_each(|x| quantifier.add_mito_dna(x));
+            quantifier.quantify(&header, alignments, quant_dir)?;
         } else if let Some(mut writer) = fragment_writer {
             // Write fragments
             let mut fragment_generator = FragmentGenerator::default();

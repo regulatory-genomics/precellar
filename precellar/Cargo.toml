@@ -5,6 +5,8 @@ edition = "2021"
 
 [dependencies]
 anyhow = "1.0"
+anndata = { git = "https://github.com/kaizhang/anndata-rs.git", rev = "0d27ac475634ed7703ab1a23e01e6a3031a28541"}
+anndata-hdf5 = { git = "https://github.com/kaizhang/anndata-rs.git", rev = "0d27ac475634ed7703ab1a23e01e6a3031a28541"}
 bed-utils = "0.6"
 bwa-mem2 = { git = "https://github.com/regulatory-genomics/bwa-mem2-rust.git", rev = "8de06bcc0a2145fd819232ffb2bf100fb795db30" }
 star-aligner = { git = "https://github.com/regulatory-genomics/star-aligner", rev = "4672820b6a2c49ef514f9160e08188928d45a874" }
@@ -13,8 +15,10 @@ itertools = "0.13"
 indexmap = "2.5"
 log = "0.4"
 lexical = "6.1"
+nalgebra-sparse = "0.10"
 noodles = { version = "0.85", features = ["core", "gtf", "fastq", "bam", "sam", "async"] }
 kdam = "0.5.2"
+polars = "0.45"
 rayon = "1.10"
 smallvec = "1.13"
 serde = "1.0"
