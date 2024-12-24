@@ -12,39 +12,7 @@ library_protocol: Custom
 library_kit: Custom
 sequence_protocol: Illumina
 sequence_kit: Custom
-sequence_spec:
-- !Read
-  read_id: R1
-  name: Read 1
-  modality: atac
-  primer_id: nextera_read1
-  min_len: 1
-  max_len: 98
-  strand: pos
-- !Read
-  read_id: I1
-  name: Index 1 (i7 index)
-  modality: atac
-  primer_id: nextera_read2
-  min_len: 8
-  max_len: 8
-  strand: pos
-- !Read
-  read_id: I2
-  name: Index 2 (i5 index)
-  modality: atac
-  primer_id: nextera_read1
-  min_len: 16
-  max_len: 16
-  strand: neg
-- !Read
-  read_id: R2
-  name: Read 2
-  modality: atac
-  primer_id: nextera_read2
-  min_len: 1
-  max_len: 98
-  strand: neg
+sequence_spec: []
 library_spec:
 - !Region
   region_id: atac
