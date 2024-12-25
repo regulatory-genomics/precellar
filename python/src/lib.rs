@@ -391,7 +391,7 @@ fn make_fastq(
         None
     };
 
-    for (i, record) in fq_reader.enumerate() {
+    for (i, record) in fq_reader.flatten().enumerate() {
         if i % 1000000 == 0 {
             py.check_signals().unwrap();
         }
