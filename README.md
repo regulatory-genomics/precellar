@@ -24,4 +24,45 @@ pip install precellar
 pip install 'git+https://github.com/regulatory-genomics/precellar.git#egg=precellar&subdirectory=python'
 ```
 
+## Examples
+
+### 10X scATAC-seq
+
+```python
+import precellar
+
+assay = precellar.Assay('https://raw.githubusercontent.com/regulatory-genomics/precellar/refs/heads/main/seqspec_templates/10x_atac.yaml')
+assay.add_illumina_reads('atac')
+assay.update_read('atac-R1', fastq='R1.fastq.gz')
+assay.update_read('atac-I2', fastq='R2.fastq.gz')
+assay.update_read('atac-R2', fastq='R3.fastq.gz')
+qc = precellar.align(
+    assay,
+    "/data/Public/BWA_MEM2_index/GRCh38",
+    modality="atac",
+    output_fragment='fragments.tsv.zst',
+    num_threads=32,
+)
+print(qc)
+```
+
+### 10X scRNA-seq
+
+```python
+import precellar
+
+assay = precellar.Assay('https://raw.githubusercontent.com/regulatory-genomics/precellar/refs/heads/main/seqspec_templates/10x_rna_v3.yaml')
+assay.add_illumina_reads('rna')
+assay.update_read('rna-R1', fastq='R1.fastq.gz')
+assay.update_read('rna-R2', fastq='R2.fastq.gz')
+qc = precellar.align(
+    assay,
+    "/data/STAR_reference/star_2.7.1",
+    modality="rna",
+    output_quantification="gene_matrix.h5ad",
+    num_threads=32,
+)
+print(qc)
+```
+
 For more information, please refer to the documentation: https://lab.kaizhang.org/precellar/.
