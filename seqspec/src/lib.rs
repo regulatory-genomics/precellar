@@ -80,6 +80,8 @@ impl Assay {
         }
     }
 
+    /// Unnormalize all paths in the sequence spec.
+    /// This is used to bring absolute paths to relative paths.
     pub fn unnormalize_all_paths<P: AsRef<Path>>(&mut self, base_dir: P) {
         self.sequence_spec.values_mut().for_each(|read| {
             if let Some(files) = &mut read.files {
@@ -509,7 +511,7 @@ impl Assay {
                         let result = validator.validate(record.sequence());
                         match result {
                             ValidateResult::TooLong(_) | ValidateResult::TooShort(_) => {
-                                bail!("{}", result);
+                                bail!("{}: {}", read.read_id, result);
                             }
                             _ => {}
                         }

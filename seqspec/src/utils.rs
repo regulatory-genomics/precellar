@@ -1,12 +1,15 @@
 use anyhow::{anyhow, bail, Context, Result};
+use async_compression::tokio::bufread::GzipDecoder;
+use async_compression::tokio::bufread::ZstdDecoder;
 use futures::StreamExt;
 use std::{
-    fs::File, io::{BufWriter, Write}, path::{Path, PathBuf}, str::FromStr
+    fs::File,
+    io::{BufWriter, Write},
+    path::{Path, PathBuf},
+    str::FromStr,
 };
 use tokio::io::AsyncRead;
 use tokio_util::io::StreamReader;
-use async_compression::tokio::bufread::GzipDecoder;
-use async_compression::tokio::bufread::ZstdDecoder;
 use url::Url;
 
 pub fn create_file<P: AsRef<Path>>(
@@ -51,7 +54,10 @@ pub fn open_file<P: AsRef<Path>>(file: P) -> Result<Box<dyn std::io::Read>> {
 }
 
 /// Fetch content from a URL or a file, possibly compressed. Supports gzip and zstd.
-pub async fn open_file_async(src: &str, compression: Option<Compression>) -> Result<Box<dyn AsyncRead + Send + Unpin>> {
+pub async fn open_file_async(
+    src: &str,
+    compression: Option<Compression>,
+) -> Result<Box<dyn AsyncRead + Send + Unpin>> {
     if is_url(src) {
         return Ok(Box::new(open_url_async(Url::parse(src).unwrap()).await?));
     }
@@ -174,8 +180,14 @@ pub fn unnormalize_path<P1: AsRef<Path>, P2: AsRef<Path>>(
     work_dir: P1,
     path: P2,
 ) -> Result<PathBuf> {
-    let work_dir = work_dir.as_ref().canonicalize()?;
-    let path = path.as_ref().canonicalize()?;
+    let work_dir = work_dir
+        .as_ref()
+        .canonicalize()
+        .with_context(|| format!("failed to make absolute path: {:?}", work_dir.as_ref()))?;
+    let path = path
+        .as_ref()
+        .canonicalize()
+        .with_context(|| format!("failed to make absolute path: {:?}", path.as_ref()))?;
     Ok(relative_path(work_dir.as_path(), path.as_path()))
 }
 

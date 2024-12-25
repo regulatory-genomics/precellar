@@ -43,9 +43,9 @@ static GLOBAL: Jemalloc = Jemalloc;
 /// genome_prefix: Path
 ///   File path to the genome index.
 #[pyfunction]
-fn make_genome_index(fasta: PathBuf, genome_prefix: PathBuf) -> Result<()> {
-    //FMIndex::new(fasta, genome_prefix).unwrap();
-    todo!()
+fn make_bwa_index(fasta: PathBuf, genome_prefix: PathBuf) -> Result<()> {
+    bwa_mem2::FMIndex::new(fasta, genome_prefix)?;
+    Ok(())
 }
 
 /// Align fastq reads to the reference genome and generate unique fragments.
@@ -427,7 +427,7 @@ fn precellar(m: &Bound<'_, PyModule>) -> PyResult<()> {
 
     m.add_class::<pyseqspec::Assay>().unwrap();
 
-    m.add_function(wrap_pyfunction!(make_genome_index, m)?)?;
+    m.add_function(wrap_pyfunction!(make_bwa_index, m)?)?;
     m.add_function(wrap_pyfunction!(align, m)?)?;
     //m.add_function(wrap_pyfunction!(make_fragment, m)?)?;
     m.add_function(wrap_pyfunction!(make_fastq, m)?)?;

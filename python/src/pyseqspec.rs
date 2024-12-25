@@ -40,6 +40,36 @@ impl Assay {
         Ok(Assay(assay))
     }
 
+    #[getter]
+    fn get_id(&self) -> &str {
+        &self.0.assay_id
+    }
+
+    #[setter]
+    fn set_id(&mut self, assay_id: &str) {
+        self.0.assay_id = assay_id.to_string();
+    }
+
+    #[getter]
+    fn get_name(&self) -> &str {
+        &self.0.name
+    }
+
+    #[setter]
+    fn set_name(&mut self, name: &str) {
+        self.0.name = name.to_string();
+    }
+
+    #[getter]
+    fn get_description(&self) -> &str {
+        &self.0.description
+    }
+
+    #[setter]
+    fn set_description(&mut self, description: &str) {
+        self.0.description = description.to_string();
+    }
+
     /// Filename of the seqspec file.
     ///
     /// Returns
