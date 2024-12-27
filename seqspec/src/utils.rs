@@ -2,6 +2,8 @@ use anyhow::{anyhow, bail, Context, Result};
 use async_compression::tokio::bufread::GzipDecoder;
 use async_compression::tokio::bufread::ZstdDecoder;
 use futures::StreamExt;
+use md5::{Md5, Digest};
+use std::io::Read;
 use std::{
     fs::File,
     io::{BufWriter, Write},
@@ -136,6 +138,21 @@ impl FromStr for Compression {
     }
 }
 
+impl TryFrom<PathBuf> for Compression {
+    type Error = anyhow::Error;
+
+    fn try_from(path: PathBuf) -> Result<Self> {
+        let ext = path.extension().unwrap_or(std::ffi::OsStr::new(""));
+        if ext == "gz" {
+            Ok(Compression::Gzip)
+        } else if ext == "zst" {
+            Ok(Compression::Zstd)
+        } else {
+            Err(anyhow!("unsupported compression: {:?}", path))
+        }
+    }
+}
+
 impl TryFrom<&PathBuf> for Compression {
     type Error = anyhow::Error;
 
@@ -151,6 +168,7 @@ impl TryFrom<&PathBuf> for Compression {
     }
 }
 
+/// Return reverse complement of a DNA sequence.
 pub fn rev_compl(seq: &[u8]) -> Vec<u8> {
     seq.iter()
         .rev()
@@ -223,6 +241,29 @@ fn relative_path(from: &Path, to: &Path) -> PathBuf {
     }
 
     result
+}
+
+pub fn md5sum<P: AsRef<Path>>(path: P) -> Result<String> {
+    // Open the file and create a buffered reader
+    let file = File::open(path)?;
+    let mut reader = std::io::BufReader::new(file);
+
+    let mut hasher = Md5::new();
+
+    // Buffer for reading chunks
+    let mut buffer = [0u8; 64 * 65535];
+
+    // Read the file in a loop, updating the hasher
+    loop {
+        let bytes_read = reader.read(&mut buffer)?;
+        if bytes_read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..bytes_read]);
+    }
+
+    let digest = hasher.finalize();
+    Ok(base16ct::lower::encode_string(&digest))
 }
 
 #[cfg(test)]

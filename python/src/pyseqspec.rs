@@ -80,6 +80,16 @@ impl Assay {
         self.0.file.clone()
     }
 
+    /// Return all modality names in the Assay object.
+    /// 
+    /// Returns
+    /// -------
+    /// list[str]
+    ///  A list of all modality names in the Assay object.
+    pub fn modalities(&self) -> Vec<String> {
+        self.0.modalities.iter().map(|x| x.to_string()).collect()
+    }
+
     /// Add default Illumina reads to the Assay object.
     /// 
     /// This method adds default Illumina reads to the Assay object. 
@@ -122,9 +132,11 @@ impl Assay {
     ///     The minimum length of the read. If not provided, the minimum length is inferred from the fastq file.
     /// max_len: int | None
     ///     The maximum length of the read. If not provided, the maximum length is inferred from the fastq file.
+    /// compute_md5: bool
+    ///     Whether to compute the md5 hash of the fastq file.
     #[pyo3(
-        signature = (read_id, *, modality=None, primer_id=None, is_reverse=None, fastq=None, min_len=None, max_len=None),
-        text_signature = "($self, read_id, *, modality=None, primer_id=None, is_reverse=None, fastq=None, min_len=None, max_len=None)",
+        signature = (read_id, *, modality=None, primer_id=None, is_reverse=None, fastq=None, min_len=None, max_len=None, compute_md5=false),
+        text_signature = "($self, read_id, *, modality=None, primer_id=None, is_reverse=None, fastq=None, min_len=None, max_len=None, compute_md5=False)",
     )]
     fn update_read(
         &mut self,
@@ -135,6 +147,7 @@ impl Assay {
         fastq: Option<Bound<'_, PyAny>>,
         min_len: Option<usize>,
         max_len: Option<usize>,
+        compute_md5: bool,
     ) -> Result<()> {
         let fastqs = fastq.map(|f| if f.is_instance_of::<pyo3::types::PyList>() {
             f.extract::<Vec<String>>().unwrap()
@@ -146,6 +159,7 @@ impl Assay {
         self.0.update_read(
             read_id, modality, primer_id, is_reverse,
             fastqs.as_ref().map(|x| x.as_slice()), min_len, max_len,
+            compute_md5,
         )
     }
 

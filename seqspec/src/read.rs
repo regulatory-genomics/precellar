@@ -392,9 +392,14 @@ pub struct File {
 }
 
 impl File {
-    pub fn from_fastq<P: AsRef<Path>>(path: P) -> Result<Self> {
+    pub fn from_fastq<P: AsRef<Path>>(path: P, compute_md5: bool) -> Result<Self> {
         let file = std::fs::File::open(&path)?;
         let filename = path.as_ref().file_name().unwrap().to_str().unwrap();
+        let md5 = if compute_md5 {
+            crate::utils::md5sum(&path)?
+        } else {
+            "0".to_string()
+        };
         Ok(File {
             file_id: filename.to_string(),
             filename: filename.to_string(),
@@ -402,7 +407,7 @@ impl File {
             filesize: file.metadata()?.len(),
             url: path.as_ref().to_str().unwrap().to_string(),
             urltype: UrlType::Local,
-            md5: "0".to_string(),
+            md5,
         })
     }
 

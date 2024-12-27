@@ -5,12 +5,14 @@ edition = "2021"
 
 [dependencies]
 anyhow = "1.0"
+base16ct = { version = "0.2", features = ["alloc"] }
 cached-path = "0.6"
 flate2 = "1.0"
 indexmap = "2.5"
 log = "0.4"
 hamming = "0.1"
 home = "0.5"
+md-5 = "0.10"
 noodles = { version = "0.85", features = ["core", "fastq", "async"] }
 url = "2.5"
 reqwest = { version = "0.12", features = ["stream", "blocking"] }

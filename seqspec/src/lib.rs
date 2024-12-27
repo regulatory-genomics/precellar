@@ -185,6 +185,7 @@ impl Assay {
                         None,
                         Some(read_len),
                         Some(read_len),
+                        false,
                     )?;
                     if forward_strand_workflow {
                         let acc_len = get_length(acc.as_slice(), false);
@@ -197,6 +198,7 @@ impl Assay {
                                 None,
                                 Some(acc_len),
                                 Some(acc_len),
+                                false,
                             )?;
                         }
                     } else {
@@ -210,6 +212,7 @@ impl Assay {
                                 None,
                                 Some(acc_len),
                                 Some(acc_len),
+                                false,
                             )?;
                         }
                     }
@@ -225,6 +228,7 @@ impl Assay {
                         None,
                         Some(read_len),
                         Some(read_len),
+                        false,
                     )?;
                     if acc_len > 0 {
                         self.update_read::<PathBuf>(
@@ -235,6 +239,7 @@ impl Assay {
                             None,
                             Some(acc_len),
                             Some(acc_len),
+                            false,
                         )?;
                     }
                 }
@@ -254,6 +259,7 @@ impl Assay {
         fastqs: Option<&[P]>,
         min_len: Option<usize>,
         max_len: Option<usize>,
+        compute_md5: bool,
     ) -> Result<()> {
         let mut read_buffer = if let Some(r) = self.sequence_spec.get(read_id) {
             r.clone()
@@ -289,7 +295,7 @@ impl Assay {
             read_buffer.files = Some(
                 fastq
                     .iter()
-                    .map(File::from_fastq)
+                    .map(|f| File::from_fastq(f, compute_md5))
                     .collect::<Result<Vec<File>>>()?,
             );
         }

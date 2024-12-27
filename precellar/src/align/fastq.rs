@@ -303,19 +303,23 @@ impl AnnotatedFastqReader {
         while accumulated_length < self.chunk_size {
             let mut max_read = 0;
             let mut min_read = usize::MAX;
-            let records = self.readers.iter_mut().flat_map(|reader| {
-                let n = reader
-                    .read_record(&mut self.buffer)
-                    .expect("error reading fastq record");
-                min_read = min_read.min(n);
-                max_read = max_read.max(n);
-                if n > 0 {
-                    accumulated_length += self.buffer.sequence().len();
-                    Some(self.buffer.clone())
-                } else {
-                    None
-                }
-            }).collect();
+            let records = self
+                .readers
+                .iter_mut()
+                .flat_map(|reader| {
+                    let n = reader
+                        .read_record(&mut self.buffer)
+                        .expect("error reading fastq record");
+                    min_read = min_read.min(n);
+                    max_read = max_read.max(n);
+                    if n > 0 {
+                        accumulated_length += self.buffer.sequence().len();
+                        Some(self.buffer.clone())
+                    } else {
+                        None
+                    }
+                })
+                .collect();
             if max_read == 0 {
                 break;
             } else if min_read == 0 {
@@ -658,16 +662,18 @@ mod tests {
 
     #[test]
     fn test_seqspec_io() {
-        let spec = Assay::from_path("tests/data/spec.yaml").unwrap();
+        let bwa_index = "/data/Public/BWA_MEM2_index/GRCh38";
+        let seqspec = "/data/kzhang/dev/PreCellar/test/seqspec.yaml";
+        let spec = Assay::from_path(seqspec).unwrap();
         let mut aligner = BurrowsWheelerAligner::new(
-            FMIndex::read("tests/data/hg38").unwrap(),
+            FMIndex::read(bwa_index).unwrap(),
             AlignerOpts::default(),
             PairedEndStats::default(),
         );
         let mut processor = FastqProcessor::new(spec).with_modality(Modality::ATAC);
 
         processor
-            .gen_barcoded_alignments(&mut aligner, 8, 50000)
+            .gen_barcoded_alignments(&mut aligner, 4, 40000)
             .take(6)
             .for_each(|x| {
                 println!("{:?}", x);
