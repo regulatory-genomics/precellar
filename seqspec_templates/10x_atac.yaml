@@ -95,15 +95,7 @@ library_spec:
     sequence: NNNNNNNN
     min_len: 8
     max_len: 8
-    onlist: !Onlist
-      file_id: index7_onlist.txt
-      filename: index7_onlist.txt
-      filetype: ''
-      filesize: 0
-      url: ''
-      urltype: local
-      md5: null
-      location: local
+    onlist: null
     regions: null
     parent_id: atac
   - !Region

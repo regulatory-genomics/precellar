@@ -6,6 +6,7 @@ use crate::qc::{AlignQC, Metrics};
 use anyhow::{bail, Result};
 use bstr::BString;
 use indexmap::IndexMap;
+use itertools::Itertools;
 use kdam::{tqdm, BarExt};
 use log::info;
 use noodles::{bam, fastq};
@@ -295,6 +296,7 @@ impl AnnotatedFastqReader {
         has_read1 && has_read2
     }
 
+    /// Read a chunk of records from the fastq files.
     fn read_chunk(&mut self) -> usize {
         self.chunk.clear();
 
@@ -303,7 +305,7 @@ impl AnnotatedFastqReader {
         while accumulated_length < self.chunk_size {
             let mut max_read = 0;
             let mut min_read = usize::MAX;
-            let records = self
+            let records: SmallVec<[_; 4]> = self
                 .readers
                 .iter_mut()
                 .flat_map(|reader| {
@@ -325,6 +327,7 @@ impl AnnotatedFastqReader {
             } else if min_read == 0 {
                 panic!("Unequal number of reads in the chunk");
             } else {
+                assert!(records.iter().map(|r| r.name()).all_equal(), "read names mismatch");
                 self.chunk.push(records);
             }
         }

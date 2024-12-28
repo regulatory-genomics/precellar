@@ -12,6 +12,7 @@ crate-type = ["cdylib"]
 anyhow = "1.0"
 bstr = "1.0"
 bwa-mem2 = { git = "https://github.com/regulatory-genomics/bwa-mem2-rust.git", rev = "8de06bcc0a2145fd819232ffb2bf100fb795db30" }
+glob = "0.3"
 itertools = "0.13"
 noodles = { version = "0.85", features = ["core", "fastq", "bam", "sam", "bgzf"] }
 seqspec = { workspace = true }

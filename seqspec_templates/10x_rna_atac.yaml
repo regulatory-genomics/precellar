@@ -65,7 +65,7 @@ library_spec:
       url: https://teichlab.github.io/scg_lib_structs/data/10X-Genomics/gex_737K-arc-v1.txt.gz
       urltype: https
       md5: 0
-      location: local
+      location: remote
     regions: null
   - !Region
     region_id: rna-umi

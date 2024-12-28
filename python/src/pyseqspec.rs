@@ -1,12 +1,12 @@
-use std::{collections::HashMap, path::PathBuf, str::FromStr};
-
+use anyhow::Result;
+use glob::glob;
 use pyo3::prelude::*;
 use seqspec::{Modality, Read, Region};
-use anyhow::Result;
+use std::{collections::HashMap, path::PathBuf, str::FromStr};
 use termtree::Tree;
 
 /** A Assay object.
-    
+
     A Assay object is used to annotate sequencing libraries produced by genomics assays.
     Genomic library structure depends on both the assay and sequencer (and kits) used to
     generate and bind the assay-specific construct to the sequencing adapters to generate
@@ -30,7 +30,7 @@ pub struct Assay(pub(crate) seqspec::Assay);
 #[pymethods]
 impl Assay {
     #[new]
-    #[pyo3(signature = (path))] 
+    #[pyo3(signature = (path))]
     pub fn new(path: &str) -> Result<Self> {
         let assay = if url::Url::parse(path).is_ok() {
             seqspec::Assay::from_url(path)?
@@ -81,7 +81,7 @@ impl Assay {
     }
 
     /// Return all modality names in the Assay object.
-    /// 
+    ///
     /// Returns
     /// -------
     /// list[str]
@@ -91,9 +91,9 @@ impl Assay {
     }
 
     /// Add default Illumina reads to the Assay object.
-    /// 
-    /// This method adds default Illumina reads to the Assay object. 
-    /// 
+    ///
+    /// This method adds default Illumina reads to the Assay object.
+    ///
     /// Parameters
     /// ----------
     /// modality: str
@@ -106,13 +106,19 @@ impl Assay {
         signature = (modality, *, length=150, forward_strand_workflow=false),
         text_signature = "($self, modality, *, length=150, forward_strand_workflow=False)",
     )]
-    pub fn add_illumina_reads(&mut self, modality: &str, length: usize, forward_strand_workflow: bool) -> Result<()> {
+    pub fn add_illumina_reads(
+        &mut self,
+        modality: &str,
+        length: usize,
+        forward_strand_workflow: bool,
+    ) -> Result<()> {
         let modality = Modality::from_str(modality)?;
-        self.0.add_illumina_reads(modality, length, forward_strand_workflow)
+        self.0
+            .add_illumina_reads(modality, length, forward_strand_workflow)
     }
 
     /// Update read information in the Assay object.
-    /// 
+    ///
     /// This method updates the read information in the Assay object.
     /// If the read does not exist, it will be created.
     ///
@@ -127,7 +133,8 @@ impl Assay {
     /// is_reverse: bool | None
     ///     Whether the read is reverse.
     /// fastq: Path | list[Path] | None
-    ///     The path to the fastq file containing the reads.
+    ///     The path to the fastq file containing the reads. It can be:
+    ///     (1) a single path, or (2) a list of paths, or (3) a glob pattern, e.g., `*.fastq`.
     /// min_len: int | None
     ///     The minimum length of the read. If not provided, the minimum length is inferred from the fastq file.
     /// max_len: int | None
@@ -149,16 +156,24 @@ impl Assay {
         max_len: Option<usize>,
         compute_md5: bool,
     ) -> Result<()> {
-        let fastqs = fastq.map(|f| if f.is_instance_of::<pyo3::types::PyList>() {
-            f.extract::<Vec<String>>().unwrap()
-        } else {
-            vec![f.extract::<String>().unwrap()]
+        let fastqs = fastq.map(|f| {
+            if f.is_instance_of::<pyo3::types::PyList>() {
+                f.extract::<Vec<PathBuf>>().unwrap()
+            } else {
+                let path = f.extract::<&str>().unwrap();
+                glob(path).expect("Failed to read glob pattern").map(Result::unwrap).collect::<Vec<_>>()
+            }
         });
         let modality = modality.map(|x| Modality::from_str(x)).transpose()?;
 
         self.0.update_read(
-            read_id, modality, primer_id, is_reverse,
-            fastqs.as_ref().map(|x| x.as_slice()), min_len, max_len,
+            read_id,
+            modality,
+            primer_id,
+            is_reverse,
+            fastqs.as_ref().map(|x| x.as_slice()),
+            min_len,
+            max_len,
             compute_md5,
         )
     }
@@ -193,16 +208,16 @@ impl Assay {
     */
 
     /// Convert the Assay object to a yaml string.
-    /// 
+    ///
     /// This method converts the Assay object to a yaml string. If you want to save the
     /// Assay object to a yaml file, use the `.save()` method as it will convert all paths
     /// to relative paths so that the files can be moved without breaking the Assay object.
-    /// 
+    ///
     /// Returns
     /// -------
     /// str
     ///   The yaml string representation of the Assay object.
-    /// 
+    ///
     /// See Also
     /// --------
     /// save
@@ -212,10 +227,10 @@ impl Assay {
     }
 
     /// Save the Assay object to a yaml file.
-    /// 
+    ///
     /// This method saves the Assay object to a yaml file. All paths in the Assay object
     /// will be converted to relative paths with respect to the location of the output file.
-    /// 
+    ///
     /// Parameters
     /// ----------
     /// out: Path
@@ -232,11 +247,17 @@ impl Assay {
         let assay = &self.0;
         let mut read_list = HashMap::new();
         for read in assay.sequence_spec.values() {
-            read_list.entry(read.primer_id.clone()).or_insert(Vec::new()).push(read);
+            read_list
+                .entry(read.primer_id.clone())
+                .or_insert(Vec::new())
+                .push(read);
         }
 
         let tree = Tree::new("".to_string()).with_leaves(
-            assay.library_spec.modalities().map(|region| build_tree(&region.read().unwrap(), &read_list))
+            assay
+                .library_spec
+                .modalities()
+                .map(|region| build_tree(&region.read().unwrap(), &read_list)),
         );
         format!("{}", tree)
     }
@@ -254,13 +275,21 @@ fn build_tree(region: &Region, read_list: &HashMap<String, Vec<&Read>>) -> Tree<
         format!("{}-{}", region.min_len, region.max_len)
     };
     let label = if let Some(reads) = read_list.get(id) {
-        let s = reads.iter().map(|r| format_read(r)).collect::<Vec<String>>().join(", ");
+        let s = reads
+            .iter()
+            .map(|r| format_read(r))
+            .collect::<Vec<String>>()
+            .join(", ");
         format!("{}({}) [{}]", id, len, s)
     } else {
         format!("{}({})", id, len)
     };
-    Tree::new(label)
-        .with_leaves(region.subregions.iter().map(|child| build_tree(&child.read().unwrap(), read_list)))
+    Tree::new(label).with_leaves(
+        region
+            .subregions
+            .iter()
+            .map(|child| build_tree(&child.read().unwrap(), read_list)),
+    )
 }
 
 fn format_read(read: &Read) -> String {
@@ -270,6 +299,10 @@ fn format_read(read: &Read) -> String {
         format!("{}-{}", read.min_len, read.max_len)
     };
     let orientation = if read.is_reverse() { "↑" } else { "↓" };
-    let has_files = if read.files.as_ref().map(|x| !x.is_empty()).unwrap_or(false) { "✓" } else { "✗" };
+    let has_files = if read.files.as_ref().map(|x| !x.is_empty()).unwrap_or(false) {
+        "✓"
+    } else {
+        "✗"
+    };
     format!("{}{}({}){}", orientation, read.read_id, len, has_files)
 }

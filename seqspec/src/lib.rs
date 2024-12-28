@@ -249,7 +249,6 @@ impl Assay {
     }
 
     /// Update read information. If the read does not exist, it will be created.
-    #[allow(clippy::too_many_arguments)]
     pub fn update_read<P: AsRef<Path>>(
         &mut self,
         read_id: &str,
