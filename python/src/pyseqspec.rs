@@ -2,7 +2,7 @@ use anyhow::Result;
 use glob::glob;
 use pyo3::prelude::*;
 use seqspec::{Modality, Read, Region};
-use std::{collections::HashMap, path::PathBuf, str::FromStr};
+use std::{collections::HashMap, path::{Path, PathBuf}, str::FromStr};
 use termtree::Tree;
 
 /** A Assay object.
@@ -238,7 +238,12 @@ impl Assay {
     #[pyo3(text_signature = "($self, out)")]
     fn save(&self, out: PathBuf) -> Result<()> {
         let mut assay = self.0.clone();
-        assay.unnormalize_all_paths(out.parent().unwrap());
+        let parent = out.parent().unwrap();
+        if parent == Path::new("") {
+            assay.unnormalize_all_paths("./");
+        } else {
+            assay.unnormalize_all_paths(parent);
+        }
         std::fs::write(&out, serde_yaml::to_string(&assay)?)?;
         Ok(())
     }
