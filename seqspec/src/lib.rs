@@ -5,12 +5,12 @@ pub mod utils;
 use log::warn;
 use noodles::fastq;
 use read::ReadValidator;
-pub use read::{FastqReader, SegmentInfo, SegmentInfoElem, File, Read, Strand, UrlType};
+pub use read::{FastqReader, File, Read, SegmentInfo, SegmentInfoElem, Strand, UrlType};
 use read::{ReadSpan, ValidateResult};
 use region::LibSpec;
 pub use region::{Onlist, Region, RegionId, RegionType, SequenceType};
 
-use anyhow::{anyhow, bail, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_yaml::{self, Value};
 use std::path::Path;
@@ -44,7 +44,8 @@ pub struct Assay {
 
 impl Assay {
     pub fn from_path<P: AsRef<Path>>(path: P) -> Result<Self> {
-        let yaml_str = fs::read_to_string(&path)?;
+        let yaml_str = fs::read_to_string(&path)
+            .with_context(|| format!("Failed to read file: {:?}", path.as_ref()))?;
         let mut assay: Assay = serde_yaml::from_str(&yaml_str)?;
         assay.file = Some(path.as_ref().to_path_buf());
         assay.normalize_all_paths();
@@ -408,14 +409,12 @@ impl Assay {
             .iter()
             .map(|(read, _)| {
                 let output_valid = dir.as_ref().join(format!("{}.fq.zst", read.read_id));
-                let output_valid =
-                    create_file(output_valid, Some(Compression::Zstd), Some(9), 8)?;
+                let output_valid = create_file(output_valid, Some(Compression::Zstd), Some(9), 8)?;
                 let output_valid = fastq::io::Writer::new(output_valid);
                 let output_other = dir
                     .as_ref()
                     .join(format!("Invalid_{}.fq.zst", read.read_id));
-                let output_other =
-                    create_file(output_other, Some(Compression::Zstd), Some(9), 8)?;
+                let output_other = create_file(output_other, Some(Compression::Zstd), Some(9), 8)?;
                 let output_other = fastq::io::Writer::new(output_other);
 
                 anyhow::Ok((output_valid, output_other))

@@ -1,7 +1,7 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use glob::glob;
 use pyo3::prelude::*;
-use seqspec::{Modality, Read, Region};
+use seqspec::{Modality, Read, Region, SequenceKit, SequenceProtocol};
 use std::{collections::HashMap, path::{Path, PathBuf}, str::FromStr};
 use termtree::Tree;
 
@@ -16,7 +16,7 @@ use termtree::Tree;
 
     Parameters
     ----------
-    path
+    path: Path | str
         The local path or url to the seqspec file.
 
     See Also
@@ -31,15 +31,21 @@ pub struct Assay(pub(crate) seqspec::Assay);
 impl Assay {
     #[new]
     #[pyo3(signature = (path))]
-    pub fn new(path: &str) -> Result<Self> {
-        let assay = if url::Url::parse(path).is_ok() {
-            seqspec::Assay::from_url(path)?
-        } else {
+    pub fn new(path: Bound<'_, PyAny>) -> Result<Self> {
+        let assay = if let Ok(path) = path.extract::<PathBuf>() {
             seqspec::Assay::from_path(path)?
+        } else {
+            let path = path.extract::<&str>()?;
+            if url::Url::parse(path).is_ok() {
+                seqspec::Assay::from_url(path)?
+            } else {
+                seqspec::Assay::from_path(path)?
+            }
         };
         Ok(Assay(assay))
     }
 
+    /// The assay_id of the Assay object.
     #[getter]
     fn get_id(&self) -> &str {
         &self.0.assay_id
@@ -50,6 +56,7 @@ impl Assay {
         self.0.assay_id = assay_id.to_string();
     }
 
+    /// Name of the Assay object.
     #[getter]
     fn get_name(&self) -> &str {
         &self.0.name
@@ -60,6 +67,7 @@ impl Assay {
         self.0.name = name.to_string();
     }
 
+    /// Description of the Assay object.
     #[getter]
     fn get_description(&self) -> &str {
         &self.0.description
@@ -68,6 +76,45 @@ impl Assay {
     #[setter]
     fn set_description(&mut self, description: &str) {
         self.0.description = description.to_string();
+    }
+
+    /// The doi of the Assay object.
+    #[getter]
+    fn get_doi(&self) -> &str {
+        &self.0.doi
+    }
+
+    #[setter]
+    fn set_doi(&mut self, doi: &str) {
+        self.0.doi = doi.to_string();
+    }
+
+    /// The sequence protocol of the Assay object.
+    #[getter]
+    fn get_sequence_protocol(&self) -> String {
+        match &self.0.sequence_protocol {
+            SequenceProtocol::Standard(x) => x.clone(),
+            SequenceProtocol::Custom(x) => format!("custom: {:?}", x),
+        }
+    }
+
+    #[setter]
+    fn set_sequence_protocol(&mut self, sequence_protocol: &str) {
+        self.0.sequence_protocol = SequenceProtocol::Standard(sequence_protocol.to_string());
+    }
+
+    /// The sequence kit of the Assay object.
+    #[getter]
+    fn get_sequence_kit(&self) -> String {
+        match &self.0.sequence_kit {
+            SequenceKit::Standard(x) => x.clone(),
+            SequenceKit::Custom(x) => format!("custom: {:?}", x),
+        }
+    }
+
+    #[setter]
+    fn set_sequence_kit(&mut self, sequence_kit: &str) {
+        self.0.sequence_kit = SequenceKit::Standard(sequence_kit.to_string());
     }
 
     /// Filename of the seqspec file.
