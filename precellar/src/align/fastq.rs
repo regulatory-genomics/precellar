@@ -109,22 +109,18 @@ impl FastqProcessor {
         fq_reader.map(move |data| {
             let align_qc = self.align_qc.get_mut(&modality).unwrap();
             let results: Vec<_> = aligner.align_reads(num_threads, data);
-            results
-                .iter()
-                .for_each(|ali| {
-                    match ali {
-                        (Some(ali1), Some(ali2)) => {
-                            align_qc.add_pair(&header, ali1, ali2).unwrap();
-                        },
-                        (Some(ali1), None) => {
-                            align_qc.add_read1(&header, ali1).unwrap();
-                        },
-                        (None, Some(ali2)) => {
-                            align_qc.add_read2(&header, ali2).unwrap();
-                        },
-                        _ => {}
-                    }
-                });
+            results.iter().for_each(|ali| match ali {
+                (Some(ali1), Some(ali2)) => {
+                    align_qc.add_pair(&header, ali1, ali2).unwrap();
+                }
+                (Some(ali1), None) => {
+                    align_qc.add_read1(&header, ali1).unwrap();
+                }
+                (None, Some(ali2)) => {
+                    align_qc.add_read2(&header, ali2).unwrap();
+                }
+                _ => {}
+            });
             progress_bar.update(results.len()).unwrap();
             results
         })
@@ -170,7 +166,7 @@ impl FastqProcessor {
 
     fn count_barcodes(&mut self) -> Result<IndexMap<RegionId, Whitelist>> {
         let modality = self.modality();
-        let mut whitelists = self.get_whitelists()?;
+        let mut whitelists = self.get_whitelists();
 
         fn count(
             read: &Read,
@@ -215,28 +211,27 @@ impl FastqProcessor {
         Ok(whitelists)
     }
 
-    fn get_whitelists(&self) -> Result<IndexMap<RegionId, Whitelist>> {
+    fn get_whitelists(&self) -> IndexMap<RegionId, Whitelist> {
         let regions = self
             .assay
             .library_spec
             .get_modality(&self.modality())
             .unwrap()
             .read()
-            .map_err(|_| anyhow::anyhow!("Cannot obtain lock"))?;
+            .unwrap();
         regions
             .subregions
             .iter()
             .filter_map(|r| {
                 let r = r.read().unwrap();
                 if r.region_type.is_barcode() {
-                    if let Some(onlist) = r.onlist.as_ref() {
-                        let list = onlist
-                            .read()
-                            .map(|list| (r.region_id.to_string(), Whitelist::new(list)));
-                        Some(list)
+                    let id = r.region_id.to_string();
+                    let list = if let Some(onlist) = r.onlist.as_ref() {
+                        Whitelist::new(onlist.read().unwrap())
                     } else {
-                        None
-                    }
+                        Whitelist::empty()
+                    };
+                    Some((id, list))
                 } else {
                     None
                 }
@@ -340,7 +335,10 @@ impl AnnotatedFastqReader {
             } else if min_read == 0 {
                 panic!("Unequal number of reads in the chunk");
             } else {
-                assert!(records.iter().map(|r| r.name()).all_equal(), "read names mismatch");
+                assert!(
+                    records.iter().map(|r| r.name()).all_equal(),
+                    "read names mismatch"
+                );
                 self.chunk.push(records);
             }
         }
