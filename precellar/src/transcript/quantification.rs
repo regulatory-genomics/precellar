@@ -64,7 +64,7 @@ impl Quantifier {
 
     pub fn quantify<'a, I, P>(&'a self, header: &'a Header, records: I, output: P) -> Result<()>
     where
-        I: Iterator<Item = Vec<(MultiMapR, Option<MultiMapR>)>> + 'a,
+        I: Iterator<Item = Vec<(Option<MultiMapR>, Option<MultiMapR>)>> + 'a,
         P: AsRef<std::path::Path>,
     {
         let adata: AnnData<H5> = AnnData::new(output)?;
@@ -142,15 +142,22 @@ impl Quantifier {
     fn make_gene_alignment(
         &self,
         header: &Header,
-        rec1: MultiMapR,
+        rec1: Option<MultiMapR>,
         rec2: Option<MultiMapR>,
     ) -> Option<(String, GeneAlignment)> {
-        let barcode = rec1.barcode().unwrap()?;
-        let umi = rec1.umi().unwrap();
-        let anno = if let Some(rec2) = rec2 {
+        let barcode;
+        let umi;
+        let anno = if rec1.is_some() && rec2.is_some() {
+            let rec1 = rec1.unwrap();
+            let rec2 = rec2.unwrap();
+            barcode = rec1.barcode().unwrap()?;
+            umi = rec1.umi().unwrap();
             self.annotator.annotate_alignments_pe(header, rec1, rec2)
         } else {
-            self.annotator.annotate_alignments_se(header, rec1)
+            let rec = rec1.or(rec2).unwrap();
+            barcode = rec.barcode().unwrap()?;
+            umi = rec.umi().unwrap();
+            self.annotator.annotate_alignments_se(header, rec)
         }?;
 
         let gene_id;

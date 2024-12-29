@@ -32,15 +32,15 @@ impl Assay {
     #[new]
     #[pyo3(signature = (path))]
     pub fn new(path: Bound<'_, PyAny>) -> Result<Self> {
-        let assay = if let Ok(path) = path.extract::<PathBuf>() {
-            seqspec::Assay::from_path(path)?
-        } else {
-            let path = path.extract::<&str>()?;
+        let assay = if let Ok(path) = path.extract::<&str>() {
             if url::Url::parse(path).is_ok() {
                 seqspec::Assay::from_url(path)?
             } else {
                 seqspec::Assay::from_path(path)?
             }
+        } else {
+            let path = path.extract::<PathBuf>()?;
+            seqspec::Assay::from_path(path)?
         };
         Ok(Assay(assay))
     }

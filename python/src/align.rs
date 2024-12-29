@@ -244,7 +244,7 @@ fn write_alignments<'a>(
     py: Python<'a>,
     output: PathBuf,
     header: &'a sam::Header,
-    alignments: impl Iterator<Item = Vec<(MultiMapR, Option<MultiMapR>)>> + 'a,
+    alignments: impl Iterator<Item = Vec<(Option<MultiMapR>, Option<MultiMapR>)>> + 'a,
 ) -> Result<()> {
     let mut writer = noodles::bam::io::writer::Builder::default().build_from_path(output)?;
     writer.write_header(&header)?;
@@ -252,8 +252,10 @@ fn write_alignments<'a>(
     alignments.for_each(move |data| {
         py.check_signals().unwrap();
         data.iter().for_each(|(a, b)| {
-            a.iter()
-                .for_each(|x| writer.write_alignment_record(&header, x).unwrap());
+            a.as_ref().map(|x| {
+                x.iter()
+                    .for_each(|x| writer.write_alignment_record(&header, x).unwrap())
+            });
             b.as_ref().map(|x| {
                 x.iter()
                     .for_each(|x| writer.write_alignment_record(&header, x).unwrap())
@@ -271,7 +273,7 @@ fn write_fragments<'a>(
     header: &'a sam::Header,
     mito_dna: &Vec<String>,
     fragment_generator: FragmentGenerator,
-    alignments: impl Iterator<Item = Vec<(MultiMapR, Option<MultiMapR>)>> + 'a,
+    alignments: impl Iterator<Item = Vec<(Option<MultiMapR>, Option<MultiMapR>)>> + 'a,
 ) -> Result<FragmentQC> {
     let mut fragment_qc = FragmentQC::default();
     mito_dna.iter().for_each(|x| {

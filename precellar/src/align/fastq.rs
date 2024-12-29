@@ -89,7 +89,7 @@ impl FastqProcessor {
         aligner: &'a mut A,
         num_threads: u16,
         chunk_size: usize,
-    ) -> impl Iterator<Item = Vec<(MultiMapR, Option<MultiMapR>)>> + 'a {
+    ) -> impl Iterator<Item = Vec<(Option<MultiMapR>, Option<MultiMapR>)>> + 'a {
         let fq_reader = self.gen_barcoded_fastq(true).with_chunk_size(chunk_size);
         let total_reads = fq_reader.total_reads.unwrap_or(0);
 
@@ -111,7 +111,20 @@ impl FastqProcessor {
             let results: Vec<_> = aligner.align_reads(num_threads, data);
             results
                 .iter()
-                .for_each(|(ali1, ali2)| align_qc.add(&header, ali1, ali2.as_ref()).unwrap());
+                .for_each(|ali| {
+                    match ali {
+                        (Some(ali1), Some(ali2)) => {
+                            align_qc.add_pair(&header, ali1, ali2).unwrap();
+                        },
+                        (Some(ali1), None) => {
+                            align_qc.add_read1(&header, ali1).unwrap();
+                        },
+                        (None, Some(ali2)) => {
+                            align_qc.add_read2(&header, ali2).unwrap();
+                        },
+                        _ => {}
+                    }
+                });
             progress_bar.update(results.len()).unwrap();
             results
         })

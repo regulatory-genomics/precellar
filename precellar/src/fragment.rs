@@ -174,11 +174,12 @@ impl FragmentGenerator {
         impl FnMut(&AlignmentInfo) -> String + 'a,
     >
     where
-        I: Iterator<Item = Vec<(MultiMap<R>, Option<MultiMap<R>>)>> + 'a,
+        I: Iterator<Item = Vec<(Option<MultiMap<R>>, Option<MultiMap<R>>)>> + 'a,
         R: Record + 'a,
     {
         let data = records.flat_map(|chunk|
-            chunk.into_iter().flat_map(|(r1, r2)| if r2.is_some() {
+            chunk.into_iter().flat_map(|(r1, r2)| if r1.is_some() && r2.is_some() {
+                let r1 = r1.unwrap();
                 let r2 = r2.unwrap();
                 if filter_read_pair((&r1.primary, &r2.primary), self.mapq) {
                     AlignmentInfo::from_read_pair((&r1.primary, &r2.primary), header).unwrap()
@@ -186,8 +187,9 @@ impl FragmentGenerator {
                     None
                 }
             } else {
-                if filter_read(&r1.primary, self.mapq) {
-                    AlignmentInfo::from_read(&r1.primary, header).unwrap()
+                let r = r1.or(r2).unwrap();
+                if filter_read(&r.primary, self.mapq) {
+                    AlignmentInfo::from_read(&r.primary, header).unwrap()
                 } else {
                     None
                 }

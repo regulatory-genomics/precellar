@@ -114,8 +114,12 @@ impl PairAlignStat {
         self.read1.duplicate + self.read2.duplicate
     }
 
-    fn add<R: Record>(&mut self, record: &MultiMap<R>) -> Result<()> {
+    fn add_read1<R: Record>(&mut self, record: &MultiMap<R>) -> Result<()> {
         self.read1.add(record)
+    }
+
+    fn add_read2<R: Record>(&mut self, record: &MultiMap<R>) -> Result<()> {
+        self.read2.add(record)
     }
 
     fn add_pair<R: Record>(&mut self, record1: &MultiMap<R>, record2: &MultiMap<R>) -> Result<()> {
@@ -151,27 +155,24 @@ impl AlignQC {
         self.mito_dna.insert(mito_dna);
     }
 
-    pub fn add<R: Record>(&mut self, header: &sam::Header, record1: &MultiMap<R>, record2: Option<&MultiMap<R>>) -> Result<()> {
+    pub fn add_pair<R: Record>(&mut self, header: &sam::Header, record1: &MultiMap<R>, record2: &MultiMap<R>) -> Result<()> {
         let mut stat= PairAlignStat::default();
 
         self.num_read1_bases += record1.primary.sequence().len() as u64;
+        self.num_read2_bases += record2.primary.sequence().len() as u64;
+
         self.num_read1_q30_bases += record1.primary
             .quality_scores()
             .iter()
             .filter(|s| s.as_ref().map(|x| *x >= 30).unwrap_or(false))
             .count() as u64;
+        self.num_read2_q30_bases += record2.primary
+            .quality_scores()
+            .iter()
+            .filter(|s| s.as_ref().map(|x| *x >= 30).unwrap_or(false))
+            .count() as u64;
 
-        if let Some(record2) = record2 {
-            self.num_read2_bases += record2.primary.sequence().len() as u64;
-            self.num_read2_q30_bases += record2.primary
-                .quality_scores()
-                .iter()
-                .filter(|s| s.as_ref().map(|x| *x >= 30).unwrap_or(false))
-                .count() as u64;
-            stat.add_pair(record1, record2)?;
-        } else {
-            stat.add(record1)?;
-        }
+        stat.add_pair(record1, record2)?;
 
         self.stat_all.combine(&stat);
  
@@ -192,6 +193,66 @@ impl AlignQC {
         Ok(())
     }
 
+    pub fn add_read1<R: Record>(&mut self, header: &sam::Header, record: &MultiMap<R>) -> Result<()> {
+        let mut stat= PairAlignStat::default();
+
+        self.num_read1_bases += record.primary.sequence().len() as u64;
+        self.num_read1_q30_bases += record.primary
+            .quality_scores()
+            .iter()
+            .filter(|s| s.as_ref().map(|x| *x >= 30).unwrap_or(false))
+            .count() as u64;
+        stat.add_read1(record)?;
+
+        self.stat_all.combine(&stat);
+ 
+        if record.primary
+            .data()
+            .get(&Tag::CELL_BARCODE_ID)
+            .transpose()
+            .unwrap()
+            .is_some()
+        {
+            self.stat_barcoded.combine(&stat);
+            if let Some(rid) = record.primary.reference_sequence_id(header) {
+                if self.mito_dna.contains(&rid.unwrap()) {
+                    self.stat_mito.combine(&stat);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    pub fn add_read2<R: Record>(&mut self, header: &sam::Header, record: &MultiMap<R>) -> Result<()> {
+        let mut stat= PairAlignStat::default();
+
+        self.num_read2_bases += record.primary.sequence().len() as u64;
+        self.num_read2_q30_bases += record.primary
+            .quality_scores()
+            .iter()
+            .filter(|s| s.as_ref().map(|x| *x >= 30).unwrap_or(false))
+            .count() as u64;
+        stat.add_read2(record)?;
+
+        self.stat_all.combine(&stat);
+ 
+        if record.primary
+            .data()
+            .get(&Tag::CELL_BARCODE_ID)
+            .transpose()
+            .unwrap()
+            .is_some()
+        {
+            self.stat_barcoded.combine(&stat);
+            if let Some(rid) = record.primary.reference_sequence_id(header) {
+                if self.mito_dna.contains(&rid.unwrap()) {
+                    self.stat_mito.combine(&stat);
+                }
+            }
+        }
+        Ok(())
+    }
+
     pub fn report(&self, metric: &mut Metrics) {
         let stat_all = &self.stat_all;
         let stat_barcoded = &self.stat_barcoded;
@@ -203,14 +264,18 @@ impl AlignQC {
 
         metric.insert("sequenced_reads".to_string(), stat_all.total_reads() as f64);
         metric.insert("sequenced_read_pairs".to_string(), stat_all.total_pairs() as f64);
-        metric.insert(
-            "frac_q30_bases_read1".to_string(),
-            self.num_read1_q30_bases as f64 / self.num_read1_bases as f64,
-        );
-        metric.insert(
-            "frac_q30_bases_read2".to_string(),
-            self.num_read2_q30_bases as f64 / self.num_read2_bases as f64,
-        );
+        if self.num_read1_bases > 0 {
+            metric.insert(
+                "frac_q30_bases_read1".to_string(),
+                self.num_read1_q30_bases as f64 / self.num_read1_bases as f64,
+            );
+        }
+        if self.num_read2_bases > 0 {
+            metric.insert(
+                "frac_q30_bases_read2".to_string(),
+                self.num_read2_q30_bases as f64 / self.num_read2_bases as f64,
+            );
+        }
         metric.insert(
             "frac_confidently_mapped".to_string(),
             fraction_confidently_mapped,
