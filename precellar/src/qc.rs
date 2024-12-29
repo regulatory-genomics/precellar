@@ -304,7 +304,7 @@ impl FragmentQC {
         self.num_pcr_duplicates += fragment.count as u64 - 1;
         self.num_unique_fragments += 1;
         let size = fragment.len();
-        if self.mito_dna.contains(fragment.chrom()) {
+        if !self.mito_dna.contains(fragment.chrom()) {
             if size < 147 {
                 self.num_frag_nfr += 1;
             } else if size <= 294 {
