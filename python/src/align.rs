@@ -196,8 +196,10 @@ pub fn align(
         OutputType::GeneQuantification => {
             let mut quantifier = Quantifier::new(transcript_annotator.unwrap());
             mito_dna.iter().for_each(|x| quantifier.add_mito_dna(x));
-            quantifier.quantify(&header, alignments, output)?;
-            Ok(processor.get_report().into())
+            let quant_qc = quantifier.quantify(&header, alignments, output)?;
+            let mut qc = processor.get_report();
+            quant_qc.report(&mut qc);
+            Ok(qc.into())
         }
     }
 }

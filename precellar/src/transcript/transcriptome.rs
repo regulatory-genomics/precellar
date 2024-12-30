@@ -440,37 +440,3 @@ fn mark_deleted_ref_bases(cigar: &mut Cigar, del_len: usize, reverse: bool) -> C
         new_cigar
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::collections::HashMap;
-
-    #[allow(dead_code)]
-    struct TranscriptomeTest {
-        chrom_starts: Vec<u64>,
-        transcript_info: Vec<Transcript>,
-        exon_info: Vec<Exon>,
-    }
-
-    #[test]
-    fn test_cigar_segment() {
-        let cigar = Cigar::from(vec![
-            Op::new(Kind::SoftClip, 5),
-            Op::new(Kind::Match, 10),
-            Op::new(Kind::Skip, 5),
-            Op::new(Kind::Match, 10),
-            Op::new(Kind::SoftClip, 5),
-        ]);
-        /*
-        let (left_clip, right_clip, splice_segments) = get_cigar_segments(&cigar, 5);
-        assert_eq!(left_clip, Cigar::from(vec![Op::new(Kind::SoftClip, 5)]));
-        assert_eq!(right_clip, Cigar::from(vec![Op::new(Kind::SoftClip, 5)]));
-        assert_eq!(splice_segments.len(), 2);
-        assert_eq!(splice_segments[0].start, 5);
-        assert_eq!(splice_segments[0].end, 15);
-        assert_eq!(splice_segments[1].start, 20);
-        assert_eq!(splice_segments[1].end, 30);
-        */
-    }
-}

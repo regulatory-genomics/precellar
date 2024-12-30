@@ -99,7 +99,7 @@ impl PairAlignStat {
     }
 
     fn total_pairs(&self) -> u64 {
-        self.read2.total
+        self.read2.total.min(self.read1.total)
     }
 
     fn total_mapped(&self) -> u64 {
@@ -337,5 +337,19 @@ impl FragmentQC {
             "frac_fragment_flanking_single_nucleosome".to_string(),
             self.num_frag_single as f64 / self.num_unique_fragments as f64,
         );
+    }
+}
+
+#[derive(Debug, Default)]
+pub struct GeneQuantQC {
+    pub(crate) total_reads: u64,
+    pub(crate) total_umi: u64,
+    pub(crate) unique_umi: u64,
+}
+
+impl GeneQuantQC {
+    pub fn report(&self, metric: &mut Metrics) {
+        metric.insert("frac_transcriptome".to_string(), self.total_umi as f64 / self.total_reads as f64);
+        metric.insert("frac_duplicates".to_string(), 1.0 - self.unique_umi as f64 / self.total_umi as f64);
     }
 }

@@ -1,16 +1,19 @@
-use anndata::{data::utils::{from_csr_data, to_csr_data}, AnnData, AnnDataOp };
+use anndata::{
+    data::utils::{from_csr_data, to_csr_data},
+    AnnData, AnnDataOp,
+};
 use anndata_hdf5::H5;
 use anyhow::Result;
 use bed_utils::extsort::ExternalSorterBuilder;
 use indexmap::IndexMap;
 use itertools::Itertools;
 use noodles::sam::Header;
+use polars::df;
 use rayon::iter::{IntoParallelIterator, ParallelIterator};
 use serde::{Deserialize, Serialize};
 use std::{collections::HashSet, path::PathBuf};
-use polars::df;
 
-use crate::{align::MultiMapR, transcript::Gene};
+use crate::{align::MultiMapR, qc::GeneQuantQC, transcript::Gene};
 
 use super::{
     annotate::AnnotationRegion, de_dups::count_unique_umi, AlignmentAnnotator, AnnotatedAlignment,
@@ -62,11 +65,18 @@ impl Quantifier {
         self.mito_genes.extend(iter);
     }
 
-    pub fn quantify<'a, I, P>(&'a self, header: &'a Header, records: I, output: P) -> Result<()>
+    pub fn quantify<'a, I, P>(
+        &'a self,
+        header: &'a Header,
+        records: I,
+        output: P,
+    ) -> Result<GeneQuantQC>
     where
         I: Iterator<Item = Vec<(Option<MultiMapR>, Option<MultiMapR>)>> + 'a,
         P: AsRef<std::path::Path>,
     {
+        let mut qc = GeneQuantQC::default();
+
         let adata: AnnData<H5> = AnnData::new(output)?;
         let num_cols = self.genes.len();
 
@@ -75,38 +85,47 @@ impl Quantifier {
         let mut intron_count: Vec<u64> = Vec::new();
         let mut mito_count: Vec<u64> = Vec::new();
 
-        let tx_alignments = records.flat_map(|recs| {
-            recs.into_par_iter()
-                .filter_map(|(r1, r2)| self.make_gene_alignment(header, r1, r2))
-                .collect::<Vec<_>>()
-        });
-        let tx_alignments_chunks =
-            sort_alignments(tx_alignments, self.temp_dir.as_ref(), self.chunk_size)
-                .chunk_by(|x| x.0.clone());
-        let tx_alignments_chunks = tx_alignments_chunks
-            .into_iter()
-            .map(|(barcode, group)| {
-                barcodes.push(barcode);
-                group.map(|x| x.1).collect::<Vec<_>>()
-            })
-            .chunks(500);
-        let counts = tx_alignments_chunks.into_iter().map(|chunk| {
-            let (stats, csr): (Vec<_>, Vec<_>) = chunk.collect::<Vec<_>>()
-                .into_par_iter()
-                .map(|alignments|
-                    self.process_cell(alignments)
-                )
-                .unzip();
-            stats.into_iter().for_each(|(num_exon, num_intron, mito)| {
-                exon_count.push(num_exon);
-                intron_count.push(num_intron);
-                mito_count.push(mito);
+        {
+            let tx_alignments = records.flat_map(|recs| {
+                qc.total_reads += recs.len() as u64;
+                recs.into_par_iter()
+                    .filter_map(|(r1, r2)| self.make_gene_alignment(header, r1, r2))
+                    .collect::<Vec<_>>()
             });
-            let (nrows, ncols, indptr, indices, data) = to_csr_data(csr, num_cols);
-            from_csr_data(nrows, ncols, indptr, indices, data).unwrap()
-        });
+            let tx_alignments_chunks =
+                sort_alignments(tx_alignments, self.temp_dir.as_ref(), self.chunk_size)
+                    .chunk_by(|x| x.0.clone());
+            let tx_alignments_chunks = tx_alignments_chunks
+                .into_iter()
+                .map(|(barcode, group)| {
+                    barcodes.push(barcode);
+                    group.map(|x| x.1).collect::<Vec<_>>()
+                })
+                .chunks(500);
+            let counts = tx_alignments_chunks.into_iter().map(|chunk| {
+                let results: Vec<_> = chunk
+                    .collect::<Vec<_>>()
+                    .into_par_iter()
+                    .map(|alignments| count_unique_umi(alignments, &self.mito_genes))
+                    .collect();
+                results.iter().for_each(|r| {
+                    qc.total_umi += r.total_umi;
+                    qc.unique_umi += r.unique_umi;
+                    exon_count.push(r.uniq_exon);
+                    intron_count.push(r.uniq_intron);
+                    mito_count.push(r.uniq_mito);
+                });
+                let (nrows, ncols, indptr, indices, data) = to_csr_data(
+                    results
+                        .into_iter()
+                        .map(|r| r.into_counts().collect()),
+                    num_cols,
+                );
+                from_csr_data(nrows, ncols, indptr, indices, data).unwrap()
+            });
 
-        adata.set_x_from_iter(counts)?;
+            adata.set_x_from_iter(counts)?;
+        }
 
         adata.set_obs_names(barcodes.into())?;
         adata.set_obs(df!(
@@ -120,23 +139,8 @@ impl Quantifier {
             "gene_name" => self.genes.values().map(|g| g.name.clone()).collect::<Vec<_>>()
         )?)?;
 
-        adata.close()
-    }
-
-    fn process_cell(&self, alignments: Vec<GeneAlignment>) -> ((u64, u64, u64), Vec<(usize, u64)>)
-    {
-        let mut mito_count = 0;
-        let (mut exon_counts, intron_counts) = count_unique_umi(alignments);
-        let num_exons = exon_counts.values().sum::<usize>() as u64;
-        let num_intron = intron_counts.values().sum::<usize>() as u64;
-        intron_counts.into_iter().for_each(|(gene, count)| {
-            let val = exon_counts.entry(gene).or_insert(0);
-            *val += count;
-            if self.mito_genes.contains(&gene) {
-                mito_count += *val as u64;
-            }
-        });
-        ((num_exons, num_intron, mito_count), exon_counts.into_iter().map(|(i, v)| (i, v as u64)).collect())
+        adata.close()?;
+        Ok(qc)
     }
 
     fn make_gene_alignment(
