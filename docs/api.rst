@@ -26,6 +26,16 @@ Core functions
     make_fragment
     make_fastq
 
+
+Aligners
+~~~~~~~~
+
+.. autosummary::
+    :toctree: _autosummary
+
+    aligners.STAR
+    aligners.BWAMEM2
+
 Utilities
 ~~~~~~~~~
 
@@ -33,4 +43,4 @@ Utilities
     :toctree: _autosummary
 
     utils.strip_barcode_from_fastq
-    bam_to_fastq
+    utils.bam_to_fastq

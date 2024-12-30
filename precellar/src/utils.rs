@@ -52,6 +52,23 @@ pub fn strip_fastq(
     Ok((fq, matches))
 }
 
+pub fn rev_compl_fastq_record(mut record: fastq::Record) -> fastq::Record {
+    *record.quality_scores_mut() = record.quality_scores().iter().rev().copied().collect();
+    *record.sequence_mut() = record
+        .sequence()
+        .iter()
+        .rev()
+        .map(|&x| match x {
+            b'A' => b'T',
+            b'T' => b'A',
+            b'C' => b'G',
+            b'G' => b'C',
+            _ => x,
+        })
+        .collect();
+    record
+}
+
 fn strip_from(
     txt: &str,
     regex: &Regex,

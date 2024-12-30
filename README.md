@@ -38,7 +38,7 @@ assay.update_read('atac-I2', fastq='R2.fastq.gz')
 assay.update_read('atac-R2', fastq='R3.fastq.gz')
 qc = precellar.align(
     assay,
-    "/data/Public/BWA_MEM2_index/GRCh38",
+    precellar.aligners.BWAMEM2("/data/Public/BWA_MEM2_index/GRCh38"),
     modality="atac",
     output='fragments.tsv.zst',
     output_type='fragment',
@@ -58,7 +58,7 @@ assay.update_read('rna-R1', fastq='R1.fastq.gz')
 assay.update_read('rna-R2', fastq='R2.fastq.gz')
 qc = precellar.align(
     assay,
-    "/data/STAR_reference/star_2.7.1",
+    precellar.aligners.STAR("/data/STAR_reference/star_2.7.1"),
     modality="rna",
     output="gene_matrix.h5ad",
     output_type="gene_quantification",
@@ -85,7 +85,7 @@ assay.update_read('atac-R2', fastq='atac_R3.fastq.gz')
 
 rna_qc = precellar.align(
     assay,
-    "/data/STAR_reference/star_2.7.1",
+    precellar.aligners.STAR("/data/STAR_reference/star_2.7.1"),
     modality="rna",
     output="gene_matrix.h5ad",
     output_type="gene_quantification",
@@ -93,7 +93,7 @@ rna_qc = precellar.align(
 )
 atac_qc = precellar.align(
     assay,
-    "/data/Public/BWA_MEM2_index/GRCh38",
+    precellar.aligners.BWAMEM2("/data/Public/BWA_MEM2_index/GRCh38"),
     modality="atac",
     output='fragments.tsv.zst',
     output_type='fragment',

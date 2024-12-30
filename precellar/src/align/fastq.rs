@@ -3,6 +3,7 @@ use super::aligners::{Aligner, MultiMap, MultiMapR};
 use crate::adapter::trim_poly_nucleotide;
 use crate::barcode::{BarcodeCorrector, OligoFrequncy, Whitelist};
 use crate::qc::{AlignQC, Metrics};
+use crate::utils::rev_compl_fastq_record;
 use anyhow::{bail, Result};
 use bstr::BString;
 use indexmap::IndexMap;
@@ -602,23 +603,6 @@ pub fn extend_fastq_record(this: &mut fastq::Record, other: &fastq::Record) {
     this.sequence_mut().extend_from_slice(other.sequence());
     this.quality_scores_mut()
         .extend_from_slice(other.quality_scores());
-}
-
-fn rev_compl_fastq_record(mut record: fastq::Record) -> fastq::Record {
-    *record.quality_scores_mut() = record.quality_scores().iter().rev().copied().collect();
-    *record.sequence_mut() = record
-        .sequence()
-        .iter()
-        .rev()
-        .map(|&x| match x {
-            b'A' => b'T',
-            b'T' => b'A',
-            b'C' => b'G',
-            b'G' => b'C',
-            _ => x,
-        })
-        .collect();
-    record
 }
 
 pub struct NameCollatedRecords<'a, R> {

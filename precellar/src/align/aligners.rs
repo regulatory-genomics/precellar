@@ -1,9 +1,6 @@
-use std::path::Path;
-
 /// This module provides an abstraction for aligning sequencing reads using different alignment tools like BWA and STAR.
 use super::fastq::AnnotatedFastq;
 use crate::barcode::{get_barcode, get_umi};
-use crate::transcript::Transcript;
 
 use anyhow::{bail, ensure, Result};
 pub use bwa_mem2::BurrowsWheelerAligner;
@@ -273,14 +270,6 @@ impl Aligner for StarAligner {
             })
             .collect()
     }
-}
-
-pub fn read_transcriptome_star<P: AsRef<Path>>(dir: P) -> Result<Vec<Transcript>> {
-    let transcriptome = star_aligner::transcript::Transcriptome::from_path(dir)?;
-    transcriptome
-        .iter()
-        .map(|t| t.clone().try_into())
-        .collect()
 }
 
 fn get_chunk_size(total_length: usize, num_threads: usize) -> usize {

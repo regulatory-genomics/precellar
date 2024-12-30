@@ -264,6 +264,12 @@ impl AlignQC {
 
         metric.insert("sequenced_reads".to_string(), stat_all.total_reads() as f64);
         metric.insert("sequenced_read_pairs".to_string(), stat_all.total_pairs() as f64);
+        if stat_all.total_pairs() > 0 {
+            metric.insert(
+                "frac_properly_paired".to_string(),
+                stat_all.proper_pairs as f64 / stat_all.total_pairs() as f64,
+            );
+        }
         if self.num_read1_bases > 0 {
             metric.insert(
                 "frac_q30_bases_read1".to_string(),
@@ -314,6 +320,10 @@ impl FragmentQC {
     }
 
     pub fn report(&self, metric: &mut Metrics) {
+        metric.insert(
+            "num_unique_fragments".to_string(),
+            self.num_unique_fragments as f64,
+        );
         metric.insert(
             "frac_duplicates".to_string(),
             self.num_pcr_duplicates as f64

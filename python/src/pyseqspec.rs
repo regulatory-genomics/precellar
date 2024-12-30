@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+use anyhow::Result;
 use glob::glob;
 use pyo3::prelude::*;
 use seqspec::{Modality, Read, Region, SequenceKit, SequenceProtocol};

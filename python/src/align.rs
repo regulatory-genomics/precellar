@@ -1,12 +1,12 @@
+use crate::aligners::AlignerRef;
 use crate::pyseqspec::Assay;
 
 use anyhow::{bail, Result};
 use noodles::sam::{self, alignment::io::Write};
 use pyo3::prelude::*;
-use std::path::Path;
+use std::ops::DerefMut;
 use std::{collections::HashMap, path::PathBuf, str::FromStr};
 
-use precellar::align::{Aligner, BurrowsWheelerAligner, StarAligner};
 use precellar::{
     align::{FastqProcessor, MultiMapR},
     fragment::FragmentGenerator,
@@ -17,36 +17,6 @@ use seqspec::{
     utils::{create_file, Compression},
     Modality,
 };
-
-pub enum AlignerType {
-    STAR(StarAligner),
-    BWA(BurrowsWheelerAligner),
-}
-
-impl AlignerType {
-    pub fn from_name<P: AsRef<Path>>(name: &str, path: P) -> Self {
-        match name.to_lowercase().as_str() {
-            "star" => AlignerType::STAR(StarAligner::from_path(path)),
-            "bwa" => AlignerType::BWA(BurrowsWheelerAligner::from_path(path)),
-            _ => unimplemented!(),
-        }
-    }
-
-    pub fn from_modality<P: AsRef<Path>>(modality: Modality, path: P) -> Self {
-        match modality {
-            Modality::RNA => AlignerType::STAR(StarAligner::from_path(path)),
-            Modality::ATAC => AlignerType::BWA(BurrowsWheelerAligner::from_path(path)),
-            _ => unimplemented!(),
-        }
-    }
-
-    pub fn header(&self) -> sam::Header {
-        match self {
-            AlignerType::STAR(aligner) => aligner.header(),
-            AlignerType::BWA(aligner) => aligner.header(),
-        }
-    }
-}
 
 pub enum OutputType {
     Alignment,
@@ -90,8 +60,9 @@ pub fn make_bwa_index(fasta: PathBuf, genome_prefix: PathBuf) -> Result<()> {
 /// assay: Assay | Path
 ///     A Assay object or file path to the yaml sequencing specification file, see
 ///     https://github.com/pachterlab/seqspec.
-/// genom_index: Path
-///     File path to the genome index. The genome index can be created by the `make_genome_index` function.
+/// aligner: STAR | BWAMEM2
+///     The aligner to use for the alignment. Available aligners can be found at
+///     `precellar.aligners` submodule.
 /// modality: str
 ///     The modality of the sequencing data, e.g., "rna" or "atac".
 /// output: Path
@@ -108,8 +79,6 @@ pub fn make_bwa_index(fasta: PathBuf, genome_prefix: PathBuf) -> Result<()> {
 /// shift_right: int
 ///     The number of bases to shift the right end of the fragment.
 ///     Available only when `output_type='fragment'`.
-/// aligner: str | None
-///     The aligner to use for the alignment. If None, the aligner will be inferred from the modality.
 /// compression: str | None
 ///     The compression algorithm to use for the output fragment file.
 ///     If None, the compression algorithm will be inferred from the file extension.
@@ -127,34 +96,38 @@ pub fn make_bwa_index(fasta: PathBuf, genome_prefix: PathBuf) -> Result<()> {
 /// -------
 /// dict
 ///    A dictionary containing the QC metrics of the alignment and fragment generation.
+/// 
+/// See Also
+/// --------
+/// aligners.BWAMEM2
+/// aligners.STAR
 #[pyfunction]
 #[pyo3(
     signature = (
-        assay, genome_index, *,
+        assay, aligner, *,
         modality, output, output_type="alignment",
         mito_dna=vec!["chrM".to_owned(), "M".to_owned()],
-        shift_left=4, shift_right=-5, aligner=None,
+        shift_left=4, shift_right=-5,
         compression=None, compression_level=None,
         temp_dir=None, num_threads=8, chunk_size=10000000,
     ),
-    text_signature = "(assay, genome_index, *,
+    text_signature = "(assay, aligner, *,
         modality, output, output_type='alignment',
         mito_dna=['chrM', 'M'],
-        shift_left=4, shift_right=-5, aligner=None,
+        shift_left=4, shift_right=-5,
         compression=None, compression_level=None,
         temp_dir=None, num_threads=8, chunk_size=10000000)",
 )]
 pub fn align(
     py: Python<'_>,
     assay: Bound<'_, PyAny>,
-    genome_index: PathBuf,
+    aligner: Bound<'_, PyAny>,
     modality: &str,
     output: PathBuf,
     output_type: &str,
     mito_dna: Vec<String>,
     shift_left: i64,
     shift_right: i64,
-    aligner: Option<&str>,
     compression: Option<&str>,
     compression_level: Option<u32>,
     temp_dir: Option<PathBuf>,
@@ -166,13 +139,10 @@ pub fn align(
         Ok(p) => seqspec::Assay::from_path(&p).unwrap(),
         _ => assay.extract::<PyRef<Assay>>()?.0.clone(),
     };
-
-    let mut aligner = if let Some(name) = aligner {
-        AlignerType::from_name(name, &genome_index)
-    } else {
-        AlignerType::from_modality(modality, &genome_index)
-    };
+    let mut aligner = AlignerRef::try_from(aligner)?;
     let header = aligner.header();
+    let transcript_annotator = aligner.transcript_annotator();
+
     let mut processor = FastqProcessor::new(assay)
         .with_modality(modality)
         .with_barcode_correct_prob(0.9);
@@ -180,21 +150,14 @@ pub fn align(
         processor.add_mito_dna(x);
     });
 
-    let mut transcript_annotator = None;
-    let alignments: Box<dyn Iterator<Item = _>> = match aligner {
-        AlignerType::STAR(ref mut aligner) => {
-            let transcriptome = ::precellar::align::read_transcriptome_star(&genome_index)?;
-            transcript_annotator = Some(::precellar::transcript::AlignmentAnnotator::new(
-                transcriptome,
-            ));
-            Box::new(processor.gen_barcoded_alignments(
-                aligner,
-                num_threads,
-                num_threads as usize * chunk_size,
-            ))
-        }
-        AlignerType::BWA(ref mut aligner) => Box::new(processor.gen_barcoded_alignments(
-            aligner,
+    let alignments: Box<dyn Iterator<Item = _>> = match &mut aligner {
+        AlignerRef::STAR(ref mut aligner) => Box::new(processor.gen_barcoded_alignments(
+            aligner.deref_mut().deref_mut(),
+            num_threads,
+            num_threads as usize * chunk_size,
+        )),
+        AlignerRef::BWA(ref mut aligner) => Box::new(processor.gen_barcoded_alignments(
+            aligner.deref_mut().deref_mut(),
             num_threads,
             num_threads as usize * chunk_size,
         )),

@@ -1,4 +1,5 @@
 mod align;
+mod aligners;
 mod pyseqspec;
 mod utils;
 
@@ -186,18 +187,21 @@ fn make_fastq(
 fn precellar(m: &Bound<'_, PyModule>) -> PyResult<()> {
     env_logger::builder()
         .filter_level(log::LevelFilter::Info)
+        .format_module_path(false)
         .try_init()
         .unwrap();
 
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
 
-    m.add_class::<pyseqspec::Assay>().unwrap();
+    m.add_class::<pyseqspec::Assay>()?;
 
     m.add_function(wrap_pyfunction!(align::make_bwa_index, m)?)?;
     m.add_function(wrap_pyfunction!(align::align, m)?)?;
     //m.add_function(wrap_pyfunction!(make_fragment, m)?)?;
     m.add_function(wrap_pyfunction!(make_fastq, m)?)?;
 
-    utils::register_submodule(m)?;
+    utils::register_utils(m)?;
+    aligners::register_aligners(m)?;
+
     Ok(())
 }

@@ -4,7 +4,7 @@ use itertools::Itertools;
 use noodles::bam;
 use noodles::fastq::{self, io::Writer};
 use noodles::sam::alignment::record::QualityScores;
-use precellar::utils::strip_fastq;
+use precellar::utils::{rev_compl_fastq_record, strip_fastq};
 use noodles::sam::alignment::record::data::field::{Tag, Value};
 use pyo3::{prelude::*, types::PyDict};
 use rayon::slice::ParallelSliceMut;
@@ -255,7 +255,12 @@ fn bam_to_fastq(
             .iter()
             .map(|x| x.unwrap() + 33)
             .collect();
-        fastq::Record::new(fastq::record::Definition::new(name, ""), seq, qual)
+        let fq = fastq::Record::new(fastq::record::Definition::new(name, ""), seq, qual);
+        if bam.flags().is_reverse_complemented() {
+            rev_compl_fastq_record(fq)
+        } else {
+            fq
+        }
     }
 
     fn get_data(bam: &bam::Record, tag: &Tag) -> Option<Vec<u8>> {
@@ -375,7 +380,7 @@ fn bam_to_fastq(
 }
 
 #[pymodule]
-pub(crate) fn register_submodule(parent_module: &Bound<'_, PyModule>) -> PyResult<()> {
+pub(crate) fn register_utils(parent_module: &Bound<'_, PyModule>) -> PyResult<()> {
     let utils = PyModule::new_bound(parent_module.py(), "utils")?;
 
     utils.add_function(wrap_pyfunction!(strip_barcode_from_fastq, &utils)?)?;
