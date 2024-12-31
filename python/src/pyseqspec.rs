@@ -240,6 +240,19 @@ impl Assay {
         self.0.validate(modality, out_dir, tolerance)
     }
 
+    /// Return the whitelist of cell barcodes.
+    #[pyo3(
+        signature = (modality),
+        text_signature = "($self, modality)",
+    )]
+    fn whitelist(&self, modality: &str) -> Option<Vec<String>> {
+        let modality = Modality::from_str(modality).unwrap();
+        let barcodes = self.0.library_spec.cat_barcodes(&modality)?.into_iter().map(|bc| 
+            std::str::from_utf8(&bc).unwrap().to_string()
+        ).collect();
+        Some(barcodes)
+    }
+
     /*
     /// Identify the position of elements in a spec.
     ///

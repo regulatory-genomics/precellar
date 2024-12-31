@@ -103,7 +103,6 @@ impl Assay {
     }
 
     /// Add default Illumina reads to the sequence spec.
-    #[allow(clippy::type_complexity)]
     pub fn add_illumina_reads(
         &mut self,
         modality: Modality,

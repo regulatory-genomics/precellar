@@ -3,10 +3,11 @@ use crate::Modality;
 
 use anyhow::Result;
 use cached_path::Cache;
-use indexmap::IndexMap;
+use indexmap::{IndexMap, IndexSet};
 use serde::{Deserialize, Serialize};
+use itertools::Itertools;
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashMap,
     io::BufRead,
     ops::Deref,
     path::Path,
@@ -103,6 +104,23 @@ impl LibSpec {
 
     pub fn get_parent(&self, region_id: &str) -> Option<&Arc<RwLock<Region>>> {
         self.parent_map.get(region_id)
+    }
+
+    pub fn cat_barcodes(&self, modality: &Modality) -> Option<Vec<Vec<u8>>> {
+        let region = self.get_modality(modality)?;
+        region.read().unwrap().subregions.iter().filter_map(|r| {
+            let r = r.read().unwrap();
+            if r.region_type.is_barcode() && r.onlist.is_some() {
+                Some(r.onlist.as_ref().unwrap().read().unwrap().into_iter().collect::<Vec<_>>())
+            } else {
+                None
+            }
+        }).reduce(|a, b| {
+            a.into_iter().cartesian_product(b).map(|(mut a, b)| {
+                a.extend(b);
+                a
+            }).collect()
+        })
     }
 }
 
@@ -283,7 +301,7 @@ pub struct Onlist {
 }
 
 impl Onlist {
-    pub fn read(&self) -> Result<HashSet<Vec<u8>>> {
+    pub fn read(&self) -> Result<IndexSet<Vec<u8>>> {
         let mut cache = Cache::new()?;
         cache.dir = home::home_dir().unwrap().join(".cache/seqspec");
         let file = cache.cached_path(&self.url)?;

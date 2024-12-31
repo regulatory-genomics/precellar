@@ -1,6 +1,6 @@
 [package]
 name = "seqspec"
-version = "0.1.0"
+version = "0.3.0"
 edition = "2021"
 
 [dependencies]
@@ -12,6 +12,7 @@ indexmap = "2.5"
 log = "0.4"
 hamming = "0.1"
 home = "0.5"
+itertools = "0.13"
 md-5 = "0.10"
 noodles = { version = "0.85", features = ["core", "fastq", "async"] }
 url = "2.5"

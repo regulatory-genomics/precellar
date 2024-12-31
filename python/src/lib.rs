@@ -8,6 +8,7 @@ use itertools::Itertools;
 use log::info;
 use noodles::fastq;
 use pyo3::prelude::*;
+use std::io::Write;
 use std::{io::BufWriter, path::PathBuf, str::FromStr};
 
 use ::precellar::align::{extend_fastq_record, Barcode, FastqProcessor};
@@ -186,8 +187,11 @@ fn make_fastq(
 #[pymodule]
 fn precellar(m: &Bound<'_, PyModule>) -> PyResult<()> {
     env_logger::builder()
+        .format(|buf, record| {
+            let timestamp = buf.timestamp();
+            writeln!(buf, "[{timestamp} {}] {}", record.level(), record.args())
+        })
         .filter_level(log::LevelFilter::Info)
-        .format_module_path(false)
         .try_init()
         .unwrap();
 

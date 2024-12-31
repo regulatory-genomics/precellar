@@ -5,7 +5,9 @@ import sys
 
 import precellar
 from precellar import utils
+from precellar import aligners
 sys.modules['precellar.utils'] = utils
+sys.modules['precellar.aligners'] = aligners
 
 # -- Software version --------------------------------------------------------
 

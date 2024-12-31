@@ -22,5 +22,5 @@ kdam = "0.5.2"
 polars = "0.45"
 rayon = "1.10"
 serde = "1.0"
-seqspec = { version = "0.1", workspace = true }
+seqspec = { workspace = true }
 regex = "1.6"

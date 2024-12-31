@@ -3,10 +3,9 @@ use crate::{Modality, RegionType};
 
 use anyhow::Result;
 use cached_path::Cache;
-use indexmap::IndexMap;
+use indexmap::{IndexMap, IndexSet};
 use noodles::fastq;
 use serde::{Deserialize, Serialize, Serializer};
-use std::collections::HashSet;
 use std::ops::{Deref, DerefMut};
 use std::path::Path;
 use std::sync::{Arc, RwLock};
@@ -462,7 +461,7 @@ pub(crate) struct ReadValidator<'a> {
     range: Option<Range<usize>>,
     n_total: usize,
     n_matched: usize,
-    onlist: Option<HashSet<Vec<u8>>>,
+    onlist: Option<IndexSet<Vec<u8>>>,
     strand: Strand,
     tolerance: f64,
 }
