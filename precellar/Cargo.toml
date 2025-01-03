@@ -8,7 +8,7 @@ anyhow = "1.0"
 anndata = { git = "https://github.com/kaizhang/anndata-rs.git", rev = "0d27ac475634ed7703ab1a23e01e6a3031a28541"}
 anndata-hdf5 = { git = "https://github.com/kaizhang/anndata-rs.git", rev = "0d27ac475634ed7703ab1a23e01e6a3031a28541"}
 bed-utils = "0.6"
-bwa-mem2 = { git = "https://github.com/regulatory-genomics/bwa-mem2-rust.git", rev = "6b1a05d37f267f20b2645531cbb153bdaaba7558" }
+bwa-mem2 = { git = "https://github.com/regulatory-genomics/bwa-mem2-rust.git", rev = "7d764d3e2fa6cc63bc83184d2632793711626c43" }
 star-aligner = { git = "https://github.com/regulatory-genomics/star-aligner", rev = "4672820b6a2c49ef514f9160e08188928d45a874" }
 smallvec = "1.13"
 bstr = "1.0"

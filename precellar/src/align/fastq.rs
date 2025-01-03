@@ -136,8 +136,8 @@ impl FastqProcessor {
             let whitelists = self.count_barcodes().unwrap();
             for (id, whitelist) in whitelists.iter() {
                 info!(
-                    "Found {} barcodes. {:.2}% of them have an exact match in whitelist '{}'",
-                    whitelist.total_count,
+                    "Found {} unique barcodes. {:.2}% of them have an exact match in whitelist '{}'",
+                    whitelist.num_unique_barcodes(),
                     whitelist.frac_exact_match() * 100.0,
                     id
                 );
@@ -592,6 +592,7 @@ impl AnnotatedFastq {
 }
 
 fn slice_fastq_record(record: &fastq::Record, start: usize, end: usize) -> fastq::Record {
+    let end = end.min(record.sequence().len());
     fastq::Record::new(
         record.definition().clone(),
         &record.sequence()[start..end],
