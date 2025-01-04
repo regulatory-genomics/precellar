@@ -129,6 +129,31 @@ impl BWAMEM2 {
         );
         Ok(BWAMEM2(aligner))
     }
+
+    /// The minimum seed length of the aligner.
+    /// 
+    /// Returns
+    /// -------
+    /// int
+    ///    The minimum seed length.
+    #[getter]
+    pub fn get_min_seed_length(&self) -> u16 {
+        self.0.opts.min_seed_len()
+    }
+
+    #[setter]
+    pub fn set_min_seed_length(&mut self, min_seed_length: u16) {
+        self.0.opts.set_min_seed_len(min_seed_length);
+    }
+
+    /// Whether to output log messages.
+    pub fn logging(&mut self, enable: bool) {
+        if enable {
+            self.0.opts.enable_log();
+        } else {
+            self.0.opts.disable_log();
+        }
+    }
 }
 
 #[pymodule]

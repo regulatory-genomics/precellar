@@ -136,10 +136,10 @@ impl FastqProcessor {
             let whitelists = self.count_barcodes().unwrap();
             for (id, whitelist) in whitelists.iter() {
                 info!(
-                    "Found {} unique barcodes. {:.2}% of them have an exact match in whitelist '{}'",
-                    whitelist.num_unique_barcodes(),
+                    "{:.2}% of sequences have an exact match in whitelist '{}'. Number of unique barcodes: {}.",
                     whitelist.frac_exact_match() * 100.0,
-                    id
+                    id,
+                    whitelist.num_seen_barcodes(),
                 );
             }
             whitelists

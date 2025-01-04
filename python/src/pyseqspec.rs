@@ -318,7 +318,8 @@ impl Assay {
                 .push(read);
         }
 
-        let tree = Tree::new("".to_string()).with_leaves(
+        let root_label = self.0.assay_id.clone();
+        let tree = Tree::new(root_label).with_leaves(
             assay
                 .library_spec
                 .modalities()

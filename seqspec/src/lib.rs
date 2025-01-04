@@ -508,7 +508,7 @@ impl Assay {
                     })
                     .collect::<Result<Vec<_>>>()?;
 
-                reader.records().take(500).try_for_each(|record| {
+                reader.records().take(1000).try_for_each(|record| {
                     let record = record?;
                     for validator in &mut validators {
                         let result = validator.validate(record.sequence());
@@ -526,8 +526,8 @@ impl Assay {
                     let percent_matched = validator.frac_matched() * 100.0;
                     if percent_matched < 50.0 {
                         warn!(
-                            "Read '{}' has low percentage of matched bases for region '{}'. \
-                        Percentage of matched bases: {:.2}%",
+                            "Read '{}' has low percentage of matched records for region '{}'. \
+                        Percentage of matched records: {:.2}%",
                             read.read_id,
                             validator.id(),
                             percent_matched

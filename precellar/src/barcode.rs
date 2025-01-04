@@ -243,8 +243,8 @@ impl Whitelist {
         }
     }
 
-    pub fn num_unique_barcodes(&self) -> usize {
-        self.barcode_counts.len()
+    pub fn num_seen_barcodes(&self) -> usize {
+        self.barcode_counts.values().filter(|&&x| x > 0).count()
     }
 
     pub fn get_barcode_counts(&self) -> &OligoFrequncy {
