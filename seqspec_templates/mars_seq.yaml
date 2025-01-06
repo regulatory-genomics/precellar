@@ -60,7 +60,7 @@ library_spec:
       filename: plate_bc_onlist.txt.gz
       filetype: txt
       filesize: 116
-      url: https://raw.githubusercontent.com/regulatory-genomics/precellar/refs/heads/main/seqspec_templates/mars_seq/plate_bc_onlist.txt.gz
+      url: https://raw.githubusercontent.com/regulatory-genomics/precellar/refs/heads/main/seqspec_templates/onlist/mars_seq-plate_bc.txt.gz
       urltype: http
       md5: 46c83004ed83e867edbebd17f42e0a05
       location: remote
@@ -112,7 +112,7 @@ library_spec:
       filename: cell_bc_onlist.txt.gz
       filetype: txt
       filesize: 1143
-      url: https://raw.githubusercontent.com/regulatory-genomics/precellar/refs/heads/main/seqspec_templates/mars_seq/cell_bc_onlist.txt.gz
+      url: https://raw.githubusercontent.com/regulatory-genomics/precellar/refs/heads/main/seqspec_templates/onlist/mars_seq-cell_bc.txt.gz
       urltype: http
       md5: f1a47172851687c9e4ae971e29539564
       location: remote

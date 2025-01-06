@@ -253,14 +253,29 @@ impl AlignQC {
         Ok(())
     }
 
+    /// Fraction of read pairs with barcodes that match the whitelist after error correction.
+    pub fn frac_valid_barcode(&self) -> f64 {
+        self.stat_barcoded.total_reads() as f64 / self.stat_all.total_reads() as f64
+    }
+
+    /// Fraction of sequenced read pairs with a valid barcode that could not be
+    /// mapped to the genome, defined as the number of unmapped
+    /// barcoded reads divided by the total number of barcoded reads.
+    pub fn frac_unmapped(&self) -> f64 {
+        1.0 - self.stat_barcoded.total_mapped() as f64 / self.stat_barcoded.total_reads() as f64
+    }
+
+    /// Estimated fraction of sequenced read pairs with a valid barcode that map to mitochondria,
+    /// defined as the number of barcoded reads mapped to mitochondria divided by the total number of mapped barcoded reads.
+    pub fn frac_mitochondrial(&self) -> f64 {
+        self.stat_mito.total_reads() as f64 / self.stat_barcoded.total_mapped() as f64
+    }
+
     pub fn report(&self, metric: &mut Metrics) {
         let stat_all = &self.stat_all;
         let stat_barcoded = &self.stat_barcoded;
 
-        let fraction_unmapped = 1.0 - stat_barcoded.total_mapped() as f64 / stat_barcoded.total_reads() as f64;
-        let valid_barcode = stat_barcoded.total_reads() as f64 / stat_all.total_reads() as f64;
         let fraction_confidently_mapped = stat_barcoded.total_high_quality() as f64 / stat_barcoded.total_reads() as f64;
-        let fraction_nonnuclear = self.stat_mito.total_reads() as f64 / stat_barcoded.total_reads() as f64;
 
         metric.insert("sequenced_reads".to_string(), stat_all.total_reads() as f64);
         metric.insert("sequenced_read_pairs".to_string(), stat_all.total_pairs() as f64);
@@ -286,9 +301,9 @@ impl AlignQC {
             "frac_confidently_mapped".to_string(),
             fraction_confidently_mapped,
         );
-        metric.insert("frac_unmapped".to_string(), fraction_unmapped);
-        metric.insert("frac_valid_barcode".to_string(), valid_barcode);
-        metric.insert("frac_nonnuclear".to_string(), fraction_nonnuclear);
+        metric.insert("frac_unmapped".to_string(), self.frac_unmapped());
+        metric.insert("frac_valid_barcode".to_string(), self.frac_valid_barcode());
+        metric.insert("frac_mitochondrial".to_string(), self.frac_mitochondrial());
     }
 }
 

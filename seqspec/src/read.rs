@@ -107,9 +107,7 @@ impl FastqReader {
     }
 
     pub fn records(&mut self) -> FastqRecords {
-        FastqRecords {
-            inner: self,
-        }
+        FastqRecords { inner: self }
     }
 }
 
@@ -117,8 +115,7 @@ pub struct FastqRecords<'a> {
     inner: &'a mut FastqReader,
 }
 
-impl<'a> Iterator for FastqRecords<'a>
-{
+impl<'a> Iterator for FastqRecords<'a> {
     type Item = Result<fastq::Record>;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -158,7 +155,7 @@ impl Read {
 
     /// Get the actual length of the read by reading the first record from the fastq file.
     pub fn actual_len(&self) -> Result<usize> {
-        let mut reader = self.open().unwrap().reader;
+        let mut reader = self.open().expect("No fastq files found.").reader;
         let mut record = fastq::Record::default();
         reader.read_record(&mut record)?;
         Ok(record.sequence().len())
