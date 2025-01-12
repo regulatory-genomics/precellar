@@ -63,10 +63,10 @@ pub fn make_bwa_index(fasta: PathBuf, genome_prefix: PathBuf) -> Result<()> {
 /// aligner: STAR | BWAMEM2
 ///     The aligner to use for the alignment. Available aligners can be found at
 ///     `precellar.aligners` submodule.
-/// modality: str
-///     The modality of the sequencing data, e.g., "rna" or "atac".
 /// output: Path
 ///     File path to the output file. The type of the output file is determined by the `output_type` parameter (see below).
+/// modality: str | None
+///     The modality of the sequencing data, e.g., "rna" or "atac".
 /// output_type: Literal["alignment", "fragment", "gene_quantification"]
 ///     The type of the output file. If "alignment", the output will be a BAM file containing the alignments.
 ///     If "fragment", the output will be a fragment file containing the unique fragments.
@@ -105,14 +105,14 @@ pub fn make_bwa_index(fasta: PathBuf, genome_prefix: PathBuf) -> Result<()> {
 #[pyo3(
     signature = (
         assay, aligner, *,
-        modality, output, output_type="alignment",
+        output, modality=None, output_type="alignment",
         mito_dna=vec!["chrM".to_owned(), "M".to_owned()],
         shift_left=4, shift_right=-5,
         compression=None, compression_level=None,
         temp_dir=None, num_threads=8, chunk_size=10000000,
     ),
     text_signature = "(assay, aligner, *,
-        modality, output, output_type='alignment',
+        output, modality=None, output_type='alignment',
         mito_dna=['chrM', 'M'],
         shift_left=4, shift_right=-5,
         compression=None, compression_level=None,
@@ -122,8 +122,8 @@ pub fn align(
     py: Python<'_>,
     assay: Bound<'_, PyAny>,
     aligner: Bound<'_, PyAny>,
-    modality: &str,
     output: PathBuf,
+    modality: Option<&str>,
     output_type: &str,
     mito_dna: Vec<String>,
     shift_left: i64,
@@ -134,11 +134,11 @@ pub fn align(
     num_threads: u16,
     chunk_size: usize,
 ) -> Result<HashMap<String, f64>> {
-    let modality = Modality::from_str(modality).unwrap();
     let assay = match assay.extract::<PathBuf>() {
         Ok(p) => seqspec::Assay::from_path(&p).unwrap(),
         _ => assay.extract::<PyRef<Assay>>()?.0.clone(),
     };
+    let modality = modality.map(Modality::from_str).unwrap_or(assay.modality())?;
     let mut aligner = AlignerRef::try_from(aligner)?;
     let header = aligner.header();
     let transcript_annotator = aligner.transcript_annotator();

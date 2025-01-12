@@ -39,7 +39,6 @@ assay.update_read('atac-R2', fastq='R3.fastq.gz')
 qc = precellar.align(
     assay,
     precellar.aligners.BWAMEM2("/data/Public/BWA_MEM2_index/GRCh38"),
-    modality="atac",
     output='fragments.tsv.zst',
     output_type='fragment',
     num_threads=32,
@@ -59,7 +58,6 @@ assay.update_read('rna-R2', fastq='R2.fastq.gz')
 qc = precellar.align(
     assay,
     precellar.aligners.STAR("/data/STAR_reference/star_2.7.1"),
-    modality="rna",
     output="gene_matrix.h5ad",
     output_type="gene_quantification",
     num_threads=32,

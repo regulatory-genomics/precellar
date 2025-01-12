@@ -57,6 +57,22 @@ impl Assay {
         Ok(serde_yaml::from_str(&yaml_str)?)
     }
 
+    /// Return the modality if there is only one modality.
+    pub fn modality(&self) -> Result<Modality> {
+        if self.modalities.len() == 1 {
+            Ok(self.modalities[0].clone())
+        } else {
+            bail!(
+                "Multiple modalities found: {}",
+                self.modalities
+                    .iter()
+                    .map(|x| x.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+        }
+    }
+
     /// Normalize all paths in the sequence spec.
     /// This is used to bring relative paths to absolute paths.
     pub fn normalize_all_paths(&mut self) {

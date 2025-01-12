@@ -130,7 +130,20 @@ impl BWAMEM2 {
         Ok(BWAMEM2(aligner))
     }
 
-    /// The minimum seed length of the aligner.
+    /// The maximum number of occurrences of a seed in the reference.
+    /// Skip a seed if its occurrence is larger than this value. The default is 500.
+    #[getter]
+    pub fn get_max_occurrence(&self) -> u16 {
+        self.0.opts.max_occurrence()
+    }
+
+    #[setter]
+    pub fn set_max_occurrence(&mut self, max_occurence: u16) {
+        self.0.opts.set_max_occurrence(max_occurence);
+    }
+
+    /// The minimum seed length of the aligner. The shorter the seed more
+    /// sensitive the search will be. The default value is 19.
     /// 
     /// Returns
     /// -------

@@ -5,6 +5,6 @@
 .. toctree::
    :maxdepth: 2
 
-   txg_atac
    txg_multiome
+   txg_atac
    generic
