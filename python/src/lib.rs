@@ -189,7 +189,8 @@ fn precellar(m: &Bound<'_, PyModule>) -> PyResult<()> {
     env_logger::builder()
         .format(|buf, record| {
             let timestamp = buf.timestamp();
-            writeln!(buf, "[{timestamp} {}] {}", record.level(), record.args())
+            let style = buf.default_level_style(record.level());
+            writeln!(buf, "[{timestamp} {style}{}{style:#}] {}", record.level(), record.args())
         })
         .filter_level(log::LevelFilter::Info)
         .try_init()
