@@ -2,7 +2,7 @@ mod read;
 mod region;
 pub mod utils;
 
-use log::warn;
+use log::{debug, warn};
 use noodles::fastq;
 use read::ReadValidator;
 pub use read::{FastqReader, File, Read, SegmentInfo, SegmentInfoElem, Strand, UrlType};
@@ -493,7 +493,7 @@ impl Assay {
                     warn!("'{}' does not cover the region", read.read_id);
                 }
                 ReadSpan::MayReadThrough(id) => {
-                    warn!(
+                    debug!(
                         "'{}' may read through and contain sequences from: '{}'",
                         read.read_id, id
                     );
