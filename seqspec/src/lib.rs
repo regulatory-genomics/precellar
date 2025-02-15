@@ -893,8 +893,6 @@ mod tests {
             false,
         );
         assert!(result.is_ok());
-        println!("assay: {:?}", assay.library_spec.get("rna-cell_barcode").unwrap().read().unwrap().region_type.is_sequencing_primer());
-
         // Verify warning was logged for barcode primer
         let warning = log_receiver.try_recv().expect("Should have received warning");
         assert!(warning.contains("Warning: primer_id 'rna-cell_barcode' is not a sequencing primer"));
