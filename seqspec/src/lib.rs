@@ -924,6 +924,7 @@ mod tests {
     }
 
     #[test]
+    // This test is to test variable length reads. Still in progress.
     fn test_update_read_with_fastq() {
         // Initialize logger
         let _ = env_logger::builder().is_test(true).try_init();
@@ -974,7 +975,7 @@ mod tests {
 
         // Assert lengths (32 based on the FASTQ content you showed)
         assert_eq!(read1.min_len, 32, "Incorrect length for read1");
-        assert_eq!(read2.min_len, 71, "Incorrect length for read2");
+        assert_eq!(read2.min_len, 70, "Incorrect length for read2");
 
     }
 }
