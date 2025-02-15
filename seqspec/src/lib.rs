@@ -328,7 +328,7 @@ impl Assay {
         if let Some(region) = self.library_spec.get(&read_buffer.primer_id) {
             if !region.read().unwrap().region_type.is_sequencing_primer() {
                 warn!(
-                    "Warning: primer_id '{}' is not a sequencing primer (type: {:?})",
+                    "primer_id '{}' is not a sequencing primer (type: {:?})",
                     read_buffer.primer_id,
                     region.read().unwrap().region_type
                 );
@@ -514,7 +514,7 @@ impl Assay {
                     If this is not the desired behavior, please adjust the region lengths.", read.read_id, id);
                 }
             }
-
+        
             if let Some(mut reader) = read.open() {
                 let regions = index
                     .segments
@@ -524,6 +524,7 @@ impl Assay {
                         (region.read().unwrap(), &info.range)
                     })
                     .collect::<Vec<_>>();
+                /* */
                 let mut validators = regions
                     .iter()
                     .map(|(region, range)| {
@@ -560,6 +561,7 @@ impl Assay {
                     }
                 }
             }
+            
         }
         Ok(())
     }
@@ -895,7 +897,7 @@ mod tests {
         assert!(result.is_ok());
         // Verify warning was logged for barcode primer
         let warning = log_receiver.try_recv().expect("Should have received warning");
-        assert!(warning.contains("Warning: primer_id 'rna-cell_barcode' is not a sequencing primer"));
+        assert!(warning.contains("primer_id 'rna-cell_barcode' is not a sequencing primer"));
         assert!(warning.contains("type: Barcode"));
 
         // Test with sequencing primer - should not warn
@@ -919,5 +921,60 @@ mod tests {
         let read2 = assay.sequence_spec.get("test_read2").unwrap();
         assert_eq!(read1.primer_id, "rna-cell_barcode");
         assert_eq!(read2.primer_id, "rna-illumina_p5");
+    }
+
+    #[test]
+    fn test_update_read_with_fastq() {
+        // Initialize logger
+        let _ = env_logger::builder().is_test(true).try_init();
+
+        // Use existing FASTQ files
+        let fastq_path1 = PathBuf::from("../data/test_1.fastq");
+        let fastq_path2 = PathBuf::from("../data/test_2.fastq");
+
+        // Load test YAML
+        let yaml_str = fs::read_to_string(YAML_FILE).expect("Failed to read file");
+        let mut assay: Assay = serde_yaml::from_str(&yaml_str).expect("Failed to parse YAML");
+
+        // Update read with first FASTQ file
+        assay.update_read::<PathBuf>(
+            "test_read1",
+            Some(Modality::RNA),
+            Some("rna-truseq_read1"),
+            Some(false),
+            Some(&[fastq_path1.clone()]),
+            None,  // Let it determine length from FASTQ
+            Some(16),
+            false,
+        ).expect("Failed to update read with test_1.fastq");
+
+        // Update read with second FASTQ file
+        assay.update_read::<PathBuf>(
+            "test_read2",
+            Some(Modality::RNA),
+            Some("rna-truseq_read2"),
+            Some(true),
+            Some(&[fastq_path2.clone()]),
+            None,
+            None,
+            false,
+        ).expect("Failed to update read with test_2.fastq");
+
+        // Verify reads
+        let read1 = assay.sequence_spec.get("test_read1").expect("Read1 not found");
+        let read2 = assay.sequence_spec.get("test_read2").expect("Read2 not found");
+        
+        // Print read information
+        println!("Read1:");
+        println!("  Length: {}", read1.min_len);
+        //println!("  File: {:?}", read1.files.as_ref().unwrap()[0].path);
+        println!("Read2:");
+        println!("  Length: {}", read2.min_len);
+        //println!("  File: {:?}", read2.files.as_ref().unwrap()[0].path);
+
+        // Assert lengths (32 based on the FASTQ content you showed)
+        assert_eq!(read1.min_len, 32, "Incorrect length for read1");
+        assert_eq!(read2.min_len, 71, "Incorrect length for read2");
+
     }
 }
