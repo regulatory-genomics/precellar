@@ -325,6 +325,15 @@ impl Assay {
         }
 
         self.verify(&read_buffer)?;
+        if let Some(region) = self.library_spec.get(&read_buffer.primer_id) {
+            if !region.read().unwrap().region_type.is_sequencing_primer() {
+                warn!(
+                    "Warning: primer_id '{}' is not a sequencing primer (type: {:?})",
+                    read_buffer.primer_id,
+                    region.read().unwrap().region_type
+                );
+            }
+        }
         self.sequence_spec.insert(read_id.to_string(), read_buffer);
 
         Ok(())
@@ -855,5 +864,62 @@ mod tests {
                     .collect::<Vec<_>>()
             );
         }
+    }
+
+    #[test]
+    fn test_update_read_primer_warning() {
+        let yaml_str = fs::read_to_string(YAML_FILE).expect("Failed to read file");
+        let mut assay: Assay = serde_yaml::from_str(&yaml_str).expect("Failed to parse YAML");
+
+        // Capture log messages
+        let (log_sender, log_receiver) = std::sync::mpsc::channel();
+        let _guard = env_logger::builder()
+            .format(move |_, record| {
+                let _ = log_sender.send(record.args().to_string());
+                Ok(())
+            })
+            .is_test(true)
+            .try_init();
+
+        // Test with non-sequencing primer (barcode) - should warn
+        let result = assay.update_read::<PathBuf>(
+            "test_read1",
+            Some(Modality::RNA),
+            Some("rna-cell_barcode"),  // cell barcode is not a sequencing primer
+            Some(false),
+            None,
+            Some(16),
+            Some(16),
+            false,
+        );
+        assert!(result.is_ok());
+        println!("assay: {:?}", assay.library_spec.get("rna-cell_barcode").unwrap().read().unwrap().region_type.is_sequencing_primer());
+
+        // Verify warning was logged for barcode primer
+        let warning = log_receiver.try_recv().expect("Should have received warning");
+        assert!(warning.contains("Warning: primer_id 'rna-cell_barcode' is not a sequencing primer"));
+        assert!(warning.contains("type: Barcode"));
+
+        // Test with sequencing primer - should not warn
+        let result = assay.update_read::<PathBuf>(
+            "test_read2", 
+            Some(Modality::RNA),
+            Some("rna-illumina_p5"),  // this is a sequencing primer
+            Some(false),
+            None,
+            Some(29),
+            Some(29),
+            false,
+        );
+        assert!(result.is_ok());
+
+        // Verify no warning was logged for sequencing primer
+        assert!(log_receiver.try_recv().is_err(), "Should not have received warning for sequencing primer");
+
+        // Verify reads were added with correct primers
+        let read1 = assay.sequence_spec.get("test_read1").unwrap();
+        let read2 = assay.sequence_spec.get("test_read2").unwrap();
+        assert_eq!(read1.primer_id, "rna-cell_barcode");
+        assert_eq!(read2.primer_id, "rna-illumina_p5");
     }
 }
