@@ -1,5 +1,5 @@
 target
-*.gz
+#*.gz 
 *.zst
 
 # Byte-compiled / optimized / DLL files
@@ -64,7 +64,7 @@ coverage.xml
 # Sphinx documentation
 docs/_build/
 docs/Makefile
-Docs/_autosummary/
+docs/_autosummary/
 
 # PyCharm
 .idea/
