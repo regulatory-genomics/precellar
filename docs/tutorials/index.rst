@@ -8,3 +8,4 @@
    txg_multiome
    txg_atac
    generic
+   make_seqspec
