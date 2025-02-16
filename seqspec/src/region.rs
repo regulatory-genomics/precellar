@@ -191,8 +191,7 @@ where
         Ok(Vec::new())
     }
 }
-
-#[derive(Deserialize, Serialize, Debug, Copy, Clone, PartialEq)]
+#[derive(Debug, Copy, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum RegionType {
     Barcode,
@@ -276,6 +275,54 @@ impl RegionType {
                 | RegionType::IlluminaP5
                 | RegionType::IlluminaP7
         )
+    }
+
+    pub fn from_str_case_insensitive(s: &str) -> Option<Self> {
+        match s.to_lowercase().as_str() {
+            "barcode" => Some(RegionType::Barcode),
+            "cdna" => Some(RegionType::Cdna),
+            "custom_primer" | "customprime" => Some(RegionType::CustomPrimer),
+            "fastq" => Some(RegionType::Fastq),
+            "fastq_link" | "fastqlink" => Some(RegionType::FastqLink),
+            "gdna" => Some(RegionType::Gdna),
+            "hic" => Some(RegionType::Hic),
+            "illumina_p5" | "illuminap5" => Some(RegionType::IlluminaP5),
+            "illumina_p7" | "illuminap7" => Some(RegionType::IlluminaP7),
+            "index5" => Some(RegionType::Index5),
+            "index7" => Some(RegionType::Index7),
+            "linker" => Some(RegionType::Linker),
+            "me1" => Some(RegionType::Me1),
+            "me2" => Some(RegionType::Me2),
+            "methyl" => Some(RegionType::Methyl),
+            "named" => Some(RegionType::Named),
+            "nextera_read1" | "nexteraread1" => Some(RegionType::NexteraRead1),
+            "nextera_read2" | "nexteraread2" => Some(RegionType::NexteraRead2),
+            "poly_a" | "polya" => Some(RegionType::PolyA),
+            "poly_g" | "polyg" => Some(RegionType::PolyG),
+            "poly_t" | "polyt" => Some(RegionType::PolyT),
+            "poly_c" | "polyc" => Some(RegionType::PolyC),
+            "s5" => Some(RegionType::S5),
+            "s7" => Some(RegionType::S7),
+            "truseq_read1" | "truseqread1" => Some(RegionType::TruseqRead1),
+            "truseq_read2" | "truseqread2" => Some(RegionType::TruseqRead2),
+            "umi" => Some(RegionType::Umi),
+            // Handle Modality separately since it's an untagged enum
+            s if Modality::from_str_case_insensitive(s).is_some() => {
+                Some(RegionType::Modality(Modality::from_str_case_insensitive(s).unwrap()))
+            }
+            _ => None,
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for RegionType {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let s = String::deserialize(deserializer)?;
+        RegionType::from_str_case_insensitive(&s)
+            .ok_or_else(|| serde::de::Error::custom(format!("Invalid region type: {}", s)))
     }
 }
 
