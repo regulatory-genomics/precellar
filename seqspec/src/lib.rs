@@ -578,6 +578,19 @@ pub enum Modality {
     Crispr,
 }
 
+impl Modality {
+    pub fn from_str_case_insensitive(s: &str) -> Option<Self> {
+        match s.to_uppercase().as_str() {
+            "RNA" => Some(Modality::RNA),
+            "ATAC" => Some(Modality::ATAC),
+            "PROTEIN" => Some(Modality::Protein),
+            "DNA" => Some(Modality::DNA),
+            "TAG" => Some(Modality::Tag),
+            "CRISPR" => Some(Modality::Crispr),
+            _ => None,
+        }
+    }
+}
 impl<'de> Deserialize<'de> for Modality {
     fn deserialize<D>(deserializer: D) -> Result<Modality, D::Error>
     where
@@ -976,6 +989,37 @@ mod tests {
         // Assert lengths (32 based on the FASTQ content you showed)
         assert_eq!(read1.min_len, 32, "Incorrect length for read1");
         assert_eq!(read2.min_len, 70, "Incorrect length for read2");
-
     }
+    #[test]
+    fn test_case_insensitive_yaml() {
+        // Test YAML with different cases
+        let yaml = r#"
+region_id: "test_region"
+region_type: "BARCODE"  # uppercase
+name: "Test Region"
+sequence_type: "fixed"
+sequence: "ACGT"
+min_len: 4
+max_len: 4
+regions: []
+"#;
+        let region: Region = serde_yaml::from_str(yaml).expect("Failed to parse YAML");
+        assert_eq!(region.region_type, RegionType::Barcode);
+
+        // Test mixed case
+        let yaml = r#"
+region_id: "test_region"
+region_type: "TruSeq_Read1"  # mixed case
+name: "Test Region"
+sequence_type: "fixed"
+sequence: "ACGT"
+min_len: 4
+max_len: 4
+regions: []
+"#;
+        let region: Region = serde_yaml::from_str(yaml).expect("Failed to parse YAML");
+        assert_eq!(region.region_type, RegionType::TruseqRead1);
+    }
+
+
 }

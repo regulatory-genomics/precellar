@@ -21,10 +21,9 @@ Core functions
 .. autosummary::
     :toctree: _autosummary
 
-    make_genome_index
     align
-    make_fragment
     make_fastq
+    make_bwa_index
 
 
 Aligners
