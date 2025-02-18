@@ -6,7 +6,7 @@ use noodles::fastq::{self, io::Writer};
 use noodles::sam::alignment::record::data::field::{Tag, Value};
 use noodles::sam::alignment::record::QualityScores;
 use precellar::utils::{rev_compl_fastq_record, strip_fastq};
-use pyo3::{prelude::*, types::PyDict};
+use pyo3::{prelude::*, types::{PyDict, PyList}};
 use rayon::slice::ParallelSliceMut;
 use regex::Regex;
 use seqspec::utils::{create_file, is_url, open_file_async, Compression};
@@ -14,6 +14,7 @@ use std::{io::BufWriter, path::PathBuf, str::FromStr};
 use tokio::runtime::Runtime;
 use std::iter::repeat;
 use rand::Rng;
+use glob::glob;
 
 /// Remove barcode from the read names of fastq records.
 ///
@@ -381,6 +382,29 @@ fn bam_to_fastq(
     Ok(())
 }
 
+/// Convert input path to a list of file paths, supporting glob patterns
+fn expand_path_pattern(pattern: &String) -> PyResult<Vec<String>> {
+    let paths: Vec<String> = glob(pattern)
+        .map_err(|e| {
+            pyo3::exceptions::PyValueError::new_err(format!(
+                "Invalid glob pattern '{}': {}", 
+                pattern, e
+            ))
+        })?
+        .filter_map(Result::ok)
+        .map(|path| path.to_string_lossy().into_owned())
+        .collect();
+
+    if paths.is_empty() {
+        Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "No files found matching pattern: {}", 
+            pattern
+        )))
+    } else {
+        Ok(paths)
+    }
+}
+
 /// Merge multiple FASTQ files into a single output file and generate a barcode file.
 ///
 /// Parameters
@@ -418,23 +442,65 @@ fn bam_to_fastq(
 )]
 fn merge_fastq_files(
     py: Python<'_>,
-    input1_files: Vec<String>,
+    input1_files: PyObject,
     output1_file: String,
     barcode_file: String,
-    input2_files: Option<Vec<String>>,
+    input2_files: Option<PyObject>,
     output2_file: Option<String>,
     compression: Option<&str>,
     compression_level: Option<u32>,
     num_threads: u32,
 ) -> PyResult<()> {
-    // Check if input2 length matches input1 length when provided
-    if let Some(input2) = &input2_files {
-        if input2.len() != input1_files.len() {
-            return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                "Number of files in input1 ({}) and input2 ({}) must match",
-                input1_files.len(),
-                input2.len()
-            )));
+    // Convert input1_files to Vec<String> with glob expansion
+    let input1_vec = if input1_files.downcast_bound::<PyList>(py).is_ok() {
+        let patterns: Vec<String> = input1_files.extract(py)?;
+        patterns
+            .into_iter()
+            .try_fold(Vec::new(), |mut acc, pattern| -> PyResult<_> {
+                acc.extend(expand_path_pattern(&pattern)?);
+                Ok(acc)
+            })?
+    } else {
+        let pattern: String = input1_files.extract(py)?;
+        expand_path_pattern(&pattern)?
+    };
+
+    // Sort the files to ensure consistent ordering
+    let mut input1_vec = input1_vec;
+    input1_vec.sort();
+
+    // Convert input2_files to Vec<String> if provided, with glob expansion
+    let input2_vec = if let Some(input2) = input2_files {
+        if input2.downcast_bound::<PyList>(py).is_ok() {
+            let patterns: Vec<String> = input2.extract(py)?;
+            let mut files = patterns
+                .into_iter()
+                .try_fold(Vec::new(), |mut acc, pattern| -> PyResult<_> {
+                    acc.extend(expand_path_pattern(&pattern)?);
+                    Ok(acc)
+                })?;
+            files.sort();
+            Some(files)
+        } else {
+            let pattern: String = input2.extract(py)?;
+            let mut files = expand_path_pattern(&pattern)?;
+            files.sort();
+            Some(files)
+        }
+    } else {
+        None
+    };
+
+    // Print the files that will be processed
+    println!("Files to process:");
+    println!("Read 1 files:");
+    for file in &input1_vec {
+        println!("  {}", file);
+    }
+    if let Some(ref files) = input2_vec {
+        println!("Read 2 files:");
+        for file in files {
+            println!("  {}", file);
         }
     }
 
@@ -475,7 +541,7 @@ fn merge_fastq_files(
         )?;
 
         // 3. Process each pair of input files
-        for (idx, input1_file) in input1_files.iter().enumerate() {
+        for (idx, input1_file) in input1_vec.iter().enumerate() {
             py.check_signals()?; // Check for Python interrupt signals
 
             println!("Processing file pair {}:", idx + 1);
@@ -492,7 +558,7 @@ fn merge_fastq_files(
             let mut records1 = reader1.records();
 
             // Process second input file if provided
-            let mut reader2_opt = if let Some(input2_files) = &input2_files {
+            let mut reader2_opt = if let Some(input2_files) = &input2_vec {
                 let input2_file = &input2_files[idx];
                 println!("  Read 2: {}", input2_file);
                 
