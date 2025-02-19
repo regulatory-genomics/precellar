@@ -9,7 +9,7 @@ use bstr::BString;
 use indexmap::IndexMap;
 use itertools::Itertools;
 use kdam::{tqdm, BarExt};
-use log::info;
+use log::{debug, info};
 use noodles::{bam, fastq};
 use rayon::iter::ParallelIterator;
 use rayon::slice::ParallelSlice;
@@ -31,6 +31,7 @@ pub struct FastqProcessor {
 
 impl FastqProcessor {
     pub fn new(assay: Assay) -> Self {
+        debug!("Creating new FastqProcessor");
         Self {
             assay,
             current_modality: None,
@@ -43,6 +44,7 @@ impl FastqProcessor {
     }
 
     pub fn with_barcode_correct_prob(mut self, prob: f64) -> Self {
+        debug!("Setting barcode correction probability to {}", prob);
         self.barcode_correct_prob = prob;
         self
     }
@@ -57,16 +59,19 @@ impl FastqProcessor {
     }
 
     pub fn with_modality(mut self, modality: Modality) -> Self {
+        debug!("Setting modality to {:?}", modality);
         self.current_modality = Some(modality);
         self
     }
 
     pub fn get_report(&self) -> Metrics {
+        debug!("Generating metrics report for modality {:?}", self.modality());
         let mut metrics = self
             .metrics
             .get(&self.modality())
             .map_or(Metrics::default(), |x| x.clone());
         if let Some(align_qc) = self.align_qc.get(&self.modality()) {
+            debug!("Adding alignment QC metrics to report");
             align_qc.report(&mut metrics);
         }
         metrics
@@ -129,39 +134,66 @@ impl FastqProcessor {
 
     pub fn gen_barcoded_fastq(&mut self, correct_barcode: bool) -> AnnotatedFastqReader {
         let modality = self.modality();
+        debug!("Starting gen_barcoded_fastq for modality: {:?}", modality);
 
         let whitelists = if correct_barcode {
             info!("Counting barcodes...");
-            // let whitelist = self.count_barcodes().unwrap();
-            let whitelists = self.count_barcodes().unwrap();
-            for (id, whitelist) in whitelists.iter() {
-                info!(
-                    "{:.2}% of sequences have an exact match in whitelist '{}'. Number of unique barcodes: {}.",
-                    whitelist.frac_exact_match() * 100.0,
-                    id,
-                    whitelist.num_seen_barcodes(),
-                );
+            debug!("Calling count_barcodes()");
+            match self.count_barcodes() {
+                Ok(wl) => {
+                    debug!("Successfully counted barcodes. Found {} whitelists", wl.len());
+                    // Log details for each whitelist
+                    for (id, whitelist) in wl.iter() {
+                        debug!(
+                            "Whitelist '{}': exact match rate={:.2}%, unique barcodes={}",
+                            id,
+                            whitelist.frac_exact_match() * 100.0,
+                            whitelist.num_seen_barcodes()
+                        );
+                    }
+                    wl
+                }
+                Err(e) => {
+                    debug!("Error counting barcodes: {}", e);
+                    IndexMap::new()
+                }
             }
-            whitelists
         } else {
+            debug!("Skipping barcode correction");
             IndexMap::new()
         };
 
+        debug!("Creating BarcodeCorrector with threshold={}", self.barcode_correct_prob);
         let corrector = BarcodeCorrector::default()
             .with_max_missmatch(self.mismatch_in_barcode)
             .with_bc_confidence_threshold(self.barcode_correct_prob);
 
+        debug!("Creating FastqAnnotators from segments");
         let mut fq_reader: AnnotatedFastqReader = self
             .assay
             .get_segments_by_modality(modality)
             .filter_map(|(read, index)| {
+                debug!(
+                    "Processing read {} with {} segments", 
+                    read.read_id,
+                    index.segments.len()
+                );
                 let annotator = FastqAnnotator::new(read, index, &whitelists, corrector.clone())?;
+                debug!(
+                    "Created annotator for read {} with {} subregions",
+                    annotator.id,
+                    annotator.subregions.len()
+                );
                 Some((annotator, read.open().unwrap()))
             })
             .collect();
+
         if !whitelists.is_empty() {
             fq_reader.total_reads = Some(whitelists[0].total_count);
+            debug!("Set total_reads to {}", whitelists[0].total_count);
         }
+
+        debug!("Completed gen_barcoded_fastq setup");
         fq_reader
     }
 
@@ -213,6 +245,7 @@ impl FastqProcessor {
     }
 
     fn get_whitelists(&self) -> IndexMap<RegionId, Whitelist> {
+        debug!("Getting whitelists for modality {:?}", self.modality());
         let regions = self
             .assay
             .library_spec
@@ -220,7 +253,8 @@ impl FastqProcessor {
             .unwrap()
             .read()
             .unwrap();
-        regions
+        
+        let whitelists: IndexMap<RegionId, Whitelist> = regions
             .subregions
             .iter()
             .filter_map(|r| {
@@ -228,8 +262,10 @@ impl FastqProcessor {
                 if r.region_type.is_barcode() {
                     let id = r.region_id.to_string();
                     let list = if let Some(onlist) = r.onlist.as_ref() {
+                        debug!("Found whitelist for barcode region {}", id);
                         Whitelist::new(onlist.read().unwrap())
                     } else {
+                        debug!("No whitelist found for barcode region {}, using empty list", id);
                         Whitelist::empty()
                     };
                     Some((id, list))
@@ -237,7 +273,10 @@ impl FastqProcessor {
                     None
                 }
             })
-            .collect()
+            .collect();
+
+        debug!("Found {} whitelists", whitelists.len());
+        whitelists
     }
 }
 
@@ -656,11 +695,16 @@ impl<'a, R: std::io::Read> Iterator for NameCollatedRecords<'a, R> {
 #[cfg(test)]
 mod tests {
     use bwa_mem2::{AlignerOpts, BurrowsWheelerAligner, FMIndex, PairedEndStats};
+    use env_logger;
 
     use super::*;
 
     #[test]
     fn test_seqspec_io() {
+        // Initialize logging with debug level
+        env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("debug"))
+            .init();
+
         let bwa_index = "/data/Public/BWA_MEM2_index/GRCh38";
         let seqspec = "/data/kzhang/dev/PreCellar/test/seqspec.yaml";
         let spec = Assay::from_path(seqspec).unwrap();

@@ -5,7 +5,8 @@ use anyhow::{bail, Result};
 use noodles::sam::{self, alignment::io::Write};
 use pyo3::prelude::*;
 use std::ops::DerefMut;
-use std::{collections::HashMap, path::PathBuf, str::FromStr};
+use std::{collections::HashMap, path::PathBuf, str::FromStr, time::Instant};
+use log::{info, warn};
 
 use precellar::{
     align::{FastqProcessor, MultiMapR},
@@ -134,53 +135,89 @@ pub fn align(
     num_threads: u16,
     chunk_size: usize,
 ) -> Result<HashMap<String, f64>> {
+    let start_time = Instant::now();
+    info!("Starting alignment process");
+    
     let assay = match assay.extract::<PathBuf>() {
-        Ok(p) => seqspec::Assay::from_path(&p).unwrap(),
-        _ => assay.extract::<PyRef<Assay>>()?.0.clone(),
+        Ok(p) => {
+            info!("Loading assay from path: {:?}", p);
+            seqspec::Assay::from_path(&p).unwrap()
+        },
+        _ => {
+            info!("Using provided Assay object");
+            assay.extract::<PyRef<Assay>>()?.0.clone()
+        },
     };
+    
     let modality = modality.map(Modality::from_str).unwrap_or(assay.modality())?;
+    info!("Using modality: {:?}", modality);
+    
     let mut aligner = AlignerRef::try_from(aligner)?;
+    info!("Initialized aligner: {}", match &aligner {
+        AlignerRef::STAR(_) => "STAR",
+        AlignerRef::BWA(_) => "BWA-MEM2",
+    });
+    
     let header = aligner.header();
     let transcript_annotator = aligner.transcript_annotator();
 
+    info!("Initializing FastqProcessor with {} threads and chunk size {}", num_threads, chunk_size);
     let mut processor = FastqProcessor::new(assay)
         .with_modality(modality)
         .with_barcode_correct_prob(0.9);
-    mito_dna.iter().for_each(|x| {
-        processor.add_mito_dna(x);
-    });
+    
+    if !mito_dna.is_empty() {
+        info!("Adding mitochondrial DNA references: {:?}", mito_dna);
+        mito_dna.iter().for_each(|x| {
+            processor.add_mito_dna(x);
+        });
+    }
 
+    info!("Generating alignments");
     let alignments: Box<dyn Iterator<Item = _>> = match &mut aligner {
-        AlignerRef::STAR(ref mut aligner) => Box::new(processor.gen_barcoded_alignments(
-            aligner.deref_mut().deref_mut(),
-            num_threads,
-            num_threads as usize * chunk_size,
-        )),
-        AlignerRef::BWA(ref mut aligner) => Box::new(processor.gen_barcoded_alignments(
-            aligner.deref_mut().deref_mut(),
-            num_threads,
-            num_threads as usize * chunk_size,
-        )),
+        AlignerRef::STAR(ref mut aligner) => {
+            info!("Using STAR aligner");
+            Box::new(processor.gen_barcoded_alignments(
+                aligner.deref_mut().deref_mut(),
+                num_threads,
+                num_threads as usize * chunk_size,
+            ))
+        },
+        AlignerRef::BWA(ref mut aligner) => {
+            info!("Using BWA-MEM2 aligner");
+            Box::new(processor.gen_barcoded_alignments(
+                aligner.deref_mut().deref_mut(),
+                num_threads,
+                num_threads as usize * chunk_size,
+            ))
+        },
     };
 
-    match OutputType::try_from(output_type)? {
+    info!("Processing output type: {}", output_type);
+    let result = match OutputType::try_from(output_type)? {
         OutputType::Alignment => {
+            info!("Writing alignments to BAM file: {:?}", output);
             write_alignments(py, output, &header, alignments)?;
             Ok(processor.get_report().into())
         }
         OutputType::Fragment => {
+            info!("Generating fragments");
             let compression = compression
                 .map(|x| Compression::from_str(x).unwrap())
                 .or((&output).try_into().ok());
-            let mut writer =
-                create_file(output, compression, compression_level, num_threads as u32)?;
+            info!("Using compression: {:?} with level: {:?}", compression, compression_level);
+            
+            let mut writer = create_file(output.clone(), compression, compression_level, num_threads as u32)?;
+            info!("Created output file: {:?}", output);
 
             let mut fragment_generator = FragmentGenerator::default();
-            if let Some(dir) = temp_dir {
+            if let Some(dir) = temp_dir.clone() {
+                info!("Using temporary directory: {:?}", dir);
                 fragment_generator.set_temp_dir(dir);
                 fragment_generator.set_shift_left(shift_left);
                 fragment_generator.set_shift_right(shift_right);
             }
+            
             let frag_qc = write_fragments(
                 py,
                 &mut writer,
@@ -194,14 +231,20 @@ pub fn align(
             Ok(qc.into())
         }
         OutputType::GeneQuantification => {
+            info!("Starting gene quantification");
             let mut quantifier = Quantifier::new(transcript_annotator.unwrap());
             mito_dna.iter().for_each(|x| quantifier.add_mito_dna(x));
-            let quant_qc = quantifier.quantify(&header, alignments, output)?;
+            let quant_qc = quantifier.quantify(&header, alignments, output.clone())?;
+            info!("Completed gene quantification, writing to: {:?}", output);
             let mut qc = processor.get_report();
             quant_qc.report(&mut qc);
             Ok(qc.into())
         }
-    }
+    };
+
+    let elapsed = start_time.elapsed();
+    info!("Alignment process completed in {:.2?}", elapsed);
+    result
 }
 
 #[inline]
