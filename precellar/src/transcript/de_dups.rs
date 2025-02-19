@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
+use log::warn;
 
 use crate::transcript::annotate::AnnotationRegion;
 
@@ -36,9 +37,25 @@ where
     let mut result = DeDupResult::default();
     let mut umigene_counts_exon = HashMap::new();
     let mut umigene_counts_intron = HashMap::new();
+    let mut gene_counter = HashMap::new();
+    let mut warned = false;
+
     alignments.into_iter().for_each(|alignment| {
         let gene = alignment.idx;
-        let umi = alignment.umi.unwrap().into_bytes();
+        let umi = match alignment.umi {
+            Some(umi) => umi.into_bytes(),
+            None => {
+                if !warned {
+                    warn!("Encountered alignment(s) without UMI information. Using generated UMIs.");
+                    warned = true;
+                }
+                // Create a unique UMI for each gene using a counter
+                let counter = gene_counter.entry(gene).or_insert(0u32);
+                *counter += 1;
+                format!("NOUMI{:010}", counter).into_bytes()
+            }
+        };
+        
         match alignment.align_type {
             AnnotationRegion::Exonic => {
                 *umigene_counts_exon.entry((umi, gene)).or_insert(0) += 1u64;
