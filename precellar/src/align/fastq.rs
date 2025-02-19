@@ -172,6 +172,7 @@ impl FastqProcessor {
         let mut fq_reader: AnnotatedFastqReader = self
             .assay
             .get_segments_by_modality(modality)
+            .filter(|(read, _)| read.open().is_some())
             .filter_map(|(read, index)| {
                 debug!(
                     "Processing read {} with {} segments", 
