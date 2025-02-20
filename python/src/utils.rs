@@ -6,12 +6,15 @@ use noodles::fastq::{self, io::Writer};
 use noodles::sam::alignment::record::data::field::{Tag, Value};
 use noodles::sam::alignment::record::QualityScores;
 use precellar::utils::{rev_compl_fastq_record, strip_fastq};
-use pyo3::{prelude::*, types::PyDict};
+use pyo3::{prelude::*, types::{PyDict, PyList}};
 use rayon::slice::ParallelSliceMut;
 use regex::Regex;
 use seqspec::utils::{create_file, is_url, open_file_async, Compression};
 use std::{io::BufWriter, path::PathBuf, str::FromStr};
 use tokio::runtime::Runtime;
+use std::iter::repeat;
+use rand::Rng;
+use glob::glob;
 
 /// Remove barcode from the read names of fastq records.
 ///
@@ -379,12 +382,290 @@ fn bam_to_fastq(
     Ok(())
 }
 
+/// Convert input path to a list of file paths, supporting glob patterns
+fn expand_path_pattern(pattern: &String) -> PyResult<Vec<String>> {
+    let paths: Vec<String> = glob(pattern)
+        .map_err(|e| {
+            pyo3::exceptions::PyValueError::new_err(format!(
+                "Invalid glob pattern '{}': {}", 
+                pattern, e
+            ))
+        })?
+        .filter_map(Result::ok)
+        .map(|path| path.to_string_lossy().into_owned())
+        .collect();
+
+    if paths.is_empty() {
+        Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "No files found matching pattern: {}", 
+            pattern
+        )))
+    } else {
+        Ok(paths)
+    }
+}
+
+/// Merge multiple FASTQ files into a single output file and generate a barcode file.
+///
+/// Parameters
+/// ----------
+/// input1_files: list[str]
+///     List of paths to the first read (R1) FASTQ files.
+/// input2_files: list[str] | None
+///     Optional list of paths to the second read (R2) FASTQ files.
+/// output1_file: str
+///     Path to the output file for merged R1 reads.
+/// output2_file: str | None
+///     Optional path to the output file for merged R2 reads.
+/// barcode_file: str
+///     Path to the output barcode file.
+/// compression: Literal['gzip', 'zst'] | None
+///     Compression algorithm to use. If None, the compression algorithm will be inferred from the file extension.
+/// compression_level: int | None
+///     Compression level to use.
+/// num_threads: int
+///     Number of threads to use for compression.
+#[pyfunction]
+#[pyo3(
+    signature = (
+        input1_files,
+        output1_file,
+        barcode_file,
+        input2_files=None,
+        output2_file=None,
+        *,
+        compression=None,
+        compression_level=None,
+        num_threads=4
+    ),
+    text_signature = "(input1_files, output1_file, barcode_file, input2_files=None, output2_file=None, *, compression=None, compression_level=None, num_threads=4)",
+)]
+fn merge_fastq_files(
+    py: Python<'_>,
+    input1_files: PyObject,
+    output1_file: String,
+    barcode_file: String,
+    input2_files: Option<PyObject>,
+    output2_file: Option<String>,
+    compression: Option<&str>,
+    compression_level: Option<u32>,
+    num_threads: u32,
+) -> PyResult<()> {
+    // Convert input1_files to Vec<String> with glob expansion
+    let input1_vec = if input1_files.downcast_bound::<PyList>(py).is_ok() {
+        let patterns: Vec<String> = input1_files.extract(py)?;
+        patterns
+            .into_iter()
+            .try_fold(Vec::new(), |mut acc, pattern| -> PyResult<_> {
+                acc.extend(expand_path_pattern(&pattern)?);
+                Ok(acc)
+            })?
+    } else {
+        let pattern: String = input1_files.extract(py)?;
+        expand_path_pattern(&pattern)?
+    };
+
+    // Sort the files to ensure consistent ordering
+    let mut input1_vec = input1_vec;
+    input1_vec.sort();
+
+    // Convert input2_files to Vec<String> if provided, with glob expansion
+    let input2_vec = if let Some(input2) = input2_files {
+        if input2.downcast_bound::<PyList>(py).is_ok() {
+            let patterns: Vec<String> = input2.extract(py)?;
+            let mut files = patterns
+                .into_iter()
+                .try_fold(Vec::new(), |mut acc, pattern| -> PyResult<_> {
+                    acc.extend(expand_path_pattern(&pattern)?);
+                    Ok(acc)
+                })?;
+            files.sort();
+            Some(files)
+        } else {
+            let pattern: String = input2.extract(py)?;
+            let mut files = expand_path_pattern(&pattern)?;
+            files.sort();
+            Some(files)
+        }
+    } else {
+        None
+    };
+
+    // Print the files that will be processed
+    println!("Files to process:");
+    println!("Read 1 files:");
+    for file in &input1_vec {
+        println!("  {}", file);
+    }
+    if let Some(ref files) = input2_vec {
+        println!("Read 2 files:");
+        for file in files {
+            println!("  {}", file);
+        }
+    }
+
+    // Determine compression type
+    let compression = compression
+        .map(|x| Compression::from_str(x).unwrap())
+        .or_else(|| detect_compression_from_path(&output1_file));
+
+    // Create runtime for async operations
+    let rt = Runtime::new()?;
+    
+    rt.block_on(async {
+        // 1. Create output files
+        let mut writer1 = create_file(
+            &output1_file,
+            compression,
+            compression_level,
+            num_threads,
+        )?;
+
+        let mut writer2 = if let Some(output2) = &output2_file {
+            Some(create_file(
+                output2,
+                compression,
+                compression_level,
+                num_threads,
+            )?)
+        } else {
+            None
+        };
+
+        // 2. Create barcode file
+        let mut barcode_writer = create_file(
+            &barcode_file,
+            compression,
+            compression_level,
+            num_threads,
+        )?;
+
+        // 3. Process each pair of input files
+        for (idx, input1_file) in input1_vec.iter().enumerate() {
+            py.check_signals()?; // Check for Python interrupt signals
+
+            println!("Processing file pair {}:", idx + 1);
+            println!("  Read 1: {}", input1_file);
+            
+            // Generate a unique barcode for this input file pair
+            let barcode = generate_random_barcode();
+            
+            // Process first input file
+            let compression1 = detect_compression_from_path(input1_file);
+            let file1 = open_file_async(input1_file, compression1).await?;
+            let buf_reader1 = tokio::io::BufReader::new(file1);
+            let mut reader1 = fastq::AsyncReader::new(buf_reader1);
+            let mut records1 = reader1.records();
+
+            // Process second input file if provided
+            let mut reader2_opt = if let Some(input2_files) = &input2_vec {
+                let input2_file = &input2_files[idx];
+                println!("  Read 2: {}", input2_file);
+                
+                let compression2 = detect_compression_from_path(input2_file);
+                let file2 = open_file_async(input2_file, compression2).await?;
+                let buf_reader2 = tokio::io::BufReader::new(file2);
+                let reader2 = fastq::AsyncReader::new(buf_reader2);
+                Some(reader2)
+            } else {
+                None
+            };
+
+            // Process records
+            let mut count = 0;
+            while let Some(result1) = records1.next().await {
+                if count % 100000 == 0 {
+                    py.check_signals()?; // Check for Python interrupt signals periodically
+                }
+
+                match result1 {
+                    Ok(record1) => {
+                        // Write record1 to output file
+                        writeln!(writer1, "@{}", record1.name())?;
+                        writeln!(writer1, "{}", String::from_utf8_lossy(record1.sequence()))?;
+                        writeln!(writer1, "+")?;
+                        writeln!(writer1, "{}", String::from_utf8_lossy(record1.quality_scores()))?;
+
+                        // Process record2 if available
+                        if let Some(ref mut reader2) = reader2_opt {
+                            if let Some(result2) = reader2.records().next().await {
+                                match result2 {
+                                    Ok(record2) => {
+                                        if let Some(ref mut writer2) = writer2 {
+                                            writeln!(writer2, "@{}", record2.name())?;
+                                            writeln!(writer2, "{}", String::from_utf8_lossy(record2.sequence()))?;
+                                            writeln!(writer2, "+")?;
+                                            writeln!(writer2, "{}", String::from_utf8_lossy(record2.quality_scores()))?;
+                                        }
+                                    }
+                                    Err(e) => {
+                                        return Err(pyo3::exceptions::PyIOError::new_err(
+                                            format!("Error reading record from read 2 file: {}", e)
+                                        ));
+                                    }
+                                }
+                            } else {
+                                return Err(pyo3::exceptions::PyValueError::new_err(
+                                    "Read 2 file has fewer records than read 1 file"
+                                ));
+                            }
+                        }
+                        
+                        // Write barcode
+                        writeln!(barcode_writer, "@{}", record1.name())?;
+                        writeln!(barcode_writer, "{}", barcode)?;
+                        writeln!(barcode_writer, "+")?;
+                        writeln!(barcode_writer, "{}", repeat("I").take(barcode.len()).collect::<String>())?;
+                        
+                        count += 1;
+                        if count % 1_000_000 == 0 {
+                            println!("  Processed {} record pairs", count);
+                        }
+                    }
+                    Err(e) => {
+                        return Err(pyo3::exceptions::PyIOError::new_err(
+                            format!("Error reading record from read 1 file: {}", e)
+                        ));
+                    }
+                }
+            }
+
+            println!("Completed {} records from file pair {}", count, idx + 1);
+        }
+
+        Ok(())
+    })?;
+
+    Ok(())
+}
+
+// Helper function to detect compression from file extension
+fn detect_compression_from_path(path: &str) -> Option<Compression> {
+    if path.ends_with(".gz") {
+        Some(Compression::Gzip)
+    } else if path.ends_with(".zst") {
+        Some(Compression::Zstd)
+    } else {
+        None
+    }
+}
+
+fn generate_random_barcode() -> String {
+    let bases = ['A', 'T', 'C', 'G'];
+    let mut rng = rand::thread_rng();
+    let length = 8; // Set default length to 8 bp
+    (0..length)
+        .map(|_| bases[rng.gen_range(0..4)])
+        .collect()
+}
+
 #[pymodule]
 pub(crate) fn register_utils(parent_module: &Bound<'_, PyModule>) -> PyResult<()> {
     let utils = PyModule::new_bound(parent_module.py(), "utils")?;
 
     utils.add_function(wrap_pyfunction!(strip_barcode_from_fastq, &utils)?)?;
     utils.add_function(wrap_pyfunction!(bam_to_fastq, &utils)?)?;
+    utils.add_function(wrap_pyfunction!(merge_fastq_files, &utils)?)?;
 
     parent_module.add_submodule(&utils)
 }
