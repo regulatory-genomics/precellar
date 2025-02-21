@@ -425,6 +425,8 @@ fn expand_path_pattern(pattern: &String) -> PyResult<Vec<String>> {
 ///     Compression level to use.
 /// num_threads: int
 ///     Number of threads to use for compression.
+/// verbose: bool
+///     Controls the amount of output information.
 #[pyfunction]
 #[pyo3(
     signature = (
@@ -436,9 +438,10 @@ fn expand_path_pattern(pattern: &String) -> PyResult<Vec<String>> {
         *,
         compression=None,
         compression_level=None,
-        num_threads=4
+        num_threads=4,
+        verbose=false
     ),
-    text_signature = "(input1_files, output1_file, barcode_file, input2_files=None, output2_file=None, *, compression=None, compression_level=None, num_threads=4)",
+    text_signature = "(input1_files, output1_file, barcode_file, input2_files=None, output2_file=None, *, compression=None, compression_level=None, num_threads=4, verbose=False)",
 )]
 fn merge_fastq_files(
     py: Python<'_>,
@@ -450,6 +453,7 @@ fn merge_fastq_files(
     compression: Option<&str>,
     compression_level: Option<u32>,
     num_threads: u32,
+    verbose: bool,
 ) -> PyResult<()> {
     // Convert input1_files to Vec<String> with glob expansion
     let input1_vec = if input1_files.downcast_bound::<PyList>(py).is_ok() {
@@ -491,16 +495,19 @@ fn merge_fastq_files(
         None
     };
 
-    // Print the files that will be processed
-    println!("Files to process:");
-    println!("Read 1 files:");
-    for file in &input1_vec {
-        println!("  {}", file);
-    }
-    if let Some(ref files) = input2_vec {
-        println!("Read 2 files:");
-        for file in files {
+
+    // Print the files that will be processed only if verbose
+    if verbose {
+        println!("Files to process:");
+        println!("Read 1 files:");
+        for file in &input1_vec {
             println!("  {}", file);
+        }
+        if let Some(ref files) = input2_vec {
+            println!("Read 2 files:");
+            for file in files {
+                println!("  {}", file);
+            }
         }
     }
 
@@ -544,8 +551,10 @@ fn merge_fastq_files(
         for (idx, input1_file) in input1_vec.iter().enumerate() {
             py.check_signals()?; // Check for Python interrupt signals
 
-            println!("Processing file pair {}:", idx + 1);
-            println!("  Read 1: {}", input1_file);
+            if verbose {
+                println!("Processing file pair {}:", idx + 1);
+                println!("  Read 1: {}", input1_file);
+            }
             
             // Generate a unique barcode for this input file pair
             let barcode = generate_random_barcode();
@@ -560,7 +569,9 @@ fn merge_fastq_files(
             // Process second input file if provided
             let mut reader2_opt = if let Some(input2_files) = &input2_vec {
                 let input2_file = &input2_files[idx];
-                println!("  Read 2: {}", input2_file);
+                if verbose {
+                    println!("  Read 2: {}", input2_file);
+                }
                 
                 let compression2 = detect_compression_from_path(input2_file);
                 let file2 = open_file_async(input2_file, compression2).await?;
@@ -618,7 +629,7 @@ fn merge_fastq_files(
                         writeln!(barcode_writer, "{}", repeat("I").take(barcode.len()).collect::<String>())?;
                         
                         count += 1;
-                        if count % 1_000_000 == 0 {
+                        if verbose && count % 1_000_000 == 0 {
                             println!("  Processed {} record pairs", count);
                         }
                     }
@@ -630,7 +641,9 @@ fn merge_fastq_files(
                 }
             }
 
-            println!("Completed {} records from file pair {}", count, idx + 1);
+            if verbose {
+                println!("Completed {} records from file pair {}", count, idx + 1);
+            }
         }
 
         Ok(())

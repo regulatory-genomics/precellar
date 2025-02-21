@@ -518,7 +518,13 @@ impl<'a> ReadValidator<'a> {
     pub fn validate(&mut self, seq: &[u8]) -> ValidateResult {
         self.n_total += 1;
         let seq = if let Some(range) = &self.range {
-            &seq[range.clone()]
+            if range.end > seq.len() {
+                // If range end is out of bounds, use the full sequence
+                eprintln!("Warning: Range end {} exceeds sequence length {}", range.end, seq.len());
+                seq
+            } else {
+                &seq[range.clone()]
+            }
         } else {
             seq
         };

@@ -820,6 +820,7 @@ mod tests {
     use super::*;
 
     const YAML_FILE: &str = "../seqspec_templates/10x_rna_atac.yaml";
+    const YAML_FILE_2: &str = "../seqspec_templates/smartseq2.yaml";
 
     #[test]
     fn test_parse() {
@@ -843,11 +844,10 @@ mod tests {
 
     #[test]
     fn test_index() {
-        let yaml_str = fs::read_to_string(YAML_FILE).expect("Failed to read file");
-
+        let yaml_str = fs::read_to_string(YAML_FILE_2).expect("Failed to read file");
         let assay: Assay = serde_yaml::from_str(&yaml_str).expect("Failed to parse YAML");
         for (read, index) in assay.get_segments_by_modality(Modality::RNA) {
-            println!(
+            eprintln!(
                 "{}: {:?}",
                 read.read_id,
                 index
@@ -989,6 +989,107 @@ mod tests {
         // Assert lengths (32 based on the FASTQ content you showed)
         assert_eq!(read1.min_len, 32, "Incorrect length for read1");
         assert_eq!(read2.min_len, 70, "Incorrect length for read2");
+    }
+    #[test]
+    fn test_case_insensitive_yaml() {
+        // Test YAML with different cases
+        let yaml = r#"
+region_id: "test_region"
+region_type: "BARCODE"  # uppercase
+name: "Test Region"
+sequence_type: "fixed"
+sequence: "ACGT"
+min_len: 4
+max_len: 4
+regions: []
+"#;
+        let region: Region = serde_yaml::from_str(yaml).expect("Failed to parse YAML");
+        assert_eq!(region.region_type, RegionType::Barcode);
+
+        // Test mixed case
+        let yaml = r#"
+region_id: "test_region"
+region_type: "TruSeq_Read1"  # mixed case
+name: "Test Region"
+sequence_type: "fixed"
+sequence: "ACGT"
+min_len: 4
+max_len: 4
+regions: []
+"#;
+        let region: Region = serde_yaml::from_str(yaml).expect("Failed to parse YAML");
+        assert_eq!(region.region_type, RegionType::TruseqRead1);
+    }
+
+    #[test]
+    fn test_get_segments_by_modality() {
+        let yaml_str = fs::read_to_string(YAML_FILE_2).expect("Failed to read file");
+        let assay: Assay = serde_yaml::from_str(&yaml_str).expect("Failed to parse YAML");
+
+        // Test RNA modality segments
+        let rna_segments: Vec<_> = assay.get_segments_by_modality(Modality::RNA)
+            .map(|(read, info)| {
+                (
+                    read.read_id.clone(),
+                    info.segments.into_iter().map(|seg| {
+                        (
+                            seg.region_id.clone(),
+                            seg.region_type,
+                            seg.range.start..seg.range.end
+                        )
+                    }).collect::<Vec<_>>()
+                )
+            })
+            .collect();
+
+        // Print detailed segment information for debugging
+        println!("\nRNA Segments:");
+        for (read_id, segments) in &rna_segments {
+            println!("Read {}", read_id);
+            for (region_id, region_type, range) in segments {
+                println!("  - Region: {}, Type: {:?}, Range: {:?}", 
+                    region_id, region_type, range);
+            }
+        }
+
+        // Test ATAC modality segments
+        let atac_segments: Vec<_> = assay.get_segments_by_modality(Modality::ATAC)
+            .map(|(read, info)| {
+                (
+                    read.read_id.clone(),
+                    info.segments.into_iter().map(|seg| {
+                        (
+                            seg.region_id.clone(),
+                            seg.region_type,
+                            seg.range.start..seg.range.end
+                        )
+                    }).collect::<Vec<_>>()
+                )
+            })
+            .collect();
+
+        println!("\nATAC Segments:");
+        for (read_id, segments) in &atac_segments {
+            println!("Read {}", read_id);
+            for (region_id, region_type, range) in segments {
+                println!("  - Region: {}, Type: {:?}, Range: {:?}", 
+                    region_id, region_type, range);
+            }
+        }
+
+        // Add assertions to verify expected segments
+        // Example assertions (adjust according to your expected values):
+        assert!(!rna_segments.is_empty(), "Should have RNA segments");
+        //assert!(!atac_segments.is_empty(), "Should have ATAC segments");
+
+        // Verify specific RNA read segments
+        if let Some(rna_read) = rna_segments.iter().find(|(id, _)| id == "RNA R1") {
+            let segments = &rna_read.1;
+            assert!(!segments.is_empty(), "RNA-R1 should have segments");
+            // Add more specific assertions about the segments
+        }
+
+
     }
     #[test]
     fn test_case_insensitive_yaml() {
