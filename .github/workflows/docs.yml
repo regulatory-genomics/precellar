@@ -24,8 +24,8 @@ jobs:
     - name: Install dependency
       run: |
         sudo apt-get install -y pandoc jq
-        sudo pip install --upgrade pip
-        pip install --user sphinx==7.* pydata-sphinx-theme==0.15.* pandoc nbsphinx \
+        python -m pip install --upgrade pip --break-system-packages
+        python -m pip install --user sphinx==7.* pydata-sphinx-theme==0.15.* pandoc nbsphinx \
           Pygments==2.16.* sphinx-autodoc-typehints myst-parser \
           markupsafe==2.1.* sphinx-plotly-directive
 
@@ -39,14 +39,14 @@ jobs:
         path: wheel_files
 
     - name: Install wheel files
-      run: pip install --user wheel_files/*.whl
+      run: python -m pip install --user wheel_files/*.whl
 
     - name: Build doc
       run: |
-        sphinx-build ${GITHUB_WORKSPACE}/docs _build/html
+        python -m sphinx.cmd.build ${GITHUB_WORKSPACE}/docs _build/html
         touch _build/html/.nojekyll
 
-    - name: Get SnapATAC2 version
+    - name: Get Package version
       id: get_version
       run: |
         VERSION_NUMBER=$(python -c "import precellar;print('.'.join(precellar.__version__.split('.')[:2]))")
@@ -83,14 +83,13 @@ jobs:
 
     - name: Fetch JSON and Get Preferred Version
       run: |
-        #JSON=$(cat ${GITHUB_WORKSPACE}/docs/_static/versions.json)
         JSON=$(curl -s "https://raw.githubusercontent.com/regulatory-genomics/precellar/main/docs/_static/versions.json")
         VERSION=$(echo "$JSON" | jq -r '.[] | select(.preferred == true) | .version')
         echo "PREFERRED_VERSION=$VERSION" >> $GITHUB_ENV
         echo "Preferred version is $VERSION"
 
-    - name: Checkout code from gh-pages branch into folder
-      uses: actions/checkout@v2
+    - name: Checkout gh-pages branch
+      uses: actions/checkout@v4
       with:
         ref: 'gh-pages'
         path: 'gh-pages-folder'
