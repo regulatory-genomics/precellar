@@ -495,6 +495,7 @@ fn merge_fastq_files(
         None
     };
 
+
     // Print the files that will be processed only if verbose
     if verbose {
         println!("Files to process:");
