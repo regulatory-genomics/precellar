@@ -131,23 +131,6 @@ impl LibSpec {
             .unwrap_or(0)
     }
 
-    /// Returns true if the specification has exactly two levels of nesting
-    pub fn is_nested_two_times(&self) -> bool {
-        self.get_max_nesting_depth() == 2
-    }
-
-    /// Validates that the specification has exactly two levels of nesting
-    /// Returns an error if the nesting depth is not exactly 2
-    pub fn validate_two_level_nesting(&self) -> Result<()> {
-        let depth = self.get_max_nesting_depth();
-        if depth != 2 {
-            return Err(anyhow::anyhow!(
-                "Invalid nesting depth: expected 2 levels, found {} levels",
-                depth
-            ));
-        }
-        Ok(())
-    }
 }
 
 pub type RegionId = String;
@@ -201,21 +184,6 @@ impl Region {
     // It is good custom to have both methods, because for some data structures, asking about the length will be a costly operation, whereas .is_empty() can usually answer in constant time. Also it used to lead to false positives on the len_zero lint – currently that lint will ignore such entities.
     pub fn is_empty(&self) -> bool {
         self.min_len != self.max_len
-    }
-
-    /// Returns true if this region has nested regions that go at least 3 levels deep
-    pub fn has_three_level_nesting(&self) -> bool {
-        // Check first level subregions
-        for subregion in &self.subregions {
-            // Check second level subregions
-            for sub_subregion in &subregion.read().unwrap().subregions {
-                // If any sub-subregion has subregions, we have 3 levels
-                if !sub_subregion.read().unwrap().subregions.is_empty() {
-                    return true;
-                }
-            }
-        }
-        false
     }
 
     /// Returns the maximum nesting depth of this region
@@ -490,18 +458,15 @@ mod tests {
         let lib_spec_correct = LibSpec::new(vec![region_depth_2]).unwrap();
         assert_eq!(lib_spec_correct.get_max_nesting_depth(), 2);
         assert!(lib_spec_correct.is_nested_two_times());
-        assert!(lib_spec_correct.validate_two_level_nesting().is_ok());
 
         // Test LibSpec with too few levels
         let lib_spec_shallow = LibSpec::new(vec![region_depth_1]).unwrap();
         assert_eq!(lib_spec_shallow.get_max_nesting_depth(), 1);
         assert!(!lib_spec_shallow.is_nested_two_times());
-        assert!(lib_spec_shallow.validate_two_level_nesting().is_err());
 
         // Test LibSpec with too many levels
         let lib_spec_deep = LibSpec::new(vec![region_depth_3]).unwrap();
         assert_eq!(lib_spec_deep.get_max_nesting_depth(), 3);
         assert!(!lib_spec_deep.is_nested_two_times());
-        assert!(lib_spec_deep.validate_two_level_nesting().is_err());
     }
 }
