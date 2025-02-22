@@ -96,8 +96,22 @@ impl FastqProcessor {
         num_threads: u16,
         chunk_size: usize,
     ) -> impl Iterator<Item = Vec<(Option<MultiMapR>, Option<MultiMapR>)>> + 'a {
+        info!("Starting gen_barcoded_alignments with chunk_size={}", chunk_size);
         let fq_reader = self.gen_barcoded_fastq(true).with_chunk_size(chunk_size);
+        
+        // Log reader state
+        info!("FastqReader created. Is paired-end: {}", fq_reader.is_paired_end());
+        info!("Number of annotators: {}", fq_reader.annotators.len());
+        info!("Number of readers: {}", fq_reader.readers.len());
+        
+        // Log barcode and UMI information
+        let barcodes = fq_reader.get_all_barcodes();
+        info!("Barcodes found: {:?}", barcodes);
+        let umis = fq_reader.get_all_umi();
+        info!("UMIs found: {:?}", umis);
+
         let total_reads = fq_reader.total_reads.unwrap_or(0);
+        info!("Total reads reported: {}", total_reads);
 
         let modality = self.modality();
         info!("Aligning {} reads...", total_reads);
@@ -113,6 +127,23 @@ impl FastqProcessor {
 
         let mut progress_bar = tqdm!(total = total_reads);
         fq_reader.map(move |data| {
+            info!("Processing chunk with {} records", data.len());
+            // Log details of first few records in chunk
+            if !data.is_empty() {
+                let sample = &data[0];
+                info!("Sample record - Barcode present: {}, UMI present: {}, Read1 present: {}, Read2 present: {}", 
+                    sample.barcode.is_some(),
+                    sample.umi.is_some(),
+                    sample.read1.is_some(),
+                    sample.read2.is_some()
+                );
+                
+                // Check if at least one read is present
+                if sample.read1.is_none() && sample.read2.is_none() {
+                    panic!("Neither Read1 nor Read2 is present. Please provide at least one read.");
+                }
+            }
+            
             let align_qc = self.align_qc.get_mut(&modality).unwrap();
             let results: Vec<_> = aligner.align_reads(num_threads, data);
             results.iter().for_each(|ali| match ali {
@@ -125,7 +156,9 @@ impl FastqProcessor {
                 (None, Some(ali2)) => {
                     align_qc.add_read2(&header, ali2).unwrap();
                 }
-                _ => {}
+                _ => {
+                    debug!("No alignment found for read");
+                }
             });
             progress_bar.update(results.len()).unwrap();
             results
@@ -134,7 +167,7 @@ impl FastqProcessor {
 
     pub fn gen_barcoded_fastq(&mut self, correct_barcode: bool) -> AnnotatedFastqReader {
         let modality = self.modality();
-        debug!("Starting gen_barcoded_fastq for modality: {:?}", modality);
+        info!("Starting gen_barcoded_fastq for modality: {:?}", modality);
 
         let whitelists = if correct_barcode {
             info!("Counting barcodes...");
@@ -174,13 +207,26 @@ impl FastqProcessor {
             .get_segments_by_modality(modality)
             .filter(|(read, _)| read.open().is_some())
             .filter_map(|(read, index)| {
-                debug!(
-                    "Processing read {} with {} segments", 
+                info!(
+                    "Processing read {} with {} segments, is_reverse: {}", 
                     read.read_id,
-                    index.segments.len()
+                    index.segments.len(),
+                    read.is_reverse()
                 );
+                
+                // Log each segment's type
+                for seg in &index.segments {
+                    info!(
+                        "Segment in read {}: type={:?}, range={:?}, id={}", 
+                        read.read_id, 
+                        seg.region_type, 
+                        seg.range,
+                        seg.region_id
+                    );
+                }
+
                 let annotator = FastqAnnotator::new(read, index, &whitelists, corrector.clone())?;
-                debug!(
+                info!(
                     "Created annotator for read {} with {} subregions",
                     annotator.id,
                     annotator.subregions.len()
@@ -347,9 +393,11 @@ impl AnnotatedFastqReader {
 
     /// Read a chunk of records from the fastq files.
     fn read_chunk(&mut self) -> usize {
+        //info!("Starting to read chunk. Target chunk size: {}", self.chunk_size);
         self.chunk.clear();
 
         let mut accumulated_length = 0;
+        let mut total_records = 0;
 
         while accumulated_length < self.chunk_size {
             let mut max_read = 0;
@@ -357,7 +405,8 @@ impl AnnotatedFastqReader {
             let records: SmallVec<[_; 4]> = self
                 .readers
                 .iter_mut()
-                .flat_map(|reader| {
+                .enumerate()
+                .flat_map(|(i, reader)| {
                     let n = reader
                         .read_record(&mut self.buffer)
                         .expect("error reading fastq record");
@@ -371,11 +420,14 @@ impl AnnotatedFastqReader {
                     }
                 })
                 .collect();
+            
             if max_read == 0 {
+                debug!("No more records to read");
                 break;
             } else if min_read == 0 {
                 panic!("Unequal number of reads in the chunk");
             } else {
+                total_records += 1;
                 assert!(
                     records.iter().map(|r| r.name()).all_equal(),
                     "read names mismatch"
@@ -384,6 +436,9 @@ impl AnnotatedFastqReader {
             }
         }
 
+        //info!("Read chunk complete. Total records: {}, Accumulated length: {}", 
+        //    total_records, accumulated_length);
+        
         self.chunk.len()
     }
 }
@@ -501,6 +556,7 @@ impl FastqAnnotator {
         let mut umi = None;
         let mut read1 = None;
         let mut read2 = None;
+
         self.subregions.iter().for_each(|info| {
             let mut fq =
                 slice_fastq_record(record, info.range.start as usize, info.range.end as usize);

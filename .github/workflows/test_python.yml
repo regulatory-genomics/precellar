@@ -10,8 +10,27 @@ jobs:
     steps:
     - name: Checkout code
       uses: nschloe/action-cached-lfs-checkout@v1
+      
+    - name: Set up GCC
+      uses: egor-tensin/setup-gcc@v1
+      with:
+        version: 10
+        platform: x64
+      
+    - name: Install system dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y \
+          build-essential \
+          cmake \
+          g++ \
+          libz-dev \
+          libbz2-dev \
+          liblzma-dev \
+          libstdc++-10-dev \
+          ninja-build
 
-    - uses: actions/setup-python@v4
+    - uses: actions/setup-python@v5
       name: Install Python
       with:
           python-version: '3.10'
@@ -20,26 +39,31 @@ jobs:
       with:
         cache: true
 
-    - name: Install dependencies
+    - name: Install Python dependencies
       run: |
-        sudo pip install --upgrade pip
-        pip install --user pytest hypothesis==6.72.4 wheel
+        python -m pip install --upgrade pip --break-system-packages
+        python -m pip install --user pytest hypothesis==6.72.4 wheel maturin
 
     - name: Build wheel files
+      env:
+        CFLAGS: "-Wno-error"
+        CXXFLAGS: "-Wno-error"
+        RUSTFLAGS: "-C target-cpu=x86-64"
       run: |
         cd ${GITHUB_WORKSPACE}/python
         mkdir ${GITHUB_WORKSPACE}/wheel_files
         pip wheel . --wheel-dir ${GITHUB_WORKSPACE}/wheel_files
 
+
     - name: Test Python package
       run: |
-        pip install --user ${GITHUB_WORKSPACE}/wheel_files/*.whl
+        python -m pip install --user ${GITHUB_WORKSPACE}/wheel_files/*.whl
 
     - name: Get precellar version
       id: get-version
       run: |
         VERSION_NUMBER=$(python -c "import precellar;print(precellar.__version__)")
-        echo $VERSION_NUMBER
+        echo "Version: $VERSION_NUMBER"
         echo "VERSION=$VERSION_NUMBER" >> $GITHUB_OUTPUT
 
     - name: Upload wheel files as artifacts

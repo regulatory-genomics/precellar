@@ -122,6 +122,15 @@ impl LibSpec {
             }).collect()
         })
     }
+
+    /// Returns the maximum nesting depth across all modalities
+    pub fn get_max_nesting_depth(&self) -> usize {
+        self.modalities()
+            .map(|region| region.read().unwrap().get_nesting_depth())
+            .max()
+            .unwrap_or(0)
+    }
+
 }
 
 pub type RegionId = String;
@@ -175,6 +184,19 @@ impl Region {
     // It is good custom to have both methods, because for some data structures, asking about the length will be a costly operation, whereas .is_empty() can usually answer in constant time. Also it used to lead to false positives on the len_zero lint – currently that lint will ignore such entities.
     pub fn is_empty(&self) -> bool {
         self.min_len != self.max_len
+    }
+
+    /// Returns the maximum nesting depth of this region
+    pub fn get_nesting_depth(&self) -> usize {
+        let mut max_depth = 0;
+        if !self.subregions.is_empty() {
+            // Add 1 for current level and recursively check subregions
+            max_depth = 1 + self.subregions.iter()
+                .map(|subregion| subregion.read().unwrap().get_nesting_depth())
+                .max()
+                .unwrap_or(0);
+        }
+        max_depth
     }
 }
 
@@ -382,4 +404,69 @@ impl Onlist {
 pub enum Location {
     Local,
     Remote,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn create_nested_region(depth: usize, id_prefix: &str) -> Region {
+        if depth == 0 {
+            return Region {
+                region_id: format!("{}_leaf", id_prefix),
+                region_type: RegionType::Barcode,
+                name: "test".to_string(),
+                sequence_type: SequenceType::Fixed,
+                sequence: "ACGT".to_string(),
+                min_len: 4,
+                max_len: 4,
+                onlist: None,
+                subregions: vec![],
+            };
+        }
+
+        Region {
+            region_id: format!("{}_level_{}", id_prefix, depth),
+            region_type: if depth == depth {
+                RegionType::Modality(Modality::ATAC)
+            } else {
+                RegionType::Barcode
+            },
+            name: "test".to_string(),
+            sequence_type: SequenceType::Joined,
+            sequence: "".to_string(),
+            min_len: 4,
+            max_len: 4,
+            onlist: None,
+            subregions: vec![Arc::new(RwLock::new(create_nested_region(depth - 1, id_prefix)))],
+        }
+    }
+
+    #[test]
+    fn test_nesting_depth() {
+        // Create regions with different nesting depths
+        let region_depth_1 = create_nested_region(1, "test1");
+        let region_depth_2 = create_nested_region(2, "test2");
+        let region_depth_3 = create_nested_region(3, "test3");
+
+        // Test individual region depths
+        assert_eq!(region_depth_1.get_nesting_depth(), 1);
+        assert_eq!(region_depth_2.get_nesting_depth(), 2);
+        assert_eq!(region_depth_3.get_nesting_depth(), 3);
+
+        // Test LibSpec with exactly 2 levels
+        let lib_spec_correct = LibSpec::new(vec![region_depth_2]).unwrap();
+        assert_eq!(lib_spec_correct.get_max_nesting_depth(), 2);
+        assert!(lib_spec_correct.is_nested_two_times());
+
+        // Test LibSpec with too few levels
+        let lib_spec_shallow = LibSpec::new(vec![region_depth_1]).unwrap();
+        assert_eq!(lib_spec_shallow.get_max_nesting_depth(), 1);
+        assert!(!lib_spec_shallow.is_nested_two_times());
+
+        // Test LibSpec with too many levels
+        let lib_spec_deep = LibSpec::new(vec![region_depth_3]).unwrap();
+        assert_eq!(lib_spec_deep.get_max_nesting_depth(), 3);
+        assert!(!lib_spec_deep.is_nested_two_times());
+    }
 }
