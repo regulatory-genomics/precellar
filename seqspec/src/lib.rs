@@ -66,7 +66,7 @@ impl Assay {
         for modality in &self.modalities {
             if let Some(region) = self.library_spec.get_modality(modality) {
                 let depth = region.read().unwrap().get_nesting_depth();
-                println!("Modality {:?} has nesting depth: {}", modality, depth);
+                //println!("Modality {:?} has nesting depth: {}", modality, depth);
                 if depth != 1 {
                     bail!(
                         "Invalid assay structure for modality {:?}: nesting depth must be exactly 2 levels (found {} levels)",
