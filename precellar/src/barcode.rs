@@ -185,7 +185,7 @@ fn update_best_option<'a>(
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Whitelist {
     whitelist_exists: bool,
     barcode_counts: OligoFrequncy,
@@ -367,7 +367,7 @@ impl BarcodeCorrector {
         barcode_counts: &'a OligoFrequncy,
         barcode: &'a [u8],
         qual: &[u8],
-    ) -> Result<&[u8], BarcodeError> {
+    ) -> Result<&'a [u8], BarcodeError> {
         let expected_errors: f64 = qual.iter().map(|&q| error_probability(q)).sum();
         if expected_errors >= self.max_expected_errors {
             return Err(BarcodeError::ExceedExpectedError(expected_errors));
@@ -1007,4 +1007,4 @@ mod tests {
         assert!(whitelist.num_seen_barcodes() < original_count);
         assert_eq!(whitelist.num_seen_barcodes(), results.filtered_bcs);
     }
-    
+}

@@ -92,6 +92,14 @@ pub fn make_bwa_index(fasta: PathBuf, genome_prefix: PathBuf) -> Result<()> {
 /// chunk_size: int
 ///     This parameter is used to control the number of bases processed in each chunk per thread.
 ///     The total number of bases in each chunk is determined by: chunk_size * num_threads.
+/// expected_cells: int | None
+///     The expected number of cells in the sample. If None, the number of cells will be inferred.
+/// use_advanced_barcode_filtering: bool
+///     Whether to use advanced barcode filtering. The default is True for backward compatibility.
+/// barcode_filtering_quantile: float
+///     The quantile to use for barcode filtering. Default is 0.99.
+/// barcode_bootstrap_samples: int
+///     The number of bootstrap samples to use for barcode filtering. Default is 100.
 ///
 /// Returns
 /// -------
@@ -111,13 +119,17 @@ pub fn make_bwa_index(fasta: PathBuf, genome_prefix: PathBuf) -> Result<()> {
         shift_left=4, shift_right=-5,
         compression=None, compression_level=None,
         temp_dir=None, num_threads=8, chunk_size=10000000,
+        expected_cells=None, use_advanced_barcode_filtering=true,
+        barcode_filtering_quantile=0.99, barcode_bootstrap_samples=100,
     ),
     text_signature = "(assay, aligner, *,
         output, modality=None, output_type='alignment',
         mito_dna=['chrM', 'M'],
         shift_left=4, shift_right=-5,
         compression=None, compression_level=None,
-        temp_dir=None, num_threads=8, chunk_size=10000000)",
+        temp_dir=None, num_threads=8, chunk_size=10000000,
+        expected_cells=None, use_advanced_barcode_filtering=True,
+        barcode_filtering_quantile=0.99, barcode_bootstrap_samples=100)",
 )]
 pub fn align(
     py: Python<'_>,
@@ -134,6 +146,10 @@ pub fn align(
     temp_dir: Option<PathBuf>,
     num_threads: u16,
     chunk_size: usize,
+    expected_cells: Option<u32>,
+    use_advanced_barcode_filtering: bool,
+    barcode_filtering_quantile: f64,
+    barcode_bootstrap_samples: u32,
 ) -> Result<HashMap<String, f64>> {
     let start_time = Instant::now();
     info!("Starting alignment process");
@@ -165,6 +181,16 @@ pub fn align(
     let mut processor = FastqProcessor::new(assay)
         .with_modality(modality)
         .with_barcode_correct_prob(0.9);
+    
+    // Add expected cells if provided
+    if let Some(cells) = expected_cells {
+        processor = processor.with_expected_cells(cells as usize);
+    }
+    
+    // Configure barcode filtering parameters
+    processor = processor
+        .with_advanced_barcode_filtering(use_advanced_barcode_filtering)
+        .with_barcode_filtering_params(barcode_filtering_quantile, barcode_bootstrap_samples as usize);
     
     if !mito_dna.is_empty() {
         info!("Adding mitochondrial DNA references: {:?}", mito_dna);
