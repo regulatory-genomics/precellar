@@ -350,7 +350,7 @@ impl Assay {
         if let Some(region) = self.library_spec.get(&read_buffer.primer_id) {
             if !region.read().unwrap().region_type.is_sequencing_primer() {
                 warn!(
-                    "primer_id '{}' is not a sequencing primer (type: {:?})",
+                    "primer_id '{}' is not a sequencing primer (type: {:?}). This will cause errors. If you are sure this is what you want, please change region_type to custom_primer.",
                     read_buffer.primer_id,
                     region.read().unwrap().region_type
                 );
@@ -932,7 +932,7 @@ mod tests {
         assert!(result.is_ok());
         // Verify warning was logged for barcode primer
         let warning = log_receiver.try_recv().expect("Should have received warning");
-        assert!(warning.contains("primer_id 'rna-cell_barcode' is not a sequencing primer"));
+        assert!(warning.contains("primer_id 'rna-cell_barcode' is not a sequencing primer."));
         assert!(warning.contains("type: Barcode"));
 
         // Test with sequencing primer - should not warn

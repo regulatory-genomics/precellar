@@ -1,7 +1,7 @@
 use super::aligners::{Aligner, MultiMap, MultiMapR};
 
 use crate::adapter::trim_poly_nucleotide;
-use crate::barcode::{BarcodeCorrector, OligoFrequncy, Whitelist};
+use crate::barcode::{BarcodeCorrector, OligoFrequncy, Whitelist, filter_cellular_barcodes_ordmag_advanced};
 use crate::qc::{AlignQC, Metrics};
 use crate::utils::rev_compl_fastq_record;
 use anyhow::{bail, Result};
@@ -27,6 +27,7 @@ pub struct FastqProcessor {
     // exceeds this threshold, the barcode will be corrected.
     // cellrange uses 0.975 for ATAC and 0.9 for multiome.
     mismatch_in_barcode: usize, // The number of mismatches allowed in barcode
+    expected_cells: Option<usize>, // Expected number of cells
 }
 
 impl FastqProcessor {
@@ -40,12 +41,19 @@ impl FastqProcessor {
             mito_dna: HashSet::new(),
             barcode_correct_prob: 0.975,
             mismatch_in_barcode: 1,
+            expected_cells: None,
         }
     }
 
     pub fn with_barcode_correct_prob(mut self, prob: f64) -> Self {
         debug!("Setting barcode correction probability to {}", prob);
         self.barcode_correct_prob = prob;
+        self
+    }
+
+    pub fn with_expected_cells(mut self, cells: usize) -> Self {
+        debug!("Setting expected number of cells to {}", cells);
+        self.expected_cells = Some(cells);
         self
     }
 
@@ -247,6 +255,7 @@ impl FastqProcessor {
     fn count_barcodes(&mut self) -> Result<IndexMap<RegionId, Whitelist>> {
         let modality = self.modality();
         let mut whitelists = self.get_whitelists();
+        let mut total_filtered_bcs = 0;
 
         fn count(
             read: &Read,
@@ -284,10 +293,60 @@ impl FastqProcessor {
             count(read, barcode_region_index, &mut whitelists[i])?;
         }
 
+        // Apply advanced filtering to each whitelist if no predefined whitelist exists
+        for (id, whitelist) in whitelists.iter_mut() {
+            // Use get_barcode_counts() to check if we have a predefined whitelist
+            // We consider a whitelist "predefined" if it has entries but no counts
+            let has_predefined_whitelist = !whitelist.get_barcode_counts().is_empty() && 
+                                          whitelist.num_seen_barcodes() == 0;
+            
+            if !has_predefined_whitelist {
+                info!("No predefined whitelist for '{}', applying order-of-magnitude filtering", id);
+                
+                let results = filter_cellular_barcodes_ordmag_advanced(
+                    whitelist,
+                    self.expected_cells,
+                    None,
+                    None,
+                    Some(0.99), // Default quantile of 0.99
+                    Some(100),  // Default 100 bootstrap samples
+                );
+                
+                info!(
+                    "Found {} cellular barcodes (95% CI: {}-{}) for '{}' with counts >= {}",
+                    results.filtered_bcs, 
+                    results.filtered_bcs_lb,
+                    results.filtered_bcs_ub,
+                    id,
+                    results.filtered_bcs_cutoff
+                );
+                
+                total_filtered_bcs += results.filtered_bcs;
+                
+                // Store filtering metrics
+                self.metrics.entry(modality).or_default().insert(
+                    format!("filtered_bcs_{}", id),
+                    results.filtered_bcs as f64,
+                );
+                self.metrics.entry(modality).or_default().insert(
+                    format!("filtered_bcs_cutoff_{}", id),
+                    results.filtered_bcs_cutoff as f64,
+                );
+            }
+        }
+
+        if total_filtered_bcs > 0 {
+            self.metrics.entry(modality).or_default().insert(
+                "total_filtered_bcs".to_string(),
+                total_filtered_bcs as f64,
+            );
+        }
+
         self.metrics.entry(modality).or_default().insert(
             "frac_q30_bases_barcode".to_string(),
             whitelists.values().map(|x| x.frac_q30_bases()).sum::<f64>() / whitelists.len() as f64,
         );
+        
         Ok(whitelists)
     }
 
@@ -781,4 +840,5 @@ mod tests {
 
         println!("{}", processor.get_report());
     }
+    
 }

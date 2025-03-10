@@ -275,6 +275,42 @@ impl Whitelist {
             1.0 - (self.mismatch_count as f64 / self.total_count as f64)
         }
     }
+
+    /// Filter barcodes by frequency, keeping only those with count >= threshold
+    pub fn filter_by_frequency(&mut self, threshold: usize) {
+        // Create a new filtered OligoFrequncy
+        let mut filtered = OligoFrequncy::new();
+        
+        // Only keep barcodes above the threshold
+        for (barcode, count) in self.barcode_counts.iter() {
+            if *count >= threshold {
+                filtered.insert(barcode.clone(), *count);
+            }
+        }
+        
+        // Update statistics
+        let previous_count = self.barcode_counts.len();
+        let filtered_count = filtered.len();
+        self.mismatch_count = self.mismatch_count
+            .saturating_sub(previous_count - filtered_count);
+        
+        // Replace the barcode counts with filtered ones
+        self.barcode_counts = filtered;
+        
+        log::info!(
+            "Filtered barcodes by frequency >= {}: {} of {} barcodes remain",
+            threshold,
+            filtered_count,
+            previous_count
+        );
+    }
+    
+    /// Return a vector of barcode counts in descending order
+    pub fn get_sorted_counts(&self) -> Vec<usize> {
+        let mut counts: Vec<usize> = self.barcode_counts.values().copied().collect();
+        counts.sort_by(|a, b| b.cmp(a)); // Sort in descending order
+        counts
+    }
 }
 
 /// A barcode validator that uses a barcode counter to validate barcodes.
@@ -377,3 +413,598 @@ pub(crate) fn get_umi<R: Record>(rec: &R) -> Result<Option<String>> {
             _ => None,
         }))
 }
+
+/// Results from barcode filtering operations
+#[derive(Debug, Clone)]
+pub struct BarcodeFilterResults {
+    /// Number of filtered barcodes
+    pub filtered_bcs: usize,
+    /// Lower bound of filtered barcodes (95% confidence)
+    pub filtered_bcs_lb: usize,
+    /// Upper bound of filtered barcodes (95% confidence)
+    pub filtered_bcs_ub: usize,
+    /// Variance of filtered barcode count from bootstrapping
+    pub filtered_bcs_var: f64,
+    /// Coefficient of variation for filtered barcode count
+    pub filtered_bcs_cv: f64,
+    /// Count cutoff used for filtering
+    pub filtered_bcs_cutoff: usize,
+}
+
+impl Default for BarcodeFilterResults {
+    fn default() -> Self {
+        Self {
+            filtered_bcs: 0,
+            filtered_bcs_lb: 0,
+            filtered_bcs_ub: 0,
+            filtered_bcs_var: 0.0,
+            filtered_bcs_cv: 0.0,
+            filtered_bcs_cutoff: 0,
+        }
+    }
+}
+
+impl BarcodeFilterResults {
+    /// Create results with a constant call count
+    pub fn with_constant_call(n_bcs: usize) -> Self {
+        Self {
+            filtered_bcs: n_bcs,
+            filtered_bcs_lb: n_bcs,
+            filtered_bcs_ub: n_bcs,
+            filtered_bcs_var: 0.0,
+            filtered_bcs_cv: 0.0,
+            filtered_bcs_cutoff: 0,
+        }
+    }
+}
+
+/// Constants for barcode filtering
+const MIN_RECOVERED_CELLS_PER_GEM_GROUP: usize = 50;
+const MAX_RECOVERED_CELLS_PER_GEM_GROUP: usize = 1 << 18; // 262,144
+
+/// Filter cellular barcodes using order of magnitude approach with bootstrapping
+///
+/// This function identifies real cellular barcodes based on their counts
+/// being significantly higher than background noise, using bootstrapping to
+/// estimate the appropriate cutoff.
+///
+/// # Arguments
+///
+/// * `whitelist` - The whitelist containing barcode frequencies
+/// * `recovered_cells` - Optional number of cells expected
+/// * `chemistry_description` - Chemistry description string
+/// * `num_probe_barcodes` - Number of probe barcodes
+/// * `ordmag_recovered_cells_quantile` - Quantile for determining baseline (default: 0.99)
+/// * `num_bootstrap_samples` - Number of bootstrap iterations (default: 100)
+///
+/// # Returns
+///
+/// * Detailed results of the filtering process
+pub fn filter_cellular_barcodes_ordmag_advanced(
+    whitelist: &mut Whitelist,
+    recovered_cells: Option<usize>,
+    chemistry_description: Option<&str>,
+    num_probe_barcodes: Option<usize>,
+    ordmag_recovered_cells_quantile: Option<f64>,
+    num_bootstrap_samples: Option<usize>,
+) -> BarcodeFilterResults {
+    use rand::seq::SliceRandom;
+    use rand::SeedableRng;
+    use rand_pcg::Pcg64;
+    
+    let quantile = ordmag_recovered_cells_quantile.unwrap_or(0.99);
+    let bootstrap_samples = num_bootstrap_samples.unwrap_or(100);
+    let mut rng = Pcg64::seed_from_u64(0); // Fixed seed for reproducibility
+    
+    // Get counts and filter non-zero
+    let counts = whitelist.get_sorted_counts();
+    let nonzero_counts: Vec<usize> = counts.into_iter().filter(|&c| c > 0).collect();
+    
+    if nonzero_counts.is_empty() {
+        log::warn!("All barcodes do not have enough reads for filtering, allowing no barcodes through");
+        return BarcodeFilterResults::default();
+    }
+    
+    let estimated_cells = if let Some(cells) = recovered_cells {
+        let cells = std::cmp::max(cells, MIN_RECOVERED_CELLS_PER_GEM_GROUP);
+        log::info!("Using provided recovered_cells = {}", cells);
+        cells
+    } else {
+        // Set the most cells to examine based on the empty drops range for this chemistry
+        let max_expected_cells = if chemistry_description.is_some() {
+            std::cmp::min(
+                get_empty_drops_range(chemistry_description, num_probe_barcodes).0,
+                MAX_RECOVERED_CELLS_PER_GEM_GROUP,
+            )
+        } else {
+            MAX_RECOVERED_CELLS_PER_GEM_GROUP
+        };
+        
+        // Bootstrap to estimate recovered cells
+        let mut estimate_sum = 0.0;
+        let mut loss_sum = 0.0;
+        
+        for _ in 0..bootstrap_samples {
+            let mut sample = nonzero_counts.clone();
+            sample.shuffle(&mut rng);
+            
+            let (estimate, loss) = estimate_recovered_cells_ordmag(
+                &sample,
+                max_expected_cells,
+                quantile,
+            );
+            
+            estimate_sum += estimate as f64;
+            loss_sum += loss;
+        }
+        
+        let avg_estimate = estimate_sum / bootstrap_samples as f64;
+        let avg_loss = loss_sum / bootstrap_samples as f64;
+        
+        let cells = std::cmp::max(avg_estimate.round() as usize, MIN_RECOVERED_CELLS_PER_GEM_GROUP);
+        log::info!("Found recovered_cells = {} with loss = {}", cells, avg_loss);
+        cells
+    };
+    
+    // Calculate baseline index
+    let baseline_bc_idx = ((estimated_cells as f64) * (1.0 - quantile)).round() as usize;
+    let baseline_bc_idx = std::cmp::min(baseline_bc_idx, nonzero_counts.len().saturating_sub(1));
+    
+    // Bootstrap to find top_n
+    let mut top_n_boot = Vec::with_capacity(bootstrap_samples);
+    for _ in 0..bootstrap_samples {
+        let mut sample = nonzero_counts.clone();
+        sample.shuffle(&mut rng);
+        
+        top_n_boot.push(find_within_ordmag(&sample, baseline_bc_idx));
+    }
+    
+    let metrics = summarize_bootstrapped_top_n(&top_n_boot, &nonzero_counts);
+    
+    // Apply the filter to the whitelist
+    whitelist.filter_by_frequency(metrics.filtered_bcs_cutoff.max(1));
+    
+    log::info!(
+        "Advanced filtering: found {} cells (95% CI: {}-{}) with counts >= {}",
+        metrics.filtered_bcs,
+        metrics.filtered_bcs_lb,
+        metrics.filtered_bcs_ub,
+        metrics.filtered_bcs_cutoff
+    );
+    
+    metrics
+}
+
+/// Get the range of values to use for empty drops background by chemistry type
+fn get_empty_drops_range(
+    chemistry_description: Option<&str>,
+    num_probe_bcs: Option<usize>,
+) -> (usize, usize) {
+    let n_partitions = match chemistry_description {
+        Some("v3LT") => 9000,
+        Some("v4") => {
+            if let Some(probe_bcs) = num_probe_bcs {
+                if probe_bcs > 1 {
+                    80000 * probe_bcs
+                } else {
+                    160000
+                }
+            } else {
+                160000
+            }
+        }
+        _ => {
+            if let Some(probe_bcs) = num_probe_bcs {
+                if probe_bcs > 1 {
+                    45000 * probe_bcs
+                } else {
+                    90000
+                }
+            } else {
+                90000
+            }
+        }
+    };
+    
+    (n_partitions / 2, n_partitions)
+}
+
+/// Find barcodes within an order of magnitude of a baseline
+fn find_within_ordmag(counts: &[usize], baseline_idx: usize) -> usize {
+    let mut counts_ascending = counts.to_vec();
+    counts_ascending.sort_unstable();
+    
+    // Add +1 as we're getting from the other side
+    let adjusted_idx = counts_ascending.len().saturating_sub(baseline_idx + 1);
+    let baseline = if adjusted_idx < counts_ascending.len() {
+        counts_ascending[adjusted_idx]
+    } else {
+        return 0;
+    };
+    
+    // Calculate cutoff (10% of baseline)
+    let cutoff = std::cmp::max(1, (0.1 * baseline as f64).round() as usize);
+    
+    // Return the index corresponding to the cutoff in descending order
+    counts_ascending.iter().filter(|&&count| count >= cutoff).count()
+}
+
+/// Estimate the number of recovered cells using order-of-magnitude approach
+fn estimate_recovered_cells_ordmag(
+    nonzero_counts: &[usize],
+    max_expected_cells: usize,
+    ordmag_recovered_cells_quantile: f64,
+) -> (usize, f64) {
+    // Generate log2-spaced range of values from 1..max_expected_cells
+    let max_pow = (max_expected_cells as f64).log2();
+    let mut recovered_cells = Vec::new();
+    
+    // Generate about 2000 points linearly spaced in log space
+    let step = max_pow / 2000.0;
+    for i in 0..=2000 {
+        let pow = i as f64 * step;
+        let value = (2.0_f64.powf(pow)).round() as usize;
+        if !recovered_cells.contains(&value) {
+            recovered_cells.push(value);
+        }
+    }
+    
+    // Calculate baseline indices and filtered cell counts
+    let mut baseline_indices = Vec::with_capacity(recovered_cells.len());
+    let mut filtered_cells = Vec::with_capacity(recovered_cells.len());
+    
+    for &cells in &recovered_cells {
+        let baseline_idx = ((cells as f64) * (1.0 - ordmag_recovered_cells_quantile)).round() as usize;
+        let baseline_idx = std::cmp::min(baseline_idx, nonzero_counts.len().saturating_sub(1));
+        baseline_indices.push(baseline_idx);
+        filtered_cells.push(find_within_ordmag(nonzero_counts, baseline_idx));
+    }
+    
+    // Calculate loss for each candidate
+    let mut min_loss = f64::MAX;
+    let mut best_idx = 0;
+    
+    for (i, (&rc, &fc)) in recovered_cells.iter().zip(filtered_cells.iter()).enumerate() {
+        let rc_f64 = rc as f64;
+        let fc_f64 = fc as f64;
+        
+        if rc_f64 > 0.0 {
+            let loss = (fc_f64 - rc_f64).powi(2) / rc_f64;
+            if loss < min_loss {
+                min_loss = loss;
+                best_idx = i;
+            }
+        }
+    }
+    
+    (recovered_cells[best_idx], min_loss)
+}
+
+/// Summarize bootstrapped results
+fn summarize_bootstrapped_top_n(top_n_boot: &[usize], nonzero_counts: &[usize]) -> BarcodeFilterResults {
+    // Calculate statistics from bootstrap samples
+    let n_samples = top_n_boot.len() as f64;
+    let top_n_bcs_mean: f64 = top_n_boot.iter().sum::<usize>() as f64 / n_samples;
+    
+    let variance_sum: f64 = top_n_boot.iter()
+        .map(|&x| (x as f64 - top_n_bcs_mean).powi(2))
+        .sum();
+    let top_n_bcs_var = variance_sum / n_samples;
+    let top_n_bcs_sd = top_n_bcs_var.sqrt();
+    
+    let mut result = BarcodeFilterResults::default();
+    result.filtered_bcs_var = top_n_bcs_var;
+    
+    if top_n_bcs_mean > 0.0 {
+        result.filtered_bcs_cv = top_n_bcs_sd / top_n_bcs_mean;
+    }
+    
+    // Approximate normal distribution percentiles for 95% confidence interval
+    // Using approximate z-scores for 2.5% and 97.5% (-1.96 and 1.96)
+    result.filtered_bcs_lb = ((top_n_bcs_mean - 1.96 * top_n_bcs_sd).round() as usize).max(0);
+    result.filtered_bcs_ub = (top_n_bcs_mean + 1.96 * top_n_bcs_sd).round() as usize;
+    
+    let nbcs = top_n_bcs_mean.round() as usize;
+    result.filtered_bcs = nbcs;
+    
+    // Make sure we include all barcodes with the same count as the cutoff
+    if nbcs > 0 && !nonzero_counts.is_empty() {
+        let mut sorted_counts = nonzero_counts.to_vec();
+        sorted_counts.sort_unstable_by(|a, b| b.cmp(a)); // Sort in descending order
+        
+        if nbcs - 1 < sorted_counts.len() {
+            let cutoff = sorted_counts[nbcs - 1];
+            result.filtered_bcs_cutoff = cutoff;
+            
+            let mut index = nbcs - 1;
+            while index + 1 < sorted_counts.len() && sorted_counts[index + 1] == cutoff {
+                index += 1;
+                
+                // If we end up grabbing too many barcodes, revert to initial estimate
+                if (index + 1) as f64 - top_n_bcs_mean > 0.20 * top_n_bcs_mean {
+                    return result;
+                }
+                
+                result.filtered_bcs = index + 1;
+            }
+        }
+    }
+    
+    result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_empty_whitelist() {
+        let whitelist = Whitelist::empty();
+        assert_eq!(whitelist.num_seen_barcodes(), 0);
+        assert_eq!(whitelist.total_count, 0);
+        assert_eq!(whitelist.total_base_count, 0);
+        assert_eq!(whitelist.mean_base_quality_score(), 0.0);
+        assert_eq!(whitelist.frac_q30_bases(), 0.0);
+        assert_eq!(whitelist.frac_exact_match(), 0.0);
+    }
+
+    #[test]
+    fn test_new_whitelist() {
+        let barcodes = ["ACGTACGT", "TGCATGCA", "GATCGATC"];
+        let whitelist = Whitelist::new(barcodes);
+        
+        assert!(whitelist.whitelist_exists);
+        assert_eq!(whitelist.num_seen_barcodes(), 0); // No barcodes counted yet
+        assert_eq!(whitelist.total_count, 0);
+        
+        // Check that the whitelist contains the correct barcodes
+        let barcode_counts = whitelist.get_barcode_counts();
+        for barcode in barcodes {
+            assert!(barcode_counts.contains_key(&barcode.as_bytes().to_vec()));
+            assert_eq!(barcode_counts[&barcode.as_bytes().to_vec()], 0);
+        }
+    }
+
+    #[test]
+    fn test_count_barcode_with_whitelist() {
+        let barcodes = ["ACGTACGT", "TGCATGCA", "GATCGATC"];
+        let mut whitelist = Whitelist::new(barcodes);
+        
+        // Count an exact match
+        let barcode = b"ACGTACGT";
+        let quality = b"FFFFFFFI"; // Quality scores (~37, above Q30)
+        whitelist.count_barcode(barcode, quality);
+        
+        assert_eq!(whitelist.total_count, 1);
+        assert_eq!(whitelist.total_base_count, 8);
+        assert_eq!(whitelist.get_barcode_counts()[&barcode.to_vec()], 1);
+        assert_eq!(whitelist.num_seen_barcodes(), 1);
+        assert_eq!(whitelist.frac_exact_match(), 1.0);
+        
+        // Count a barcode not in whitelist
+        let barcode_not_in_list = b"GGGGGGGG";
+        let quality2 = b"IIIIIFFF"; // Mix of quality scores
+        whitelist.count_barcode(barcode_not_in_list, quality2);
+        
+        assert_eq!(whitelist.total_count, 2);
+        assert_eq!(whitelist.total_base_count, 16);
+        assert_eq!(whitelist.mismatch_count, 1);
+        assert_eq!(whitelist.frac_exact_match(), 0.5); // 1 out of 2 matched exactly
+    }
+
+    #[test]
+    fn test_count_barcode_without_whitelist() {
+        let mut whitelist = Whitelist::empty();
+        
+        // Add several barcodes with varying quality scores
+        whitelist.count_barcode(b"ACGTACGT", b"FFFFFFFF");
+        whitelist.count_barcode(b"ACGTACGT", b"FFFFFFFF");
+        whitelist.count_barcode(b"TGCATGCA", b"BBBBBBBB");
+        
+        assert_eq!(whitelist.total_count, 3);
+        assert_eq!(whitelist.total_base_count, 24);
+        assert_eq!(whitelist.num_seen_barcodes(), 2);
+        
+        let barcode_counts = whitelist.get_barcode_counts();
+        assert_eq!(barcode_counts[&b"ACGTACGT".to_vec()], 2);
+        assert_eq!(barcode_counts[&b"TGCATGCA".to_vec()], 1);
+    }
+
+    #[test]
+    fn test_quality_statistics() {
+        let mut whitelist = Whitelist::empty();
+        
+        // Add barcodes with different quality scores
+        // ASCII 70 ('F') = Q37, ASCII 66 ('B') = Q33, ASCII 63 ('?') = Q30, ASCII 62 ('>') = Q29
+        whitelist.count_barcode(b"ACGTACGT", b"FFFFFFFF"); // All Q37
+        whitelist.count_barcode(b"TGCATGCA", b"????BBBB"); // Mixed Q30 and Q33
+        whitelist.count_barcode(b"GATCGATC", b">>>>>>>>"); // All Q29 (below Q30)
+        
+        // Calculate expected values
+        let total_bases = 24.0;
+        let q30_bases = 8.0 + 8.0; // First two barcodes have Q30+ bases
+        let expected_q30_fraction = q30_bases / total_bases;
+        
+        let sum_qual = (8 * (70 - 33)) + (4 * (63 - 33)) + (4 * (66 - 33)) + (8 * (62 - 33));
+        let expected_mean_quality = sum_qual as f64 / total_bases;
+        
+        assert_eq!(whitelist.total_base_count, 24);
+        assert_eq!(whitelist.frac_q30_bases(), expected_q30_fraction);
+        assert!((whitelist.mean_base_quality_score() - expected_mean_quality).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_with_sample_barcode_distribution() {
+        let mut whitelist = Whitelist::empty();
+        
+        // Add barcodes with different counts
+        let barcodes = [
+            (b"ACGTACGT".to_vec(), 1000), // Max count
+            (b"TGCATGCA".to_vec(), 900),
+            (b"GATCGATC".to_vec(), 800),
+            (b"CTACGTAC".to_vec(), 500),
+            (b"ACACGTGT".to_vec(), 100),
+            (b"GTGTCACA".to_vec(), 80),
+            (b"TCAGTCAG".to_vec(), 50),
+            (b"CAGTTCAG".to_vec(), 30),
+            (b"AGTCAGTC".to_vec(), 10),
+            (b"TCAGTCAG".to_vec(), 5),
+        ];
+        
+        // Simulate counting by adding each barcode the specified number of times
+        for (barcode, count) in barcodes.iter() {
+            // Create a quality string of the same length as the barcode
+            let quality = vec![b'F'; barcode.len()];
+            
+            for _ in 0..*count {
+                whitelist.count_barcode(barcode, &quality);
+            }
+        }
+        
+        // Check the total count matches what we expect
+        let expected_total = barcodes.iter().map(|(_, count)| count).sum::<usize>();
+        assert_eq!(whitelist.total_count, expected_total);
+        
+        // Check that we have the right number of unique barcodes
+        // Note: one barcode appears twice in the list (TCAGTCAG)
+        assert_eq!(whitelist.num_seen_barcodes(), 9);
+        
+        // Check specific barcode counts
+        let counts = whitelist.get_barcode_counts();
+        assert_eq!(counts[&b"ACGTACGT".to_vec()], 1000);
+        assert_eq!(counts[&b"AGTCAGTC".to_vec()], 10);
+        assert_eq!(counts[&b"TCAGTCAG".to_vec()], 55); // 50 + 5
+    }
+
+    #[test]
+    fn test_filter_by_frequency() {
+        let mut whitelist = Whitelist::empty();
+        
+        // Add barcodes with different counts
+        let barcodes = [
+            (b"ACGTACGT".to_vec(), 100),
+            (b"TGCATGCA".to_vec(), 50),
+            (b"GATCGATC".to_vec(), 20),
+            (b"CTACGTAC".to_vec(), 5),
+        ];
+        
+        for (barcode, count) in barcodes.iter() {
+            let quality = vec![b'F'; barcode.len()];
+            for _ in 0..*count {
+                whitelist.count_barcode(barcode, &quality);
+            }
+        }
+        
+        // Check pre-filter state
+        assert_eq!(whitelist.num_seen_barcodes(), 4);
+        assert_eq!(whitelist.total_count, 175);
+        
+        // Filter with threshold 20
+        whitelist.filter_by_frequency(20);
+        
+        // Check post-filter state
+        assert_eq!(whitelist.num_seen_barcodes(), 3);
+        let counts = whitelist.get_barcode_counts();
+        assert!(counts.contains_key(&b"ACGTACGT".to_vec()));
+        assert!(counts.contains_key(&b"TGCATGCA".to_vec()));
+        assert!(counts.contains_key(&b"GATCGATC".to_vec()));
+        assert!(!counts.contains_key(&b"CTACGTAC".to_vec()));
+    }
+    
+    #[test]
+    fn test_get_sorted_counts() {
+        let mut whitelist = Whitelist::empty();
+        
+        // Add barcodes with different counts
+        whitelist.count_barcode(b"BARCODE1", &[b'F'; 8]);
+        whitelist.count_barcode(b"BARCODE1", &[b'F'; 8]);
+        whitelist.count_barcode(b"BARCODE1", &[b'F'; 8]);
+        whitelist.count_barcode(b"BARCODE2", &[b'F'; 8]);
+        whitelist.count_barcode(b"BARCODE2", &[b'F'; 8]);
+        whitelist.count_barcode(b"BARCODE3", &[b'F'; 8]);
+        
+        let sorted_counts = whitelist.get_sorted_counts();
+        assert_eq!(sorted_counts, vec![3, 2, 1]);
+    }
+    
+
+    #[test]
+    fn test_find_within_ordmag() {
+        let counts = &[1000, 900, 800, 700, 100, 90, 80, 70, 60, 50];
+        
+        // With baseline_idx 0 (using max value as baseline)
+        // baseline = 1000, cutoff = 100
+        assert_eq!(find_within_ordmag(counts, 0), 5);
+        
+        // With baseline_idx 1 (using second highest value as baseline)
+        // baseline = 900, cutoff = 90
+        assert_eq!(find_within_ordmag(counts, 1), 6);
+    }
+    
+    #[test]
+    fn test_filter_cellular_barcodes_advanced_ordmag() {
+        let mut whitelist = Whitelist::empty();
+        
+        // Create a realistic barcode distribution with a clear knee point
+        // High count real cells
+        for i in 0..100 {
+            let count = 1000 - i * 5;
+            let barcode = format!("CELL_{:03}", i).into_bytes();
+            let quality = vec![b'F'; barcode.len()];
+            
+            for _ in 0..count {
+                whitelist.count_barcode(&barcode, &quality);
+            }
+        }
+        
+        // Medium count transitional barcodes
+        for i in 0..50 {
+            let count = 150 - i * 2;
+            let barcode = format!("MID_{:03}", i).into_bytes();
+            let quality = vec![b'F'; barcode.len()];
+            
+            for _ in 0..count {
+                whitelist.count_barcode(&barcode, &quality);
+            }
+        }
+        
+        // Low count background barcodes
+        for i in 0..200 {
+            let count = 20 - (i / 20);
+            let barcode = format!("BG_{:03}", i).into_bytes();
+            let quality = vec![b'F'; barcode.len()];
+            
+            for _ in 0..count {
+                whitelist.count_barcode(&barcode, &quality);
+            }
+        }
+        
+        let original_count = whitelist.num_seen_barcodes();
+        assert_eq!(original_count, 350); // 100 + 50 + 200
+        
+        // Run advanced order-of-magnitude filtering with bootstrap
+        let results = filter_cellular_barcodes_ordmag_advanced(
+            &mut whitelist,
+            Some(120), // Fixed number of cells for deterministic testing
+            None,
+            None,
+            Some(0.99),
+            Some(10), // Low bootstrap samples for testing
+        );
+        
+        // We should have filtered to approximately the right number
+        assert!(results.filtered_bcs > 100);
+        assert!(results.filtered_bcs < 200);
+        
+        // Check confidence intervals
+        assert!(results.filtered_bcs_lb <= results.filtered_bcs);
+        assert!(results.filtered_bcs_ub >= results.filtered_bcs);
+        
+        // Check that the cutoff value is reasonable
+        assert!(results.filtered_bcs_cutoff > 0);
+        
+        // Check that the whitelist was actually filtered
+        assert!(whitelist.num_seen_barcodes() < original_count);
+        assert_eq!(whitelist.num_seen_barcodes(), results.filtered_bcs);
+    }
+    
