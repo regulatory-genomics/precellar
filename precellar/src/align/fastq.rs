@@ -155,11 +155,11 @@ impl FastqProcessor {
 
         let mut progress_bar = tqdm!(total = total_reads);
         fq_reader.map(move |data| {
-            info!("Processing chunk with {} records", data.len());
+            debug!("Processing chunk with {} records", data.len());
             // Log details of first few records in chunk
             if !data.is_empty() {
                 let sample = &data[0];
-                info!("Sample record - Barcode present: {}, UMI present: {}, Read1 present: {}, Read2 present: {}", 
+                debug!("Sample record - Barcode present: {}, UMI present: {}, Read1 present: {}, Read2 present: {}", 
                     sample.barcode.is_some(),
                     sample.umi.is_some(),
                     sample.read1.is_some(),
