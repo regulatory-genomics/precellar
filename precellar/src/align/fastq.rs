@@ -28,7 +28,6 @@ pub struct FastqProcessor {
     // cellrange uses 0.975 for ATAC and 0.9 for multiome.
     mismatch_in_barcode: usize, // The number of mismatches allowed in barcode
     expected_cells: Option<usize>, // Expected number of cells
-    use_advanced_barcode_filtering: bool, // Whether to use advanced barcode filtering
     barcode_filtering_quantile: f64, // Quantile for barcode filtering
     barcode_bootstrap_samples: usize, // Number of bootstrap samples for filtering
 }
@@ -45,7 +44,6 @@ impl FastqProcessor {
             barcode_correct_prob: 0.975,
             mismatch_in_barcode: 1,
             expected_cells: None,
-            use_advanced_barcode_filtering: true, // Default to true for backward compatibility
             barcode_filtering_quantile: 0.99,
             barcode_bootstrap_samples: 100,
         }
@@ -60,12 +58,6 @@ impl FastqProcessor {
     pub fn with_expected_cells(mut self, cells: usize) -> Self {
         debug!("Setting expected number of cells to {}", cells);
         self.expected_cells = Some(cells);
-        self
-    }
-
-    pub fn with_advanced_barcode_filtering(mut self, enable: bool) -> Self {
-        debug!("Setting advanced barcode filtering to {}", enable);
-        self.use_advanced_barcode_filtering = enable;
         self
     }
     
@@ -124,25 +116,25 @@ impl FastqProcessor {
         num_threads: u16,
         chunk_size: usize,
     ) -> impl Iterator<Item = Vec<(Option<MultiMapR>, Option<MultiMapR>)>> + 'a {
-        info!("Starting gen_barcoded_alignments with chunk_size={}", chunk_size);
+        debug!("Starting gen_barcoded_alignments with chunk_size={}", chunk_size);
         let fq_reader = self.gen_barcoded_fastq(true).with_chunk_size(chunk_size);
         
         // Log reader state
-        info!("FastqReader created. Is paired-end: {}", fq_reader.is_paired_end());
-        info!("Number of annotators: {}", fq_reader.annotators.len());
-        info!("Number of readers: {}", fq_reader.readers.len());
+        debug!("FastqReader created. Is paired-end: {}", fq_reader.is_paired_end());
+        debug!("Number of annotators: {}", fq_reader.annotators.len());
+        debug!("Number of readers: {}", fq_reader.readers.len());
         
         // Log barcode and UMI information
         let barcodes = fq_reader.get_all_barcodes();
-        info!("Barcodes found: {:?}", barcodes);
+        debug!("Barcodes found: {:?}", barcodes);
         let umis = fq_reader.get_all_umi();
-        info!("UMIs found: {:?}", umis);
+        debug!("UMIs found: {:?}", umis);
 
         let total_reads = fq_reader.total_reads.unwrap_or(0);
-        info!("Total reads reported: {}", total_reads);
+        debug!("Total reads reported: {}", total_reads);
 
         let modality = self.modality();
-        info!("Aligning {} reads...", total_reads);
+        debug!("Aligning {} reads...", total_reads);
         let header = aligner.header();
         let mut qc = AlignQC::default();
         self.mito_dna.iter().for_each(|mito| {
@@ -195,10 +187,10 @@ impl FastqProcessor {
 
     pub fn gen_barcoded_fastq(&mut self, correct_barcode: bool) -> AnnotatedFastqReader {
         let modality = self.modality();
-        info!("Starting gen_barcoded_fastq for modality: {:?}", modality);
+        debug!("Starting gen_barcoded_fastq for modality: {:?}", modality);
 
         let whitelists = if correct_barcode {
-            info!("Counting barcodes...");
+            debug!("Counting barcodes...");
             debug!("Calling count_barcodes()");
             match self.count_barcodes() {
                 Ok(wl) => {
@@ -235,7 +227,7 @@ impl FastqProcessor {
             .get_segments_by_modality(modality)
             .filter(|(read, _)| read.open().is_some())
             .filter_map(|(read, index)| {
-                info!(
+                debug!(
                     "Processing read {} with {} segments, is_reverse: {}", 
                     read.read_id,
                     index.segments.len(),
@@ -244,7 +236,7 @@ impl FastqProcessor {
                 
                 // Log each segment's type
                 for seg in &index.segments {
-                    info!(
+                    debug!(
                         "Segment in read {}: type={:?}, range={:?}, id={}", 
                         read.read_id, 
                         seg.region_type, 
@@ -254,7 +246,7 @@ impl FastqProcessor {
                 }
 
                 let annotator = FastqAnnotator::new(read, index, &whitelists, corrector.clone())?;
-                info!(
+                debug!(
                     "Created annotator for read {} with {} subregions",
                     annotator.id,
                     annotator.subregions.len()
@@ -276,6 +268,25 @@ impl FastqProcessor {
         let modality = self.modality();
         let mut whitelists = self.get_whitelists();
         let mut total_filtered_bcs = 0;
+
+        // Add debug info about initial whitelists
+        for (id, whitelist) in whitelists.iter() {
+            debug!("Initial whitelist '{}' state:", id);
+            debug!("  - has_entries: {}", !whitelist.get_barcode_counts().is_empty());
+            debug!("  - num_seen_barcodes: {}", whitelist.num_seen_barcodes());
+            debug!("  - total_count: {}", whitelist.total_count);
+            
+            // Print a sample of the whitelist entries (first 5)
+            let barcode_sample: Vec<_> = whitelist.get_barcode_counts().iter()
+                .take(5)
+                .map(|(bc, count)| (String::from_utf8_lossy(bc), count))
+                .collect();
+            if !barcode_sample.is_empty() {
+                debug!("  - sample entries: {:?}", barcode_sample);
+            } else {
+                debug!("  - sample entries: <empty>");
+            }
+        }
 
         fn count(
             read: &Read,
@@ -299,6 +310,7 @@ impl FastqProcessor {
             Ok(())
         }
 
+        // Count barcodes
         for (i, (read, barcode_region_index)) in self
             .assay
             .get_segments_by_modality(modality)
@@ -310,60 +322,94 @@ impl FastqProcessor {
             })
             .enumerate()
         {
+            debug!("Counting barcodes for region index {}", i);
             count(read, barcode_region_index, &mut whitelists[i])?;
         }
 
-        // Apply advanced filtering to each whitelist if enabled and no predefined whitelist exists
-        if self.use_advanced_barcode_filtering {
-            for (id, whitelist) in whitelists.iter_mut() {
-                // Use get_barcode_counts() to check if we have a predefined whitelist
-                // We consider a whitelist "predefined" if it has entries but no counts
-                let has_predefined_whitelist = !whitelist.get_barcode_counts().is_empty() && 
-                                              whitelist.num_seen_barcodes() == 0;
-                
-                if !has_predefined_whitelist {
-                    info!("No predefined whitelist for '{}', applying order-of-magnitude filtering", id);
-                    
-                    let results = filter_cellular_barcodes_ordmag_advanced(
-                        whitelist,
-                        self.expected_cells,
-                        None,
-                        None,
-                        Some(self.barcode_filtering_quantile),
-                        Some(self.barcode_bootstrap_samples),
-                    );
-                    
-                    info!(
-                        "Found {} cellular barcodes (95% CI: {}-{}) for '{}' with counts >= {}",
-                        results.filtered_bcs, 
-                        results.filtered_bcs_lb,
-                        results.filtered_bcs_ub,
-                        id,
-                        results.filtered_bcs_cutoff
-                    );
-                    
-                    total_filtered_bcs += results.filtered_bcs;
-                    
-                    // Store filtering metrics
-                    self.metrics.entry(modality).or_default().insert(
-                        format!("filtered_bcs_{}", id),
-                        results.filtered_bcs as f64,
-                    );
-                    self.metrics.entry(modality).or_default().insert(
-                        format!("filtered_bcs_cutoff_{}", id),
-                        results.filtered_bcs_cutoff as f64,
-                    );
-                }
-            }
+        // Add debug info after counting
+        for (id, whitelist) in whitelists.iter() {
+            debug!("After counting, whitelist '{}' state:", id);
+            debug!("  - has_entries: {}", !whitelist.get_barcode_counts().is_empty());
+            debug!("  - num_seen_barcodes: {}", whitelist.num_seen_barcodes());
+            debug!("  - total_count: {}", whitelist.total_count);
+            debug!("  - exact_match_rate: {:.2}%", whitelist.frac_exact_match() * 100.0);
             
-            if total_filtered_bcs > 0 {
-                self.metrics.entry(modality).or_default().insert(
-                    "total_filtered_bcs".to_string(),
-                    total_filtered_bcs as f64,
+            // Show counts distribution
+            let counts = whitelist.get_sorted_counts();
+            if !counts.is_empty() {
+                debug!("  - counts distribution: [max: {}, median: {}, min: {}]", 
+                    counts.first().unwrap_or(&0),
+                    counts.get(counts.len() / 2).unwrap_or(&0),
+                    counts.last().unwrap_or(&0)
                 );
             }
-        } else {
-            debug!("Advanced barcode filtering is disabled");
+            
+            // Print top 5 most frequent barcodes
+            let top_barcodes: Vec<_> = whitelist.get_barcode_counts().iter()
+                .sorted_by(|a, b| b.1.cmp(a.1))
+                .take(5)
+                .map(|(bc, count)| (String::from_utf8_lossy(bc), count))
+                .collect();
+            if !top_barcodes.is_empty() {
+                debug!("  - top barcodes: {:?}", top_barcodes);
+            }
+        }
+
+        // Apply advanced filtering to each whitelist if enabled and no predefined whitelist exists
+        for (id, whitelist) in whitelists.iter_mut() {
+            // Use get_barcode_counts() to check if we have a predefined whitelist
+            // We consider a whitelist "predefined" if it has entries but no counts
+            let is_empty = whitelist.get_barcode_counts().is_empty();
+            let num_seen = whitelist.num_seen_barcodes();
+            let has_predefined_whitelist = !is_empty && num_seen != 0;
+            
+            debug!("Whitelist '{}' predefined check:", id);
+            debug!("  - is_empty: {}", is_empty);
+            debug!("  - num_seen_barcodes: {}", num_seen);
+            debug!("  - has_predefined_whitelist: {}", has_predefined_whitelist);
+            
+            if !has_predefined_whitelist {
+                info!("No predefined whitelist for '{}', applying order-of-magnitude filtering", id);
+                
+                let results = filter_cellular_barcodes_ordmag_advanced(
+                    whitelist,
+                    self.expected_cells,
+                    None,
+                    None,
+                    Some(self.barcode_filtering_quantile),
+                    Some(self.barcode_bootstrap_samples),
+                );
+                
+                info!(
+                    "Found {} cellular barcodes (95% CI: {}-{}) for '{}' with counts >= {}",
+                    results.filtered_bcs, 
+                    results.filtered_bcs_lb,
+                    results.filtered_bcs_ub,
+                    id,
+                    results.filtered_bcs_cutoff
+                );
+                
+                total_filtered_bcs += results.filtered_bcs;
+                
+                // Store filtering metrics
+                self.metrics.entry(modality).or_default().insert(
+                    format!("filtered_bcs_{}", id),
+                    results.filtered_bcs as f64,
+                );
+                self.metrics.entry(modality).or_default().insert(
+                    format!("filtered_bcs_cutoff_{}", id),
+                    results.filtered_bcs_cutoff as f64,
+                );
+            } else {
+                info!("Using predefined whitelist for '{}', skipping filtering", id);
+            }
+        }
+        
+        if total_filtered_bcs > 0 {
+            self.metrics.entry(modality).or_default().insert(
+                "total_filtered_bcs".to_string(),
+                total_filtered_bcs as f64,
+            );
         }
 
         self.metrics.entry(modality).or_default().insert(
