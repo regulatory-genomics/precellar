@@ -11,12 +11,9 @@ use itertools::Itertools;
 use kdam::{tqdm, BarExt};
 use log::{debug, info};
 use noodles::{bam, fastq};
-use noodles::sam::alignment::record::data::field::tag::Tag;
-use noodles::sam::alignment::record_buf::data::field::value::Value;
 use rayon::iter::ParallelIterator;
 use rayon::slice::ParallelSlice;
-use seqspec::{Assay, FastqReader, Modality, Read, RegionId, SegmentInfo, SegmentInfoElem, RegionType, SequenceType, Region, LibSpec};
-use seqspec::read::SegmentType;
+use seqspec::{Assay, FastqReader, Modality, Read, RegionId, SegmentInfo, SegmentInfoElem, Region, LibSpec};
 use smallvec::SmallVec;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, RwLock};
@@ -150,15 +147,10 @@ impl FastqProcessor {
         self.align_qc.insert(modality, qc);
 
         // Track stats for debugging
-        let mut total_chunks = 0;
-        let mut total_records = 0;
-        let mut total_alignments = 0;
-        let mut valid_barcodes = 0;
-        let mut invalid_barcodes = 0;
-        let mut records_with_barcode = 0;
-        let mut records_without_barcode = 0;
-        let mut alignments_with_bc_tag = 0;
-        let mut alignments_without_bc_tag = 0;
+        //let mut records_with_barcode = 0;
+        //let mut records_without_barcode = 0;
+        //let mut alignments_with_bc_tag = 0;
+        //let mut alignments_without_bc_tag = 0;
 
         let mut progress_bar = tqdm!(total = total_reads);
         fq_reader.map(move |data| {
@@ -406,51 +398,73 @@ impl FastqProcessor {
             } else {
                 debug!("  - sample entries: <empty>");
             }
+            
+            // Check if this whitelist is predefined (has entries but no counts)
+            let is_empty = whitelist.get_barcode_counts().is_empty();
+            let num_seen = whitelist.num_seen_barcodes();
+            let has_predefined_whitelist = !is_empty;
+            
+            debug!("Whitelist '{}' predefined check:", id);
+            debug!("  - is_empty: {}", is_empty);
+            debug!("  - num_seen_barcodes: {}", num_seen);
+            debug!("  - has_predefined_whitelist: {}", has_predefined_whitelist);
         }
 
         debug!("Counting barcodes");
         
-        // Simplified implementation without phase block handling
-        for (read, region_index) in self
-            .assay
-            .get_segments_by_modality(modality)
-            .filter(|(_, region_index)| {
-                region_index
-                    .segments
-                    .iter()
-                    .any(|x| x.region_type.is_barcode())
-            })
-        {
-            debug!("Processing read {}", read.read_id);
+        // Create a list of IDs that need counting
+        // We need to count barcodes for ALL whitelists, regardless of whether they have predefined entries
+        // This ensures we get accurate barcode counts for filtering later
+        let whitelist_ids: Vec<RegionId> = whitelists.keys().cloned().collect();
+        
+        if !whitelist_ids.is_empty() {
+            debug!("Found {} whitelists that need counting", whitelist_ids.len());
             
-            let is_reverse = read.is_reverse();
+            // Get segments with barcode regions
+            let barcode_segments: Vec<_> = self.assay
+                .get_segments_by_modality(modality)
+                .filter(|(_, region_index)| {
+                    region_index.segments.iter().any(|x| x.region_type.is_barcode())
+                })
+                .collect();
             
-            // Read all records for this segment
-            if let Some(mut reader) = read.open() {
-                for fastq_record_result in reader.records() {
-                    let fastq_record = fastq_record_result.unwrap();
-                    
-                    // Process each barcode region directly
-                    for info in region_index.segments.iter() {
-                        if info.region_type.is_barcode() {
-                            let start_pos = info.range.start as usize;
-                            let end_pos = info.range.end as usize;
-                            
-                            // Extract barcode from this region
-                            let mut barcode_slice = slice_fastq_record(&fastq_record, start_pos, end_pos);
-                            if is_reverse {
-                                barcode_slice = rev_compl_fastq_record(barcode_slice);
-                            }
-                            
-                            // Find the corresponding whitelist
-                            if let Some(whitelist) = whitelists.get_mut(&info.region_id) {
-                                // Count the barcode
-                                whitelist.count_barcode(barcode_slice.sequence(), barcode_slice.quality_scores());
+            debug!("Processing {} segment groups with barcode regions", barcode_segments.len());
+            
+            // Process each read segment for barcodes
+            for (read, region_index) in barcode_segments {
+                debug!("Processing read {}", read.read_id);
+                
+                let is_reverse = read.is_reverse();
+                
+                // Read all records for this segment
+                if let Some(mut reader) = read.open() {
+                    for fastq_record_result in reader.records() {
+                        let fastq_record = fastq_record_result.unwrap();
+                        
+                        // Process each barcode region directly
+                        for info in region_index.segments.iter() {
+                            if info.region_type.is_barcode() && whitelist_ids.contains(&info.region_id) {
+                                let start_pos = info.range.start as usize;
+                                let end_pos = info.range.end as usize;
+                                
+                                // Extract barcode from this region
+                                let mut barcode_slice = slice_fastq_record(&fastq_record, start_pos, end_pos);
+                                if is_reverse {
+                                    barcode_slice = rev_compl_fastq_record(barcode_slice);
+                                }
+                                
+                                // Find the corresponding whitelist
+                                if let Some(whitelist) = whitelists.get_mut(&info.region_id) {
+                                    // Count the barcode - this is essential for filtering
+                                    whitelist.count_barcode(barcode_slice.sequence(), barcode_slice.quality_scores());
+                                }
                             }
                         }
                     }
                 }
             }
+        } else {
+            debug!("No whitelists found for counting");
         }
 
         // Add debug info after counting
@@ -482,20 +496,14 @@ impl FastqProcessor {
             }
         }
 
-        // Apply advanced filtering to each whitelist if enabled and no predefined whitelist exists
+        // Apply advanced filtering to each whitelist if needed
         for (id, whitelist) in whitelists.iter_mut() {
-            // Use get_barcode_counts() to check if we have a predefined whitelist
-            // We consider a whitelist "predefined" if it has entries but no counts
+            // Check if this whitelist needs filtering (no predefined entries or has counts)
             let is_empty = whitelist.get_barcode_counts().is_empty();
             let num_seen = whitelist.num_seen_barcodes();
-            let has_predefined_whitelist = !is_empty && num_seen != 0;
+            let has_predefined_whitelist = !is_empty && num_seen == 0;
             
-            debug!("Whitelist '{}' predefined check:", id);
-            debug!("  - is_empty: {}", is_empty);
-            debug!("  - num_seen_barcodes: {}", num_seen);
-            debug!("  - has_predefined_whitelist: {}", has_predefined_whitelist);
-            
-            if !has_predefined_whitelist {
+            if !has_predefined_whitelist && num_seen > 0 {
                 info!("No predefined whitelist for '{}', applying order-of-magnitude filtering", id);
                 
                 let results = filter_cellular_barcodes_ordmag_advanced(
@@ -652,66 +660,8 @@ impl AnnotatedFastqReader {
         self.chunk.clear();
 
         let mut accumulated_length = 0;
-        let mut _total_records = 0;  // Prefix with underscore to show it's intentionally unused
-/* 
-        // Log reader state before reading
-        debug!("Starting read_chunk with {} readers, chunk_size={}", self.readers.len(), self.chunk_size);
-        
-        if self.readers.is_empty() {
-            debug!("ERROR: No FASTQ readers available! Check if files were opened correctly.");
-            return 0;
-        }
+        let mut _total_records = 0;  // Already correctly prefixed with underscore
 
-        // Try to get first record as a sanity check
-        let mut read_attempts = 0;
-        let mut read_successes = 0;
-        
-        for (i, reader) in self.readers.iter_mut().enumerate() {
-            read_attempts += 1;
-            debug!("Testing reader #{}...", i);
-            
-            // Create a temporary buffer for this test
-            let mut temp_buffer = fastq::Record::default();
-            
-            match reader.read_record(&mut temp_buffer) {
-                Ok(n) if n > 0 => {
-                    read_successes += 1;
-                    debug!("  Success! Read {} bytes from record with name: {}", 
-                         n, String::from_utf8_lossy(temp_buffer.name()));
-                    
-                    // We can't seek back to the beginning since FastqReader doesn't have seek
-                    debug!("  Note: Cannot reset reader position (seek method not available)");
-                },
-                Ok(0) => {
-                    debug!("  Reader returned 0 bytes - file may be empty or at EOF");
-                },
-                Ok(n) => {
-                    read_successes += 1;
-                    debug!("  Success! Read {} bytes from record", n);
-                },
-                Err(e) => {
-                    debug!("  ERROR reading test record: {}", e);
-                }
-            }
-        }
-        
-        debug!("Read test: {}/{} readers successfully read a record", read_successes, read_attempts);
-        
-        if read_successes == 0 {
-            debug!("CRITICAL ERROR: None of the readers could read any records!");
-            debug!("This likely means either:");
-            debug!("1. All input FASTQ files are empty");
-            debug!("2. All input FASTQ files are corrupted");
-            debug!("3. The readers have already consumed all records (reached EOF)");
-            
-            // Since we can't rewind the readers, the user will need to restart the process
-            debug!("IMPORTANT: Since readers cannot be rewound, you'll need to restart processing");
-            
-            return 0;
-        }
-
-        // Removed reset code since we can't seek in FastqReader
-*/
         while accumulated_length < self.chunk_size {
             let mut max_read = 0;
             let mut min_read = usize::MAX;
@@ -725,11 +675,10 @@ impl AnnotatedFastqReader {
                 .readers
                 .iter_mut()
                 .enumerate()
-                .flat_map(|(i, reader)| {
+                .flat_map(|(_i, reader)| {  // Add underscore to i
                     let result = reader.read_record(&mut self.buffer);
                     
-                    if let Err(e) = &result {
-                        //debug!("ERROR reading from reader {}: {}", i, e);
+                    if let Err(_e) = &result {  // Add underscore to e
                         error_readers += 1;
                         return None;
                     }
@@ -738,43 +687,28 @@ impl AnnotatedFastqReader {
                     
                     if n > 0 {
                         successful_readers += 1;
-                        //debug!("Reader {} read {} bytes", i, n);
                         min_read = min_read.min(n);
                         max_read = max_read.max(n);
                         accumulated_length += self.buffer.sequence().len();
                         Some(self.buffer.clone())
                     } else {
                         empty_readers += 1;
-                        //debug!("Reader {} returned 0 bytes (EOF)", i);
                         min_read = 0;
                         None
                     }
                 })
                 .collect();
             
-            //debug!("Read attempt: {} successful, {} empty, {} errors", 
-            //     successful_readers, empty_readers, error_readers);
-            
             if max_read == 0 {
-                //debug!("No more records to read (max_read=0, all readers returned 0 bytes)");
-                // Try to provide more context about why we're stopping
-                if empty_readers == self.readers.len() {
-                //    debug!("All readers reached EOF simultaneously");
-                } else {
-                //    debug!("No readers provided data, but not all reached EOF");
-                }
                 break;
             } else if min_read == 0 && successful_readers > 0 {
-                //debug!("WARNING: Unequal number of reads in the chunk (min_read=0, max_read={})", max_read);
-                //debug!("Some readers returned data while others reached EOF");
-                //panic!("Unequal number of reads in the chunk");
+                // Existing commented code
             } else {
                 _total_records += 1;
                 
                 // Check records for name consistency
                 if records.len() > 0 {
-                    let first_name = records[0].name();
-                    //debug!("Adding {} records to chunk with name: {}", records.len(), String::from_utf8_lossy(first_name));
+                    let _first_name = records[0].name();  // Add underscore to first_name
                     
                     let names_match = records.iter().map(|r| r.name()).all_equal();
                     if !names_match {
@@ -894,7 +828,7 @@ impl Iterator for AnnotatedFastqReader {
                 // Log read1 information
                 if let Some(read1) = &record.read1 {
                     let read1_seq = std::str::from_utf8(read1.sequence()).unwrap_or("<invalid UTF-8>");
-                    let read1_qual = std::str::from_utf8(read1.quality_scores()).unwrap_or("<invalid UTF-8>");
+                    let _read1_qual = std::str::from_utf8(read1.quality_scores()).unwrap_or("<invalid UTF-8>");
                     let read1_name = std::str::from_utf8(read1.name()).unwrap_or("<invalid UTF-8>");
                     debug!("  Read1 name: {}", read1_name);
                     debug!("  Read1 sequence (first 30 bp): {}", &read1_seq[..read1_seq.len().min(30)]);
@@ -906,7 +840,7 @@ impl Iterator for AnnotatedFastqReader {
                 // Log read2 information
                 if let Some(read2) = &record.read2 {
                     let read2_seq = std::str::from_utf8(read2.sequence()).unwrap_or("<invalid UTF-8>");
-                    let read2_qual = std::str::from_utf8(read2.quality_scores()).unwrap_or("<invalid UTF-8>");
+                    let _read2_qual = std::str::from_utf8(read2.quality_scores()).unwrap_or("<invalid UTF-8>");
                     let read2_name = std::str::from_utf8(read2.name()).unwrap_or("<invalid UTF-8>");
                     debug!("  Read2 name: {}", read2_name);
                     debug!("  Read2 sequence (first 30 bp): {}", &read2_seq[..read2_seq.len().min(30)]);
