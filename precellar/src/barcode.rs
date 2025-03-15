@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{bail, Context, Result};
 use core::f64;
 use noodles::sam::alignment::{
     record::data::field::{Tag, Value},
@@ -8,6 +8,7 @@ use std::{
     collections::HashMap,
     ops::{Deref, DerefMut},
 };
+use log::{debug, info};
 
 const BC_MAX_QV: u8 = 66; // This is the illumina quality value
 pub(crate) const BASE_OPTS: [u8; 4] = [b'A', b'C', b'G', b'T'];
@@ -392,15 +393,21 @@ fn error_probability(qual: u8) -> f64 {
     10f64.powf(-((qual as f64 - offset) / 10.0))
 }
 
-pub(crate) fn get_barcode<R: Record>(rec: &R) -> Result<Option<String>> {
-    Ok(rec
-        .data()
-        .get(&Tag::CELL_BARCODE_ID)
-        .transpose()?
-        .and_then(|x| match x {
-            Value::String(barcode) => Some(barcode.to_string()),
-            _ => None,
-        }))
+/// Gets the cell barcode from a BAM record.
+pub fn get_barcode<R: Record>(record: &R) -> Result<Option<String>> {
+    if let Some(data_result) = record.data().get(&Tag::CELL_BARCODE_ID) {
+        if let Ok(Value::String(bc)) = data_result {
+            match std::str::from_utf8(bc) {
+                Ok(s) => {
+                    return Ok(Some(s.to_string()));
+                }
+                Err(e) => {
+                    bail!("Failed to parse cell barcode as UTF-8: {}", e)
+                }
+            }
+        }
+    }
+    Ok(None)
 }
 
 pub(crate) fn get_umi<R: Record>(rec: &R) -> Result<Option<String>> {

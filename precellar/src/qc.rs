@@ -8,6 +8,10 @@ use anyhow::Result;
 
 use crate::align::MultiMap;
 use crate::fragment::Fragment;
+use crate::align::MultiMapR;
+use crate::barcode::{get_barcode, get_umi};
+use log::{debug, info};
+use noodles::sam::alignment::record_buf::data::field::value::Value;
 
 #[derive(Debug, Default, Clone)]
 pub struct Metrics(HashMap<String, f64>);
@@ -156,7 +160,7 @@ impl AlignQC {
     }
 
     pub fn add_pair<R: Record>(&mut self, header: &sam::Header, record1: &MultiMap<R>, record2: &MultiMap<R>) -> Result<()> {
-        let mut stat= PairAlignStat::default();
+        let mut stat = PairAlignStat::default();
 
         self.num_read1_bases += record1.primary.sequence().len() as u64;
         self.num_read2_bases += record2.primary.sequence().len() as u64;
