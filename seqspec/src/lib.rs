@@ -1,13 +1,13 @@
-mod read;
-mod region;
+pub mod read;
+pub mod region;
 pub mod utils;
 
 use log::{debug, warn};
 use noodles::fastq;
 use read::ReadValidator;
-pub use read::{FastqReader, File, Read, SegmentInfo, SegmentInfoElem, Strand, UrlType};
+pub use read::{FastqReader, File, Read, SegmentInfo, SegmentInfoElem, SegmentType, Strand, UrlType};
 use read::{ReadSpan, ValidateResult};
-use region::LibSpec;
+pub use region::LibSpec;
 pub use region::{Onlist, Region, RegionId, RegionType, SequenceType};
 
 use anyhow::{anyhow, bail, Context, Result};
