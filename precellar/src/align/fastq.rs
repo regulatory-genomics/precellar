@@ -121,17 +121,8 @@ impl FastqProcessor {
         debug!("Starting gen_barcoded_alignments with chunk_size={}", chunk_size);
         let fq_reader = self.gen_barcoded_fastq(true).with_chunk_size(chunk_size);
         
-        // Log reader state
         debug!("FastqReader created. Is paired-end: {}", fq_reader.is_paired_end());
-        debug!("Number of annotators: {}", fq_reader.annotators.len());
-        debug!("Number of readers: {}", fq_reader.readers.len());
         
-        // Log barcode and UMI information
-        let barcodes = fq_reader.get_all_barcodes();
-        debug!("Barcodes found: {:?}", barcodes);
-        let umis = fq_reader.get_all_umi();
-        debug!("UMIs found: {:?}", umis);
-
         let total_reads = fq_reader.total_reads.unwrap_or(0);
         debug!("Total reads reported: {}", total_reads);
 
@@ -147,72 +138,23 @@ impl FastqProcessor {
         });
         self.align_qc.insert(modality, qc);
 
-        // Track stats for debugging
-        //let mut records_with_barcode = 0;
-        //let mut records_without_barcode = 0;
-        //let mut alignments_with_bc_tag = 0;
-        //let mut alignments_without_bc_tag = 0;
-
         let mut progress_bar = tqdm!(total = total_reads);
         fq_reader.map(move |data| {
             let align_qc = self.align_qc.get_mut(&modality).unwrap();
             
             debug!("Processing chunk with {} records", data.len());
-            // Log details of first few records in chunk
-            if !data.is_empty() {
-                let sample = &data[0];
-                debug!("Sample record - Barcode present: {}, UMI present: {}, Read1 present: {}, Read2 present: {}", 
-                    sample.barcode.is_some(),
-                    sample.umi.is_some(),
-                    sample.read1.is_some(),
-                    sample.read2.is_some()
-                );
-                
-                // Check if at least one read is present
-                if sample.read1.is_none() && sample.read2.is_none() {
-                    panic!("Neither Read1 nor Read2 is present. Please provide at least one read.");
-                }
-            }
             
             // Perform alignment
             debug!("Aligning {} records...", data.len());
             let results: Vec<_> = aligner.align_reads(num_threads, data);
             
-            // Log alignment results
             debug!("Got {} alignment results", results.len());
-            
-            // Examine first few alignment results
-            let limit = std::cmp::min(5, results.len());
-            if limit > 0 {
-                debug!("Processing first {} alignment results (of {})...", limit, results.len());
-                
-                for (i, (ali1, ali2)) in results.iter().take(limit).enumerate() {
-                    debug!("Alignment pair #{}:", i + 1);
-                    
-                    match (ali1, ali2) {
-                        (Some(_), Some(_)) => {
-                            debug!("  Paired alignment");
-                        },
-                        (Some(_), None) => {
-                            debug!("  Read1 only alignment");
-                        },
-                        (None, Some(_)) => {
-                            debug!("  Read2 only alignment");
-                        },
-                        _ => {
-                            debug!("  No alignment information available");
-                        }
-                    }
-                }
-            }
             
             // Get QC stats about valid barcode counts
             let valid_ratio = align_qc.frac_valid_barcode();
             if !results.is_empty() && valid_ratio > 0.0 {
                 debug!("Current barcoded alignment statistics:");
                 debug!("  Valid barcode ratio: {:.2}%", valid_ratio * 100.0);
-            } else {
-                debug!("No valid barcoded alignments found yet");
             }
             
             // Process results for QC metrics
@@ -242,19 +184,9 @@ impl FastqProcessor {
 
         let whitelists = if correct_barcode {
             debug!("Counting barcodes...");
-            debug!("Calling count_barcodes()");
             match self.count_barcodes() {
                 Ok(wl) => {
                     debug!("Successfully counted barcodes. Found {} whitelists", wl.len());
-                    // Log details for each whitelist
-                    for (id, whitelist) in wl.iter() {
-                        debug!(
-                            "Whitelist '{}': exact match rate={:.2}%, unique barcodes={}",
-                            id,
-                            whitelist.frac_exact_match() * 100.0,
-                            whitelist.num_seen_barcodes()
-                        );
-                    }
                     wl
                 }
                 Err(e) => {
@@ -274,74 +206,38 @@ impl FastqProcessor {
 
         debug!("Creating FastqAnnotators from segments");
         
-        // Added detailed logging about seqspec and FASTQ files
         let segments_by_modality: Vec<_> = self.assay.get_segments_by_modality(modality).collect();
         debug!("Found {} read segments for modality {:?}", segments_by_modality.len(), modality);
-        
-        // Track readers creation process
-        let mut readers_created = 0;
-        let mut reads_with_errors = 0;
         
         let mut fq_reader: AnnotatedFastqReader = self
             .assay
             .get_segments_by_modality(modality)
             .filter(|(read, _)| {
-                // Check if file can be opened and log outcome
-                // Use the read_id instead of path since path() doesn't exist
                 let read_id = &read.read_id;
                 let open_result = read.open();
                 if open_result.is_none() {
                     debug!("ERROR: Unable to open FASTQ file for read ID: {}", read_id);
-                    reads_with_errors += 1;
                     false
                 } else {
-                    debug!("Successfully opened FASTQ file for read ID: {}", read_id);
                     true
                 }
             })
             .filter_map(|(read, index)| {
-                debug!(
-                    "Processing read {} with {} segments, is_reverse: {}", 
-                    read.read_id,
-                    index.segments.len(),
-                    read.is_reverse()
-                );
-                
-                // Log each segment's type
-                for seg in &index.segments {
-                    debug!(
-                        "Segment in read {}: type={:?}, range={:?}, id={}", 
-                        read.read_id, 
-                        seg.region_type, 
-                        seg.range,
-                        seg.region_id
-                    );
-                }
+                debug!("Processing read {} with {} segments", read.read_id, index.segments.len());
 
                 let library_spec = Arc::new(RwLock::new(self.assay.library_spec.clone()));
                 let annotator = match FastqAnnotator::new(read, index, &whitelists, corrector.clone(), library_spec) {
                     Some(a) => a,
                     None => {
-                        debug!("ERROR: Failed to create annotator for read {}", read.read_id);
+                        debug!("Failed to create annotator for read {}", read.read_id);
                         return None;
                     }
                 };
                 
-                debug!(
-                    "Created annotator for read {} with {} subregions",
-                    annotator.id,
-                    annotator.subregions.len()
-                );
-                
-                // Check if file can be opened again specifically for reading
                 let reader = match read.open() {
-                    Some(r) => {
-                        readers_created += 1;
-                        debug!("Successfully created reader #{} for read {}", readers_created, read.read_id);
-                        r
-                    },
+                    Some(r) => r,
                     None => {
-                        debug!("ERROR: Failed to open reader for {} when creating FastqReader", read.read_id);
+                        debug!("Failed to open reader for {}", read.read_id);
                         return None;
                     }
                 };
@@ -350,9 +246,6 @@ impl FastqProcessor {
             })
             .collect();
 
-        debug!("Created {} readers out of {} potential reads ({} had errors opening)",
-            readers_created, segments_by_modality.len(), reads_with_errors);
-
         if !whitelists.is_empty() {
             fq_reader.total_reads = Some(whitelists[0].total_count);
             debug!("Set total_reads to {}", whitelists[0].total_count);
@@ -360,17 +253,8 @@ impl FastqProcessor {
             debug!("No whitelists available, total_reads not set");
         }
 
-        // Add validation of reader state
         if fq_reader.readers.is_empty() {
             debug!("CRITICAL ERROR: No valid FASTQ readers were created!");
-        } else {
-            for (i, _reader) in fq_reader.readers.iter().enumerate() {
-                debug!("Reader #{} validation", i);
-                // Remove reader.path() calls since FastqReader doesn't have this method
-                
-                // We can't check file metadata without the path
-                debug!("  Note: Cannot check file metadata (path method not available)");
-            }
         }
 
         debug!("Completed gen_barcoded_fastq setup");
@@ -382,40 +266,9 @@ impl FastqProcessor {
         let mut whitelists = self.get_whitelists();
         let mut total_filtered_bcs = 0;
 
-        // Add debug info about initial whitelists
-        for (id, whitelist) in whitelists.iter() {
-            debug!("Initial whitelist '{}' state:", id);
-            debug!("  - has_entries: {}", !whitelist.get_barcode_counts().is_empty());
-            debug!("  - num_seen_barcodes: {}", whitelist.num_seen_barcodes());
-            debug!("  - total_count: {}", whitelist.total_count);
-            
-            // Print a sample of the whitelist entries (first 5)
-            let barcode_sample: Vec<_> = whitelist.get_barcode_counts().iter()
-                .take(5)
-                .map(|(bc, count)| (String::from_utf8_lossy(bc), count))
-                .collect();
-            if !barcode_sample.is_empty() {
-                debug!("  - sample entries: {:?}", barcode_sample);
-            } else {
-                debug!("  - sample entries: <empty>");
-            }
-            
-            // Check if this whitelist is predefined (has entries but no counts)
-            let is_empty = whitelist.get_barcode_counts().is_empty();
-            let num_seen = whitelist.num_seen_barcodes();
-            let has_predefined_whitelist = !is_empty;
-            
-            debug!("Whitelist '{}' predefined check:", id);
-            debug!("  - is_empty: {}", is_empty);
-            debug!("  - num_seen_barcodes: {}", num_seen);
-            debug!("  - has_predefined_whitelist: {}", has_predefined_whitelist);
-        }
-
         debug!("Counting barcodes");
         
         // Create a list of IDs that need counting
-        // We need to count barcodes for ALL whitelists, regardless of whether they have predefined entries
-        // This ensures we get accurate barcode counts for filtering later
         let whitelist_ids: Vec<RegionId> = whitelists.keys().cloned().collect();
         
         if !whitelist_ids.is_empty() {
@@ -432,10 +285,11 @@ impl FastqProcessor {
             debug!("Processing {} segment groups with barcode regions", barcode_segments.len());
             
             // Process each read segment for barcodes
-            for (read, mut region_index) in barcode_segments {
+            for (read, region_index) in barcode_segments {
                 debug!("Processing read {}", read.read_id);
                 
                 let is_reverse = read.is_reverse();
+                debug!("region_index.segments before adjustments: {:?}", region_index.segments);
                 
                 // Read all records for this segment
                 if let Some(mut reader) = read.open() {
@@ -444,7 +298,6 @@ impl FastqProcessor {
                         
                         // Calculate phase block adjustments for this record - store for reuse
                         let library_spec = Arc::new(RwLock::new(self.assay.library_spec.clone()));
-                        debug!("region_index.segments before adjustments: {:?}", region_index.segments);
                         let phase_block_adjustments = calculate_phase_block_adjustments(
                             &region_index.segments, 
                             &fastq_record, 
@@ -452,42 +305,13 @@ impl FastqProcessor {
                         );
                         
                         // Apply phase block adjustments to all segments
-                        let mut adjusted_segments = region_index.segments.clone();
-                        for (i, adjustment) in phase_block_adjustments.iter() {
-                            debug!("Applying phase block adjustment to segment {}: end position set to {}", i, adjustment);
-                            if *i < adjusted_segments.len() {
-                                // Calculate the adjustment offset
-                                let original_end = adjusted_segments[*i].range.end;
-                                let new_end = *adjustment as u32;
-                                let offset = original_end as i32 - new_end as i32; // How much we're adjusting by
-                                
-                                debug!("Calculating offset - original end: {}, new end: {}, offset: {}", 
-                                      original_end, new_end, offset);
-                                
-                                // Adjust this segment's end position
-                                adjusted_segments[*i].range.end = new_end;
-                                debug!("Adjusted segment {} end to {}", i, new_end);
-                                
-                                // Adjust all subsequent segments by the same offset
-                                for j in (*i + 1)..adjusted_segments.len() {
-                                    // Adjust start position
-                                    let original_start = adjusted_segments[j].range.start;
-                                    let new_start = (original_start as i32 - offset) as u32;
-                                    adjusted_segments[j].range.start = new_start;
-                                    
-                                    // Adjust end position
-                                    let original_end = adjusted_segments[j].range.end;
-                                    let new_end = (original_end as i32 - offset) as u32;
-                                    adjusted_segments[j].range.end = new_end;
-                                    
-                                    debug!("Adjusted segment {} range from {:?} to {:?}", 
-                                          j, 
-                                          (original_start..original_end), 
-                                          (new_start..new_end));
-                                }
-                            }
-                        }
-                        debug!("region_index.segments after adjustments: {:?}", adjusted_segments);
+                        let adjusted_segments = apply_phase_block_adjustments(
+                            &region_index.segments,
+                            &phase_block_adjustments,
+                            "Count Barcodes" // Use a descriptive prefix for debug logs
+                        );
+                        
+                        //debug!("region_index.segments after adjustments: {:?}", adjusted_segments);
                         
                         // Process each barcode region directly
                         for (i, info) in adjusted_segments.iter().enumerate() {
@@ -513,35 +337,6 @@ impl FastqProcessor {
             }
         } else {
             debug!("No whitelists found for counting");
-        }
-
-        // Add debug info after counting
-        for (id, whitelist) in whitelists.iter() {
-            debug!("After counting, whitelist '{}' state:", id);
-            debug!("  - has_entries: {}", !whitelist.get_barcode_counts().is_empty());
-            debug!("  - num_seen_barcodes: {}", whitelist.num_seen_barcodes());
-            debug!("  - total_count: {}", whitelist.total_count);
-            debug!("  - exact_match_rate: {:.2}%", whitelist.frac_exact_match() * 100.0);
-            
-            // Show counts distribution
-            let counts = whitelist.get_sorted_counts();
-            if !counts.is_empty() {
-                debug!("  - counts distribution: [max: {}, median: {}, min: {}]", 
-                    counts.first().unwrap_or(&0),
-                    counts.get(counts.len() / 2).unwrap_or(&0),
-                    counts.last().unwrap_or(&0)
-                );
-            }
-            
-            // Print top 5 most frequent barcodes
-            let top_barcodes: Vec<_> = whitelist.get_barcode_counts().iter()
-                .sorted_by(|a, b| b.1.cmp(a.1))
-                .take(5)
-                .map(|(bc, count)| (String::from_utf8_lossy(bc), count))
-                .collect();
-            if !top_barcodes.is_empty() {
-                debug!("  - top barcodes: {:?}", top_barcodes);
-            }
         }
 
         // Apply advanced filtering to each whitelist if needed
@@ -707,7 +502,7 @@ impl AnnotatedFastqReader {
         self.chunk.clear();
 
         let mut accumulated_length = 0;
-        let mut _total_records = 0;  // Already correctly prefixed with underscore
+        let mut _total_records = 0;
 
         while accumulated_length < self.chunk_size {
             let mut max_read = 0;
@@ -722,10 +517,10 @@ impl AnnotatedFastqReader {
                 .readers
                 .iter_mut()
                 .enumerate()
-                .flat_map(|(_i, reader)| {  // Add underscore to i
+                .flat_map(|(_i, reader)| {
                     let result = reader.read_record(&mut self.buffer);
                     
-                    if let Err(_e) = &result {  // Add underscore to e
+                    if let Err(_e) = &result {
                         error_readers += 1;
                         return None;
                     }
@@ -755,19 +550,10 @@ impl AnnotatedFastqReader {
                 
                 // Check records for name consistency
                 if records.len() > 0 {
-                    let _first_name = records[0].name();  // Add underscore to first_name
-                    
-                    let names_match = records.iter().map(|r| r.name()).all_equal();
-                    if !names_match {
-                        debug!("WARNING: Read names don't match in this chunk!");
-                    }
-                    
                     assert!(
                         records.iter().map(|r| r.name()).all_equal(),
                         "read names mismatch"
                     );
-                } else {
-                    debug!("WARNING: Empty records vector even though max_read > 0");
                 }
                 
                 self.chunk.push(records);
@@ -821,7 +607,6 @@ impl Iterator for AnnotatedFastqReader {
                 .par_chunks(n)
                 .flat_map_iter(|chunk| {
                     chunk.into_iter().map(move |records| {
-                        // Remove potentially problematic debug statements
                         records
                             .iter()
                             .enumerate()
@@ -843,63 +628,6 @@ impl Iterator for AnnotatedFastqReader {
                 .collect();
             
             debug!("Returning {} processed records", result.len());
-            
-            // Debug print the first few records
-            for (i, record) in result.iter().take(5).enumerate() {
-                debug!("Record #{} details:", i);
-                
-                // Log barcode information
-                if let Some(bc) = &record.barcode {
-                    let barcode_seq = std::str::from_utf8(bc.raw.sequence()).unwrap_or("<invalid UTF-8>");
-                    let barcode_qual = std::str::from_utf8(bc.raw.quality_scores()).unwrap_or("<invalid UTF-8>");
-                    debug!("  Barcode: {}", barcode_seq);
-                    debug!("  Barcode quality: {}", barcode_qual);
-                    if let Some(corrected) = &bc.corrected {
-                        let corrected_str = std::str::from_utf8(corrected).unwrap_or("<invalid UTF-8>");
-                        debug!("  Corrected barcode: {}", corrected_str);
-                    }
-                } else {
-                    debug!("  No barcode present");
-                }
-                
-                // Log UMI information
-                if let Some(umi) = &record.umi {
-                    let umi_seq = std::str::from_utf8(umi.sequence()).unwrap_or("<invalid UTF-8>");
-                    let umi_qual = std::str::from_utf8(umi.quality_scores()).unwrap_or("<invalid UTF-8>");
-                    debug!("  UMI: {}", umi_seq);
-                    debug!("  UMI quality: {}", umi_qual);
-                } else {
-                    debug!("  No UMI present");
-                }
-                
-                // Log read1 information
-                if let Some(read1) = &record.read1 {
-                    let read1_seq = std::str::from_utf8(read1.sequence()).unwrap_or("<invalid UTF-8>");
-                    let _read1_qual = std::str::from_utf8(read1.quality_scores()).unwrap_or("<invalid UTF-8>");
-                    let read1_name = std::str::from_utf8(read1.name()).unwrap_or("<invalid UTF-8>");
-                    debug!("  Read1 name: {}", read1_name);
-                    debug!("  Read1 sequence (first 30 bp): {}", &read1_seq[..read1_seq.len().min(30)]);
-                    debug!("  Read1 length: {}", read1.sequence().len());
-                } else {
-                    debug!("  No read1 present");
-                }
-                
-                // Log read2 information
-                if let Some(read2) = &record.read2 {
-                    let read2_seq = std::str::from_utf8(read2.sequence()).unwrap_or("<invalid UTF-8>");
-                    let _read2_qual = std::str::from_utf8(read2.quality_scores()).unwrap_or("<invalid UTF-8>");
-                    let read2_name = std::str::from_utf8(read2.name()).unwrap_or("<invalid UTF-8>");
-                    debug!("  Read2 name: {}", read2_name);
-                    debug!("  Read2 sequence (first 30 bp): {}", &read2_seq[..read2_seq.len().min(30)]);
-                    debug!("  Read2 length: {}", read2.sequence().len());
-                } else {
-                    debug!("  No read2 present");
-                }
-                
-                debug!("  Is empty: {}", record.is_empty());
-                debug!("  Total length: {}", record.len());
-            }
-            
             Some(result)
         }
     }
@@ -988,50 +716,14 @@ impl FastqAnnotator {
             &self.library_spec
         );
         
-        // Debug before adjustments
-        debug!("Original segments: {:?}", self.original_segments);
-        debug!("Subregions before adjustments: {:?}", self.subregions);
+        // Apply adjustments to original segments
+        let adjusted_original_segments = apply_phase_block_adjustments(
+            &self.original_segments, 
+            &phase_block_adjustments,
+            "Annotate" // Use a descriptive prefix for debug logs
+        );
         
-        // Create a copy of original segments for adjustment
-        let mut adjusted_original_segments = self.original_segments.clone();
-        
-        // Apply phase block adjustments to original segments, propagating adjustments to all subsequent segments
-        for (i, adjustment) in phase_block_adjustments.iter() {
-            debug!("Annotate: phase block adjustment at original index {}: end position set to {}", i, adjustment);
-            if *i < adjusted_original_segments.len() {
-                // Calculate the adjustment offset
-                let original_end = adjusted_original_segments[*i].range.end;
-                let new_end = *adjustment as u32;
-                let offset = original_end as i32 - new_end as i32; // How much we're adjusting by
-                
-                debug!("Annotate: calculating offset - original end: {}, new end: {}, offset: {}", 
-                      original_end, new_end, offset);
-                
-                // Adjust this segment's end position
-                adjusted_original_segments[*i].range.end = new_end;
-                debug!("Annotate: adjusted segment {} end to {}", i, new_end);
-                
-                // Adjust all subsequent segments by the same offset
-                for j in (*i + 1)..adjusted_original_segments.len() {
-                    // Adjust start position
-                    let original_start = adjusted_original_segments[j].range.start;
-                    let new_start = (original_start as i32 - offset) as u32;
-                    adjusted_original_segments[j].range.start = new_start;
-                    
-                    // Adjust end position
-                    let original_end = adjusted_original_segments[j].range.end;
-                    let new_end = (original_end as i32 - offset) as u32;
-                    adjusted_original_segments[j].range.end = new_end;
-                    
-                    debug!("Annotate: adjusted segment {} range from {:?} to {:?}", 
-                          j, 
-                          (original_start..original_end), 
-                          (new_start..new_end));
-                }
-            }
-        }
-        
-        debug!("Original segments after all adjustments: {:?}", adjusted_original_segments);
+        //debug!("Original segments after all adjustments: {:?}", adjusted_original_segments);
         
         // Now create filtered subregions maintaining positions from adjusted original segments
         let mut adjusted_subregions = Vec::with_capacity(self.subregions.len());
@@ -1042,7 +734,7 @@ impl FastqAnnotator {
             }
         }
         
-        debug!("Subregions after adjustments: {:?}", adjusted_subregions);
+        //debug!("Subregions after adjustments: {:?}", adjusted_subregions);
         
         // Process all regions using the adjusted subregions
         for (i, info) in adjusted_subregions.iter().enumerate() {
@@ -1108,23 +800,104 @@ impl FastqAnnotator {
     }
 }
 
+/// Helper function to apply phase block adjustments to a vector of segments
+/// 
+/// # Arguments
+/// 
+/// * `segments` - The vector of segments to adjust
+/// * `phase_block_adjustments` - Map of segment index to adjusted end position
+/// 
+/// # Returns
+/// 
+/// The adjusted vector of segments
+fn apply_phase_block_adjustments(
+    segments: &[SegmentInfoElem],
+    phase_block_adjustments: &HashMap<usize, usize>,
+    prefix: &str // Add prefix parameter for debug statements
+) -> Vec<SegmentInfoElem> {
+    let mut adjusted_segments = segments.to_vec();
+    
+    for (i, adjustment) in phase_block_adjustments {
+        if *i < adjusted_segments.len() {
+            // Calculate the adjustment offset
+            let original_end = adjusted_segments[*i].range.end;
+            let new_end = *adjustment as u32;
+            let offset = original_end as i32 - new_end as i32; // How much we're adjusting by
+            
+            //debug!("{}: phase block adjustment at original index {}: end position set to {}", 
+            //      prefix, *i, new_end);
+            //debug!("{}: calculating offset - original end: {}, new end: {}, offset: {}", 
+            //      prefix, original_end, new_end, offset);
+            
+            // Adjust this segment's end position
+            adjusted_segments[*i].range.end = new_end;
+            //debug!("{}: adjusted segment {} end to {}", prefix, *i, new_end);
+            
+            // Adjust all subsequent segments by the same offset
+            for j in (*i + 1)..adjusted_segments.len() {
+                // Adjust start position
+                let original_start = adjusted_segments[j].range.start;
+                let new_start = (original_start as i32 - offset) as u32;
+                adjusted_segments[j].range.start = new_start;
+                
+                // Adjust end position
+                let original_end = adjusted_segments[j].range.end;
+                let new_end = (original_end as i32 - offset) as u32;
+                adjusted_segments[j].range.end = new_end;
+                
+                //debug!("{}: adjusted segment {} range from {:?} to {:?}", 
+                //    prefix, j, 
+                //    (original_start..original_end), 
+                //    (new_start..new_end));
+            }
+        }
+    }
+    
+    adjusted_segments
+}
+
+/// Find a pattern with the Knuth-Morris-Pratt (KMP) algorithm - more efficient for large patterns
 fn find_pattern(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     if needle.is_empty() || haystack.is_empty() || needle.len() > haystack.len() {
         return None;
     }
     
-    // Simple pattern matching algorithm
-    // You may want to use a more efficient algorithm like Boyer-Moore or Knuth-Morris-Pratt
-    for i in 0..=haystack.len() - needle.len() {
-        let mut match_found = true;
-        for j in 0..needle.len() {
-            if haystack[i + j] != needle[j] {
-                match_found = false;
-                break;
-            }
+    // Compute the KMP failure function
+    let mut lps = vec![0; needle.len()];
+    let mut len = 0;
+    let mut i = 1;
+    
+    while i < needle.len() {
+        if needle[i] == needle[len] {
+            len += 1;
+            lps[i] = len;
+            i += 1;
+        } else if len != 0 {
+            len = lps[len - 1];
+        } else {
+            lps[i] = 0;
+            i += 1;
         }
-        if match_found {
-            return Some(i);
+    }
+    
+    // Search for the pattern
+    let mut i = 0; // index for haystack
+    let mut j = 0; // index for needle
+    
+    while i < haystack.len() {
+        if needle[j] == haystack[i] {
+            i += 1;
+            j += 1;
+        }
+        
+        if j == needle.len() {
+            return Some(i - j);
+        } else if i < haystack.len() && needle[j] != haystack[i] {
+            if j != 0 {
+                j = lps[j - 1];
+            } else {
+                i += 1;
+            }
         }
     }
     
@@ -1132,7 +905,7 @@ fn find_pattern(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 }
 
 /// Find a pattern within a haystack, allowing for a specified number of mismatches.
-/// Uses Hamming distance to find the best match and returns the position with minimal distance.
+/// Uses early termination and optimizations for better performance.
 /// 
 /// # Arguments
 /// 
@@ -1148,11 +921,16 @@ fn find_pattern_with_mismatches(haystack: &[u8], needle: &[u8], max_mismatches: 
         return None;
     }
     
+    // For exact matching, use the more efficient algorithm
+    if max_mismatches == 0 {
+        return find_pattern(haystack, needle);
+    }
+    
     let mut min_distance = max_mismatches + 1; // Initialize with value greater than max allowed
     let mut best_position = None;
     
     // Check each possible starting position in the haystack
-    for i in 0..=haystack.len() - needle.len() {
+    'outer: for i in 0..=haystack.len() - needle.len() {
         let mut distance = 0;
         
         // Calculate Hamming distance at this position
@@ -1161,7 +939,7 @@ fn find_pattern_with_mismatches(haystack: &[u8], needle: &[u8], max_mismatches: 
                 distance += 1;
                 // Early termination if we exceed max mismatches
                 if distance > max_mismatches {
-                    break;
+                    continue 'outer;
                 }
             }
         }
@@ -1322,12 +1100,6 @@ impl<'a, R: std::io::Read> Iterator for NameCollatedRecords<'a, R> {
 
 
 // Helper function to get a region from a region ID and library spec
-fn get_region_by_id(region_id: &str, library_spec: &Arc<RwLock<LibSpec>>) -> Option<Region> {
-    let lib_spec = library_spec.read().ok()?;
-    let region = lib_spec.get(region_id)?;
-    let region = region.read().ok()?;
-    Some(region.clone())
-}
 
 /// Calculate phase block adjustments based on subsequent fixed patterns
 /// 
@@ -1355,23 +1127,41 @@ fn calculate_phase_block_adjustments(
     // Maximum allowed mismatches in pattern matching
     const MAX_ALLOWED_MISMATCHES: usize = 1;
     
+    // Pre-fetch regions to avoid repeated lookups
+    let lib_spec_guard = library_spec.read().ok();
+    if lib_spec_guard.is_none() {
+        return phase_block_adjustments;
+    }
+    let lib_spec_guard = lib_spec_guard.unwrap();
+    
     while let Some((i, info)) = iter.next() {
         if let SegmentType::R(RegionType::PhaseBlock) = info.region_type {
             // Try to find the next fixed region after this phase block
             if let Some(&(_, next_info)) = iter.peek() {
-                let region = match get_region_by_id(&next_info.region_id, library_spec) {
+                // Get region info once
+                let region = match lib_spec_guard.get(&next_info.region_id) {
+                    Some(r) => r.read().ok(),
+                    None => continue,
+                };
+                
+                let region = match region {
                     Some(r) => r,
                     None => continue,
                 };
                 
                 // Get the phase block region to retrieve its max_len from seqspec
-                let phase_block_region = match get_region_by_id(&info.region_id, library_spec) {
+                let phase_block_region = match lib_spec_guard.get(&info.region_id) {
+                    Some(r) => r.read().ok(),
+                    None => continue,
+                };
+                
+                let phase_block_region = match phase_block_region {
                     Some(r) => r,
                     None => continue,
                 };
                 
                 if region.sequence_type == SequenceType::Fixed && !region.sequence.is_empty() {
-                    let pattern = region.sequence.as_bytes().to_vec();
+                    let pattern = region.sequence.as_bytes();
                     // IMPORTANT: Use the START of the phase block for searching
                     let search_start = info.range.start as usize;
                     
@@ -1386,18 +1176,17 @@ fn calculate_phase_block_adjustments(
                             record.sequence().len()
                         );
                         
-                        debug!("Searching for pattern from position {} to {}", search_start, search_limit);
+                        //debug!("Searching for pattern from position {} to {}", search_start, search_limit);
                         let search_range = search_start..search_limit;
                         let limited_seq = &record.sequence()[search_range];
                         
                         // Try to find pattern with allowed mismatches
-                        if let Some(match_pos) = find_pattern_with_mismatches(limited_seq, &pattern, MAX_ALLOWED_MISMATCHES) {
+                        if let Some(match_pos) = find_pattern_with_mismatches(limited_seq, pattern, MAX_ALLOWED_MISMATCHES) {
                             let phase_block_end = search_start + match_pos;
-                            debug!("search_start: {}, match_pos: {}, phase_block_end: {}", search_start, match_pos, phase_block_end);
-                            // Now we also allow the case where phase_block_end == info.range.end as usize
-                            // This allows 11->11 cases (no change)
-                            debug!("Found pattern at position {} (allowing up to {} mismatches)", 
-                                   phase_block_end, MAX_ALLOWED_MISMATCHES);
+                            //debug!("search_start: {}, match_pos: {}, phase_block_end: {}", search_start, match_pos, phase_block_end);
+                            
+                            //debug!("Found pattern at position {} (allowing up to {} mismatches)", 
+                            //       phase_block_end, MAX_ALLOWED_MISMATCHES);
                             
                             // Always record the adjustment, even if it's the same as the original position
                             // This ensures consistent processing for all phase blocks
