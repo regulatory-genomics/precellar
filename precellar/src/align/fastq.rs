@@ -904,14 +904,14 @@ fn find_pattern(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     None
 }
 
-/// Find a pattern within a haystack, allowing for a specified number of mismatches.
-/// Uses early termination and optimizations for better performance.
+/// Find a pattern within a haystack, returning the position with minimal mismatches.
+/// Optimized for short patterns (< 10 characters) which is the common case.
 /// 
 /// # Arguments
 /// 
 /// * `haystack` - The sequence to search in
 /// * `needle` - The pattern to search for
-/// * `max_mismatches` - Maximum number of mismatches allowed (defaults to 0 for exact matching)
+/// * `max_mismatches` - Maximum number of mismatches allowed (0 for exact matching)
 /// 
 /// # Returns
 /// 
@@ -926,37 +926,57 @@ fn find_pattern_with_mismatches(haystack: &[u8], needle: &[u8], max_mismatches: 
         return find_pattern(haystack, needle);
     }
     
-    let mut min_distance = max_mismatches + 1; // Initialize with value greater than max allowed
-    let mut best_position = None;
+    let n = haystack.len();
+    let m = needle.len();
     
-    // Check each possible starting position in the haystack
-    'outer: for i in 0..=haystack.len() - needle.len() {
-        let mut distance = 0;
+    // Ultra-optimized special case for 1-character patterns
+    if m == 1 {
+        let target = needle[0];
+        for i in 0..n {
+            if haystack[i] == target {
+                return Some(i);
+            }
+        }
+        // If no exact match, return None - for single character there's no concept of "minimal mismatch"
+        return None;
+    }
+    
+    let mut min_mismatches = usize::MAX;
+    let mut best_pos = None;
+    
+    // Simple and efficient approach for very short patterns
+    for i in 0..=n.saturating_sub(m) {
+        let mut mismatches = 0;
         
-        // Calculate Hamming distance at this position
-        for j in 0..needle.len() {
+        // Count mismatches at this position
+        for j in 0..m {
             if haystack[i + j] != needle[j] {
-                distance += 1;
-                // Early termination if we exceed max mismatches
-                if distance > max_mismatches {
-                    continue 'outer;
+                mismatches += 1;
+                // Early termination if we exceed current best
+                if mismatches >= min_mismatches && min_mismatches != usize::MAX {
+                    break;
                 }
             }
         }
         
-        // If this position has a valid match and the distance is less than current minimum
-        if distance <= max_mismatches && distance < min_distance {
-            min_distance = distance;
-            best_position = Some(i);
+        // Update if this is a better match
+        if mismatches < min_mismatches {
+            min_mismatches = mismatches;
+            best_pos = Some(i);
             
-            // If we found an exact match, we can return immediately
-            if distance == 0 {
-                return best_position;
+            // Early return for exact match
+            if mismatches == 0 {
+                return best_pos;
             }
         }
     }
     
-    best_position
+    // Return the position with minimal mismatches, even if above max_mismatches
+    if min_mismatches <= max_mismatches {
+        best_pos
+    } else {
+        None
+    }
 }
 
 #[derive(Debug)]
@@ -2158,5 +2178,37 @@ mod tests {
             assert_eq!(adjusted_end, 11, 
                      "Phase block should be adjusted to end at position 11, where the fixed pattern starts");
         }
+    }
+
+    #[test]
+    fn test_find_pattern_with_mismatches_simple() {
+        // Test exact matching (0 mismatches)
+        let haystack = b"ACGTACGTACGT";
+        let needle = b"ACGT";
+        assert_eq!(find_pattern_with_mismatches(haystack, needle, 0), Some(0));
+        assert_eq!(find_pattern_with_mismatches(haystack, b"CGTA", 0), Some(1));
+        
+        // Test with very short patterns
+        assert_eq!(find_pattern_with_mismatches(b"ACGTACGT", b"A", 0), Some(0)); // Single character
+        assert_eq!(find_pattern_with_mismatches(b"ACGTACGT", b"X", 0), None);    // No match for single character
+        
+        // Test with max_mismatches = 1
+        assert_eq!(find_pattern_with_mismatches(haystack, b"ACCT", 1), Some(0)); // G->C mismatch
+        
+        // Test with max_mismatches = 2
+        assert_eq!(find_pattern_with_mismatches(haystack, b"ACXT", 2), Some(0)); // G->X mismatch
+        assert_eq!(find_pattern_with_mismatches(haystack, b"AXXT", 2), Some(0)); // CG->XX mismatches
+        
+        // Test where the mismatches exceed max_mismatches
+        assert_eq!(find_pattern_with_mismatches(haystack, b"XXXX", 2), None);    // 4 positions, all mismatch but max is 2
+        
+        // Find best match (minimal mismatches) anywhere in the sequence
+        let complex_haystack = b"AAAAACGTAAAAAA";
+        let complex_needle = b"ACGT";
+        assert_eq!(find_pattern_with_mismatches(complex_haystack, complex_needle, 4), Some(4));
+        
+        // Test with a needle that's one mismatch but in different positions
+        assert_eq!(find_pattern_with_mismatches(b"ACGTACGTA", b"ACXT", 1), Some(0));  // Position 0 with one mismatch
+        assert_eq!(find_pattern_with_mismatches(b"ACGTTCGTA", b"TCGT", 1), Some(3));  // Position 3 with one mismatch
     }
 }
