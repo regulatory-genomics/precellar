@@ -15,6 +15,7 @@ use rayon::iter::ParallelIterator;
 use rayon::slice::ParallelSlice;
 use star_aligner::StarOpts;
 use log;
+use log::debug;
 
 pub type MultiMapR = MultiMap<RecordBuf>;
 
@@ -248,6 +249,7 @@ impl Aligner for StarAligner {
                             });
                         (Some(ali1.try_into().unwrap()), Some(ali2.try_into().unwrap()))
                     } else if let Some(read) = read1.or(read2) {
+                    } else if let Some(read) = read1.or(read2) {
                         let mut ali = aligner.align_read(read).unwrap();
                         ali.iter_mut().for_each(|alignment| {
                             add_cell_barcode(
@@ -265,6 +267,10 @@ impl Aligner for StarAligner {
                         } else {
                             (None, Some(ali.try_into().unwrap()))
                         }
+                    } else {
+                        log::warn!("Found record with no reads (read1 and read2 are both None). Barcode: {:?}", 
+                                  String::from_utf8_lossy(bc.raw.sequence()));
+                        (None, None)
                     } else {
                         log::warn!("Found record with no reads (read1 and read2 are both None). Barcode: {:?}", 
                                   String::from_utf8_lossy(bc.raw.sequence()));
@@ -301,6 +307,7 @@ fn add_cell_barcode(
         Tag::CELL_BARCODE_QUALITY_SCORES,
         Value::String(ori_qual.into()),
     );
+    
     if let Some(barcode) = correct_barcode {
         data.insert(Tag::CELL_BARCODE_ID, Value::String(barcode.into()));
     }

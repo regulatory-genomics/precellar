@@ -183,6 +183,7 @@ fn make_fastq(
     Ok(())
 }
 
+
 /// A Python module implemented in Rust.
 #[pymodule]
 fn precellar(m: &Bound<'_, PyModule>) -> PyResult<()> {

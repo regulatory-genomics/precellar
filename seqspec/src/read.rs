@@ -216,6 +216,46 @@ impl Read {
             let mut region = region.read().unwrap();
             let mut region_id = region.region_id.clone();
             let mut region_type = SegmentType::R(region.region_type);
+            
+            // Special handling for PhaseBlock regions to prevent truncation
+            if let RegionType::PhaseBlock = region.region_type {
+                // For phase blocks, initially allocate a larger range up to either:
+                // 1. The maximum specified length if provided
+                // 2. Or up to the read length if the max length is too small
+                
+                // We'll use max_len parameter as a guide, but won't strictly limit to it
+                // This allows the pattern detection code in fastq.rs to work properly
+                let phase_block_max = if region.max_len > 0 { region.max_len } else { 20 }; // Default to 20 if not specified
+                
+                // Calculate potential end position - preferring to give the phase block more space
+                let potential_end = cur_pos + phase_block_max;
+                let end_pos = if potential_end < read_len {
+                    // If we can fit at least the specified max_len, use that length
+                    potential_end
+                } else {
+                    // If that would exceed the read length, use what's available
+                    // This leaves space for future adjustments by the pattern detection code
+                    read_len
+                };
+                
+                // Create the segment with this generous allocation
+                segments.push(SegmentInfoElem::new(
+                    region_id,
+                    region_type,
+                    cur_pos..end_pos,
+                ));
+                
+                // If we've reached the end of the read, break
+                if end_pos >= read_len {
+                    readlen_info = ReadSpan::Span((read_len - cur_pos) as usize);
+                    break;
+                }
+                
+                // Move to the next region
+                cur_pos = end_pos;
+                continue;
+            }
+            
             if region.is_fixed_length() {
                 // Fixed-length region
                 let end = cur_pos + region.min_len;
