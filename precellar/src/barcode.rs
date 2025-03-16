@@ -436,6 +436,22 @@ pub struct BarcodeFilterResults {
     pub filtered_bcs_cv: f64,
     /// Count cutoff used for filtering
     pub filtered_bcs_cutoff: usize,
+    /// Knee point of the barcode distribution curve
+    pub knee_point: Option<(usize, usize)>, // (rank, count)
+    /// Total reads in cells
+    pub total_reads_in_cells: Option<usize>,
+    /// Mean reads per cell
+    pub mean_reads_per_cell: Option<f64>,
+    /// Median UMIs per cell (if applicable)
+    pub median_umis_per_cell: Option<f64>,
+    /// Fraction of valid barcodes (in whitelist)
+    pub valid_barcode_fraction: Option<f64>,
+    /// Barcode Q30 base rate
+    pub barcode_q30_base_rate: Option<f64>,
+    /// Timestamp when analysis was performed
+    pub timestamp: Option<String>,
+    /// Software version
+    pub version: Option<String>,
 }
 
 impl Default for BarcodeFilterResults {
@@ -447,6 +463,14 @@ impl Default for BarcodeFilterResults {
             filtered_bcs_var: 0.0,
             filtered_bcs_cv: 0.0,
             filtered_bcs_cutoff: 0,
+            knee_point: None,
+            total_reads_in_cells: None,
+            mean_reads_per_cell: None,
+            median_umis_per_cell: None,
+            valid_barcode_fraction: None,
+            barcode_q30_base_rate: None,
+            timestamp: None,
+            version: None,
         }
     }
 }
@@ -461,8 +485,192 @@ impl BarcodeFilterResults {
             filtered_bcs_var: 0.0,
             filtered_bcs_cv: 0.0,
             filtered_bcs_cutoff: 0,
+
+            ..Default::default()
         }
     }
+    
+    /// Update metrics from a Whitelist
+    pub fn update_from_whitelist(&mut self, whitelist: &Whitelist) {
+        // Update basic metrics from the whitelist
+        self.valid_barcode_fraction = Some(whitelist.frac_exact_match());
+        self.barcode_q30_base_rate = Some(whitelist.frac_q30_bases());
+        
+        // Get date and time for recording
+        self.timestamp = Some(chrono::Local::now().to_rfc3339());
+        
+        // Add version information
+        self.version = Some(env!("CARGO_PKG_VERSION").to_string());
+    }
+    
+    /// Calculate the knee point in the barcode distribution
+    pub fn calculate_knee_point(&mut self, counts: &[usize]) {
+        if counts.is_empty() {
+            return;
+        }
+        
+        // Sort counts in descending order
+        let mut sorted_counts = counts.to_vec();
+        sorted_counts.sort_by(|a, b| b.cmp(a));
+        
+        // Find the knee point using a simple method
+        // (more sophisticated methods could be implemented)
+        if sorted_counts.len() < 10 {
+            return;
+        }
+        
+        // Find the point of maximum curvature on log-log scale
+        let mut max_curvature = 0.0;
+        let mut knee_idx = 0;
+        
+        for i in 1..(sorted_counts.len().min(10000) - 1) {
+            if sorted_counts[i] == 0 {
+                break;
+            }
+            
+            let prev = ((i - 1) as f64 + 1.0).ln();
+            let curr = ((i) as f64 + 1.0).ln();
+            let next = ((i + 1) as f64 + 1.0).ln();
+            
+            let prev_val = (sorted_counts[i - 1] as f64).ln();
+            let curr_val = (sorted_counts[i] as f64).ln();
+            let next_val = (sorted_counts[i + 1] as f64).ln();
+            
+            // Approximate second derivative at point i
+            let curvature = ((next_val - curr_val) / (next - curr)) - 
+                           ((curr_val - prev_val) / (curr - prev));
+            
+            if curvature.abs() > max_curvature {
+                max_curvature = curvature.abs();
+                knee_idx = i;
+            }
+        }
+        
+        // Store the knee point coordinates
+        if knee_idx > 0 {
+            self.knee_point = Some((knee_idx, sorted_counts[knee_idx]));
+        }
+    }
+    
+    /// Calculate additional cell metrics
+    pub fn calculate_cell_metrics(&mut self, barcode_read_counts: &HashMap<Vec<u8>, usize>) {
+        if self.filtered_bcs == 0 || barcode_read_counts.is_empty() {
+            return;
+        }
+        
+        // Total reads in cells
+        let mut cell_reads_total = 0;
+        let mut cell_read_counts = Vec::new();
+        
+        // Extract cell barcode counts based on the cutoff
+        for (_, count) in barcode_read_counts.iter() {
+            if *count >= self.filtered_bcs_cutoff {
+                cell_reads_total += count;
+                cell_read_counts.push(*count);
+            }
+        }
+        
+        self.total_reads_in_cells = Some(cell_reads_total);
+        
+        // Calculate mean reads per cell
+        if !cell_read_counts.is_empty() {
+            self.mean_reads_per_cell = Some(cell_reads_total as f64 / cell_read_counts.len() as f64);
+            
+            // Calculate median by sorting and finding middle element
+            cell_read_counts.sort_unstable();
+            let mid_idx = cell_read_counts.len() / 2;
+            
+            if cell_read_counts.len() % 2 == 0 && mid_idx > 0 {
+                // Even number of elements, average the middle two
+                self.median_umis_per_cell = Some((cell_read_counts[mid_idx - 1] + cell_read_counts[mid_idx]) as f64 / 2.0);
+            } else {
+                // Odd number of elements
+                self.median_umis_per_cell = Some(cell_read_counts[mid_idx] as f64);
+            }
+        }
+    }
+    
+    /// Write metrics to a JSON file
+    pub fn write_metrics_to_file<P: AsRef<std::path::Path>>(&self, path: P) -> Result<(), std::io::Error> {
+        use std::io::Write;
+        
+        // Convert to a serde-compatible structure
+        let metrics = serde_json::json!({
+            "barcode_filtering": {
+                "estimated_number_of_cells": self.filtered_bcs,
+                "confidence_interval_low": self.filtered_bcs_lb,
+                "confidence_interval_high": self.filtered_bcs_ub,
+                "coefficient_of_variation": self.filtered_bcs_cv,
+                "count_cutoff": self.filtered_bcs_cutoff,
+                "knee_point": self.knee_point,
+                "total_reads_in_cells": self.total_reads_in_cells,
+                "mean_reads_per_cell": self.mean_reads_per_cell,
+                "median_umis_per_cell": self.median_umis_per_cell,
+                "valid_barcode_fraction": self.valid_barcode_fraction,
+                "barcode_q30_base_rate": self.barcode_q30_base_rate,
+                "analysis_timestamp": self.timestamp,
+                "software_version": self.version
+            }
+        });
+        
+        // Write the JSON to file
+        let mut file = std::fs::File::create(path)?;
+        file.write_all(serde_json::to_string_pretty(&metrics).unwrap().as_bytes())?;
+        
+        Ok(())
+    }
+    
+    /// Write a simple metrics summary to a TSV file
+    pub fn write_metrics_summary<P: AsRef<std::path::Path>>(&self, path: P) -> Result<(), std::io::Error> {
+        use std::io::Write;
+        
+        let mut file = std::fs::File::create(path)?;
+        
+        // Write header
+        writeln!(file, "Metric\tValue")?;
+        
+        // Write metrics
+        writeln!(file, "Estimated Number of Cells\t{}", self.filtered_bcs)?;
+        writeln!(file, "95% CI Lower Bound\t{}", self.filtered_bcs_lb)?;
+        writeln!(file, "95% CI Upper Bound\t{}", self.filtered_bcs_ub)?;
+        writeln!(file, "Count Cutoff\t{}", self.filtered_bcs_cutoff)?;
+        
+        if let Some(knee) = self.knee_point {
+            writeln!(file, "Knee Point Rank\t{}", knee.0)?;
+            writeln!(file, "Knee Point Count\t{}", knee.1)?;
+        }
+        
+        if let Some(total) = self.total_reads_in_cells {
+            writeln!(file, "Total Reads in Cells\t{}", total)?;
+        }
+        
+        if let Some(mean) = self.mean_reads_per_cell {
+            writeln!(file, "Mean Reads per Cell\t{:.2}", mean)?;
+        }
+        
+        if let Some(median) = self.median_umis_per_cell {
+            writeln!(file, "Median UMIs per Cell\t{:.2}", median)?;
+        }
+        
+        if let Some(valid) = self.valid_barcode_fraction {
+            writeln!(file, "Valid Barcode Fraction\t{:.4}", valid)?;
+        }
+        
+        if let Some(q30) = self.barcode_q30_base_rate {
+            writeln!(file, "Barcode Q30 Base Rate\t{:.4}", q30)?;
+        }
+        
+        if let Some(ref version) = self.version {
+            writeln!(file, "Software Version\t{}", version)?;
+        }
+        
+        if let Some(ref timestamp) = self.timestamp {
+            writeln!(file, "Analysis Timestamp\t{}", timestamp)?;
+        }
+        
+        Ok(())
+    }
+
 }
 
 /// Constants for barcode filtering
@@ -483,6 +691,9 @@ const MAX_RECOVERED_CELLS_PER_GEM_GROUP: usize = 1 << 18; // 262,144
 /// * `num_probe_barcodes` - Number of probe barcodes
 /// * `ordmag_recovered_cells_quantile` - Quantile for determining baseline (default: 0.99)
 /// * `num_bootstrap_samples` - Number of bootstrap iterations (default: 100)
+
+/// * `output_metrics_path` - Optional path to write QC metrics
+
 ///
 /// # Returns
 ///
@@ -494,10 +705,18 @@ pub fn filter_cellular_barcodes_ordmag_advanced(
     num_probe_barcodes: Option<usize>,
     ordmag_recovered_cells_quantile: Option<f64>,
     num_bootstrap_samples: Option<usize>,
+    output_metrics_path: Option<&std::path::Path>,
 ) -> BarcodeFilterResults {
     use rand::seq::SliceRandom;
     use rand::SeedableRng;
     use rand_pcg::Pcg64;
+    
+    // Log if metrics path is provided or not
+    if let Some(path) = output_metrics_path {
+        log::info!("QC Metrics will be written to: {:?}", path);
+    } else {
+        log::info!("No QC metrics path provided, metrics will not be written to disk");
+    }
     
     let quantile = ordmag_recovered_cells_quantile.unwrap_or(0.99);
     let bootstrap_samples = num_bootstrap_samples.unwrap_or(100);
@@ -566,10 +785,16 @@ pub fn filter_cellular_barcodes_ordmag_advanced(
         top_n_boot.push(find_within_ordmag(&sample, baseline_bc_idx));
     }
     
-    let metrics = summarize_bootstrapped_top_n(&top_n_boot, &nonzero_counts);
+
+    let mut metrics = summarize_bootstrapped_top_n(&top_n_boot, &nonzero_counts);
     
     // Apply the filter to the whitelist
     whitelist.filter_by_frequency(metrics.filtered_bcs_cutoff.max(1));
+    
+    // Calculate additional metrics
+    metrics.update_from_whitelist(whitelist);
+    metrics.calculate_knee_point(&nonzero_counts);
+    metrics.calculate_cell_metrics(whitelist.get_barcode_counts());
     
     log::info!(
         "Advanced filtering: found {} cells (95% CI: {}-{}) with counts >= {}",
@@ -578,6 +803,35 @@ pub fn filter_cellular_barcodes_ordmag_advanced(
         metrics.filtered_bcs_ub,
         metrics.filtered_bcs_cutoff
     );
+    
+    // Write metrics to file if a path was provided
+    if let Some(path) = output_metrics_path {
+        log::info!("Attempting to write QC metrics to file: {:?}", path);
+        
+        // Check if the directory exists
+        if let Some(parent) = path.parent() {
+            if !parent.exists() {
+                log::warn!("Parent directory does not exist: {:?}, attempting to create it", parent);
+                if let Err(e) = std::fs::create_dir_all(parent) {
+                    log::error!("Failed to create directory: {:?}", e);
+                }
+            }
+        }
+        
+        if let Err(e) = metrics.write_metrics_to_file(path) {
+            log::warn!("Failed to write metrics to file: {}", e);
+        } else {
+            log::info!("Successfully wrote barcode QC metrics to {:?}", path);
+            
+            // Also write a summary TSV file
+            let tsv_path = path.with_extension("tsv");
+            if let Err(e) = metrics.write_metrics_summary(&tsv_path) {
+                log::warn!("Failed to write metrics summary to file: {}", e);
+            } else {
+                log::info!("Successfully wrote barcode metrics summary to {:?}", tsv_path);
+            }
+        }
+    }
     
     metrics
 }
@@ -997,6 +1251,7 @@ mod tests {
             None,
             Some(0.99),
             Some(10), // Low bootstrap samples for testing
+            None,
         );
         
         // We should have filtered to approximately the right number
