@@ -47,8 +47,10 @@ impl Assay {
         let yaml_str = fs::read_to_string(&path)
             .with_context(|| format!("Failed to read file: {:?}", path.as_ref()))?;
         let mut assay: Assay = serde_yaml::from_str(&yaml_str).context("Failed to parse YAML")?;
+        let mut assay: Assay = serde_yaml::from_str(&yaml_str).context("Failed to parse YAML")?;
         assay.file = Some(path.as_ref().to_path_buf());
         assay.normalize_all_paths();
+        assay.validate_structure()?;
         assay.validate_structure()?;
         Ok(assay)
     }
@@ -844,6 +846,7 @@ mod tests {
     const YAML_FILE: &str = "../seqspec_templates/10x_rna_atac.yaml";
     const YAML_FILE_2: &str = "../seqspec_templates/smartseq2.yaml";
     const YAML_FILE_3: &str = "../seqspec_templates/test_deep_nested.yaml";
+    const YAML_FILE_3: &str = "../seqspec_templates/test_deep_nested.yaml";
     #[test]
     fn test_parse() {
         let yaml_str = fs::read_to_string(YAML_FILE).expect("Failed to read file");
@@ -1112,6 +1115,66 @@ regions: []
         }
 
 
+    }
+
+    #[test]
+    fn test_assay_nesting_validation() {
+        // Helper function to print region structure
+        fn print_region_structure(region: &Region, indent: usize) {
+            let indent_str = " ".repeat(indent);
+            println!("{}Region: {} (Type: {:?})", indent_str, region.region_id, region.region_type);
+            for subregion in &region.subregions {
+                print_region_structure(&subregion.read().unwrap(), indent + 2);
+            }
+        }
+
+        println!("\nTesting YAML_FILE (expected valid):");
+        let yaml_str = fs::read_to_string(YAML_FILE).expect("Failed to read file");
+        let result = serde_yaml::from_str::<Assay>(&yaml_str)
+            .context("Failed to parse valid YAML")
+            .map(|assay| {
+                println!("Structure for each modality in YAML_FILE:");
+                for modality in &assay.modalities {
+                    println!("\nModality: {:?}", modality);
+                    if let Some(region) = assay.library_spec.get_modality(modality) {
+                        print_region_structure(&region.read().unwrap(), 2);
+                        let depth = region.read().unwrap().get_nesting_depth();
+                        println!("Total nesting depth: {}", depth);
+                    }
+                }
+                assay
+            })
+            .and_then(|mut assay| {
+                assay.validate_structure()?;
+                Ok(assay)
+            });
+        assert!(result.is_ok(), "YAML_FILE should have valid nesting depth (2 levels)");
+
+        println!("\nTesting YAML_FILE_3 (expected invalid):");
+        let yaml_str3 = fs::read_to_string(YAML_FILE_3).expect("Failed to read file");
+        let result = serde_yaml::from_str::<Assay>(&yaml_str3)
+            .context("Failed to parse invalid YAML")
+            .map(|assay| {
+                println!("Structure for each modality in YAML_FILE_3:");
+                for modality in &assay.modalities {
+                    println!("\nModality: {:?}", modality);
+                    if let Some(region) = assay.library_spec.get_modality(modality) {
+                        print_region_structure(&region.read().unwrap(), 2);
+                        let depth = region.read().unwrap().get_nesting_depth();
+                        println!("Total nesting depth: {}", depth);
+                    }
+                }
+                assay
+            })
+            .and_then(|mut assay| {
+                assay.validate_structure()?;
+                Ok(assay)
+            });
+        assert!(result.is_err(), "YAML_FILE_3 should be rejected (more than 2 levels)");
+        assert!(
+            result.unwrap_err().to_string().contains("nesting depth must be exactly 2 levels"),
+            "Error message should mention the required nesting depth"
+        );
     }
 
     #[test]

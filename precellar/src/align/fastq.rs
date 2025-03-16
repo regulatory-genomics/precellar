@@ -140,6 +140,23 @@ impl FastqProcessor {
 
         let mut progress_bar = tqdm!(total = total_reads);
         fq_reader.map(move |data| {
+            info!("Processing chunk with {} records", data.len());
+            // Log details of first few records in chunk
+            if !data.is_empty() {
+                let sample = &data[0];
+                info!("Sample record - Barcode present: {}, UMI present: {}, Read1 present: {}, Read2 present: {}", 
+                    sample.barcode.is_some(),
+                    sample.umi.is_some(),
+                    sample.read1.is_some(),
+                    sample.read2.is_some()
+                );
+                
+                // Check if at least one read is present
+                if sample.read1.is_none() && sample.read2.is_none() {
+                    panic!("Neither Read1 nor Read2 is present. Please provide at least one read.");
+                }
+            }
+            
             let align_qc = self.align_qc.get_mut(&modality).unwrap();
             
             debug!("Processing chunk with {} records", data.len());
@@ -171,6 +188,9 @@ impl FastqProcessor {
                 _ => {
                     debug!("No alignment found for read");
                 }
+                _ => {
+                    debug!("No alignment found for read");
+                }
             });
             
             progress_bar.update(results.len()).unwrap();
@@ -180,7 +200,7 @@ impl FastqProcessor {
 
     pub fn gen_barcoded_fastq(&mut self, correct_barcode: bool) -> AnnotatedFastqReader {
         let modality = self.modality();
-        debug!("Starting gen_barcoded_fastq for modality: {:?}", modality);
+        info!("Starting gen_barcoded_fastq for modality: {:?}", modality);
 
         let whitelists = if correct_barcode {
             debug!("Counting barcodes...");
@@ -499,6 +519,7 @@ impl AnnotatedFastqReader {
 
     /// Read a chunk of records from the fastq files.
     fn read_chunk(&mut self) -> usize {
+        //info!("Starting to read chunk. Target chunk size: {}", self.chunk_size);
         self.chunk.clear();
 
         let mut accumulated_length = 0;
@@ -541,7 +562,9 @@ impl AnnotatedFastqReader {
                 })
                 .collect();
             
+            
             if max_read == 0 {
+                debug!("No more records to read");
                 break;
             } else if min_read == 0 && successful_readers > 0 {
                 // Existing commented code
