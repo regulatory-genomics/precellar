@@ -300,6 +300,7 @@ fn add_cell_barcode(
         Tag::CELL_BARCODE_QUALITY_SCORES,
         Value::String(ori_qual.into()),
     );
+    
     if let Some(barcode) = correct_barcode {
         data.insert(Tag::CELL_BARCODE_ID, Value::String(barcode.into()));
     }

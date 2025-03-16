@@ -128,7 +128,7 @@ impl AlignmentAnnotator {
         rec1: MultiMapR,
         rec2: MultiMapR,
     ) -> Option<AnnotatedAlignment> {
-        let pair_improper = rec1.len() != rec2.len();
+        let _pair_improper = rec1.len() != rec2.len();
         let result: Vec<_> = rec1
             .iter()
             .zip(rec2.iter())

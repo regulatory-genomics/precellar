@@ -110,10 +110,6 @@ impl PairAlignStat {
         self.read1.high_quality + self.read2.high_quality
     }
 
-    fn total_duplicate(&self) -> u64 {
-        self.read1.duplicate + self.read2.duplicate
-    }
-
     fn add_read1<R: Record>(&mut self, record: &MultiMap<R>) -> Result<()> {
         self.read1.add(record)
     }
@@ -156,7 +152,7 @@ impl AlignQC {
     }
 
     pub fn add_pair<R: Record>(&mut self, header: &sam::Header, record1: &MultiMap<R>, record2: &MultiMap<R>) -> Result<()> {
-        let mut stat= PairAlignStat::default();
+        let mut stat = PairAlignStat::default();
 
         self.num_read1_bases += record1.primary.sequence().len() as u64;
         self.num_read2_bases += record2.primary.sequence().len() as u64;

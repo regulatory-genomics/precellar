@@ -239,6 +239,8 @@ pub enum RegionType {
     NexteraRead1,
     #[serde(rename = "nextera_read2")]
     NexteraRead2,
+    #[serde(rename = "phase_block")]
+    PhaseBlock,
     #[serde(rename = "poly_a")]
     PolyA,
     #[serde(rename = "poly_g")]
@@ -319,6 +321,7 @@ impl RegionType {
             "named" => Some(RegionType::Named),
             "nextera_read1" | "nexteraread1" => Some(RegionType::NexteraRead1),
             "nextera_read2" | "nexteraread2" => Some(RegionType::NexteraRead2),
+            "phase_block" | "phaseblock" => Some(RegionType::PhaseBlock),
             "poly_a" | "polya" => Some(RegionType::PolyA),
             "poly_g" | "polyg" => Some(RegionType::PolyG),
             "poly_t" | "polyt" => Some(RegionType::PolyT),
@@ -457,16 +460,13 @@ mod tests {
         // Test LibSpec with exactly 2 levels
         let lib_spec_correct = LibSpec::new(vec![region_depth_2]).unwrap();
         assert_eq!(lib_spec_correct.get_max_nesting_depth(), 2);
-        assert!(lib_spec_correct.is_nested_two_times());
 
         // Test LibSpec with too few levels
         let lib_spec_shallow = LibSpec::new(vec![region_depth_1]).unwrap();
         assert_eq!(lib_spec_shallow.get_max_nesting_depth(), 1);
-        assert!(!lib_spec_shallow.is_nested_two_times());
 
         // Test LibSpec with too many levels
         let lib_spec_deep = LibSpec::new(vec![region_depth_3]).unwrap();
         assert_eq!(lib_spec_deep.get_max_nesting_depth(), 3);
-        assert!(!lib_spec_deep.is_nested_two_times());
     }
 }

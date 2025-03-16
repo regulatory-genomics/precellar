@@ -1,13 +1,13 @@
-mod read;
-mod region;
+pub mod read;
+pub mod region;
 pub mod utils;
 
 use log::{debug, warn};
 use noodles::fastq;
 use read::ReadValidator;
-pub use read::{FastqReader, File, Read, SegmentInfo, SegmentInfoElem, Strand, UrlType};
+pub use read::{FastqReader, File, Read, SegmentInfo, SegmentInfoElem, SegmentType, Strand, UrlType};
 use read::{ReadSpan, ValidateResult};
-use region::LibSpec;
+pub use region::LibSpec;
 pub use region::{Onlist, Region, RegionId, RegionType, SequenceType};
 
 use anyhow::{anyhow, bail, Context, Result};
@@ -55,7 +55,7 @@ impl Assay {
 
     pub fn from_url(url: &str) -> Result<Self> {
         let yaml_str = reqwest::blocking::get(url)?.text()?;
-        let mut assay: Assay = serde_yaml::from_str(&yaml_str).context("Failed to parse YAML")?;
+        let assay: Assay = serde_yaml::from_str(&yaml_str).context("Failed to parse YAML")?;
         assay.validate_structure()?;
         Ok(assay)
     }
@@ -66,7 +66,7 @@ impl Assay {
         for modality in &self.modalities {
             if let Some(region) = self.library_spec.get_modality(modality) {
                 let depth = region.read().unwrap().get_nesting_depth();
-                println!("Modality {:?} has nesting depth: {}", modality, depth);
+                //println!("Modality {:?} has nesting depth: {}", modality, depth);
                 if depth != 1 {
                     bail!(
                         "Invalid assay structure for modality {:?}: nesting depth must be exactly 2 levels (found {} levels)",
@@ -350,7 +350,7 @@ impl Assay {
         if let Some(region) = self.library_spec.get(&read_buffer.primer_id) {
             if !region.read().unwrap().region_type.is_sequencing_primer() {
                 warn!(
-                    "primer_id '{}' is not a sequencing primer (type: {:?})",
+                    "primer_id '{}' is not a sequencing primer (type: {:?}). This will cause errors. If you are sure this is what you want, please change region_type to custom_primer.",
                     read_buffer.primer_id,
                     region.read().unwrap().region_type
                 );
@@ -932,7 +932,7 @@ mod tests {
         assert!(result.is_ok());
         // Verify warning was logged for barcode primer
         let warning = log_receiver.try_recv().expect("Should have received warning");
-        assert!(warning.contains("primer_id 'rna-cell_barcode' is not a sequencing primer"));
+        assert!(warning.contains("primer_id 'rna-cell_barcode' is not a sequencing primer."));
         assert!(warning.contains("type: Barcode"));
 
         // Test with sequencing primer - should not warn
@@ -1173,8 +1173,68 @@ regions: []
             "Error message should mention the required nesting depth"
         );
     }
+
     #[test]
-    fn test_case_insensitive_yaml() {
+    fn test_assay_nesting_validation_2() {
+        // Helper function to print region structure
+        fn print_region_structure(region: &Region, indent: usize) {
+            let indent_str = " ".repeat(indent);
+            println!("{}Region: {} (Type: {:?})", indent_str, region.region_id, region.region_type);
+            for subregion in &region.subregions {
+                print_region_structure(&subregion.read().unwrap(), indent + 2);
+            }
+        }
+
+        println!("\nTesting YAML_FILE (expected valid):");
+        let yaml_str = fs::read_to_string(YAML_FILE).expect("Failed to read file");
+        let result = serde_yaml::from_str::<Assay>(&yaml_str)
+            .context("Failed to parse valid YAML")
+            .map(|assay| {
+                println!("Structure for each modality in YAML_FILE:");
+                for modality in &assay.modalities {
+                    println!("\nModality: {:?}", modality);
+                    if let Some(region) = assay.library_spec.get_modality(modality) {
+                        print_region_structure(&region.read().unwrap(), 2);
+                        let depth = region.read().unwrap().get_nesting_depth();
+                        println!("Total nesting depth: {}", depth);
+                    }
+                }
+                assay
+            })
+            .and_then(|mut assay| {
+                assay.validate_structure()?;
+                Ok(assay)
+            });
+        assert!(result.is_ok(), "YAML_FILE should have valid nesting depth (2 levels)");
+
+        println!("\nTesting YAML_FILE_3 (expected invalid):");
+        let yaml_str3 = fs::read_to_string(YAML_FILE_3).expect("Failed to read file");
+        let result = serde_yaml::from_str::<Assay>(&yaml_str3)
+            .context("Failed to parse invalid YAML")
+            .map(|assay| {
+                println!("Structure for each modality in YAML_FILE_3:");
+                for modality in &assay.modalities {
+                    println!("\nModality: {:?}", modality);
+                    if let Some(region) = assay.library_spec.get_modality(modality) {
+                        print_region_structure(&region.read().unwrap(), 2);
+                        let depth = region.read().unwrap().get_nesting_depth();
+                        println!("Total nesting depth: {}", depth);
+                    }
+                }
+                assay
+            })
+            .and_then(|mut assay| {
+                assay.validate_structure()?;
+                Ok(assay)
+            });
+        assert!(result.is_err(), "YAML_FILE_3 should be rejected (more than 2 levels)");
+        assert!(
+            result.unwrap_err().to_string().contains("nesting depth must be exactly 2 levels"),
+            "Error message should mention the required nesting depth"
+        );
+    }
+    #[test]
+    fn test_case_insensitive_yaml_2() {
         // Test YAML with different cases
         let yaml = r#"
 region_id: "test_region"
