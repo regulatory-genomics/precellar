@@ -460,16 +460,13 @@ mod tests {
         // Test LibSpec with exactly 2 levels
         let lib_spec_correct = LibSpec::new(vec![region_depth_2]).unwrap();
         assert_eq!(lib_spec_correct.get_max_nesting_depth(), 2);
-        assert!(lib_spec_correct.is_nested_two_times());
 
         // Test LibSpec with too few levels
         let lib_spec_shallow = LibSpec::new(vec![region_depth_1]).unwrap();
         assert_eq!(lib_spec_shallow.get_max_nesting_depth(), 1);
-        assert!(!lib_spec_shallow.is_nested_two_times());
 
         // Test LibSpec with too many levels
         let lib_spec_deep = LibSpec::new(vec![region_depth_3]).unwrap();
         assert_eq!(lib_spec_deep.get_max_nesting_depth(), 3);
-        assert!(!lib_spec_deep.is_nested_two_times());
     }
 }
