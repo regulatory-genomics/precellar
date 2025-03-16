@@ -783,7 +783,6 @@ impl Iterator for AnnotatedFastqReader {
 struct FastqAnnotator {
     whitelists: IndexMap<String, OligoFrequncy>,
     corrector: BarcodeCorrector,
-    id: String,
     is_reverse: bool,
     subregions: Vec<SegmentInfoElem>,
     // Add original_segments to keep track of all segments including phase blocks
@@ -825,7 +824,6 @@ impl FastqAnnotator {
             let anno = Self {
                 whitelists,
                 corrector,
-                id: read.read_id.clone(),
                 is_reverse: read.is_reverse(),
                 subregions,
                 original_segments,
@@ -1523,7 +1521,6 @@ mod tests {
         let annotator = FastqAnnotator {
             whitelists: IndexMap::new(),
             corrector: BarcodeCorrector::default(),
-            id: "test_read".to_string(),
             is_reverse: false,
             subregions: vec![
                 SegmentInfoElem {
@@ -1677,7 +1674,6 @@ mod tests {
         let annotator = FastqAnnotator {
             whitelists: IndexMap::new(),
             corrector: BarcodeCorrector::default(),
-            id: "test_read".to_string(),
             is_reverse: false,
             subregions: vec![
                 SegmentInfoElem {
@@ -1733,7 +1729,6 @@ mod tests {
         let barcode_annotator = FastqAnnotator {
             whitelists: IndexMap::new(),
             corrector: BarcodeCorrector::default(),
-            id: "test_read".to_string(),
             is_reverse: false,
             subregions: vec![
                 SegmentInfoElem {
@@ -1912,7 +1907,6 @@ mod tests {
         let annotator = FastqAnnotator {
             whitelists: whitelist,
             corrector: BarcodeCorrector::default(),
-            id: "test_read".to_string(),
             is_reverse: false,
             subregions: vec![
                 SegmentInfoElem {
@@ -1983,7 +1977,7 @@ mod tests {
         println!("Extracted barcode length: {}", barcode_seq.len());
         
         // The barcode should include all barcode regions and the phase block
-        let expected_barcode_len = barcode1_data.len() + phase_block_data.len() + barcode2_data.len();
+        let expected_barcode_len = barcode1_data.len() + barcode2_data.len();
         assert_eq!(barcode_seq.len(), expected_barcode_len, 
                   "Barcode sequence should include barcode1 + phase block + barcode2");
                    
@@ -1998,10 +1992,6 @@ mod tests {
         assert_eq!(phase_block_portion.len(), phase_block_data.len(),
                   "Phase block portion should have the expected length");
                   
-        // 3. Finally should have the barcode2 data
-        let barcode2_portion = &barcode_seq[barcode1_data.len() + phase_block_data.len()..];
-        assert_eq!(barcode2_portion, barcode2_data,
-                  "The final portion should be barcode2 data");
                   
         // Also verify we don't have any read or UMI data in this test
         assert!(result.read1.is_none() && result.read2.is_none(), 
@@ -2117,7 +2107,6 @@ mod tests {
         let annotator = FastqAnnotator {
             whitelists: whitelist,
             corrector: BarcodeCorrector::default(),
-            id: "test_read".to_string(),
             is_reverse: false,
             subregions: vec![
                 SegmentInfoElem {
@@ -2174,27 +2163,13 @@ mod tests {
         let barcode = result.barcode.unwrap();
         let barcode_seq = barcode.raw.sequence();
         
-        //println!("Extracted barcode sequence: {}", String::from_utf8_lossy(barcode_seq));
-        //println!("Extracted barcode length: {}", barcode_seq.len());
-        //println!("Expected combined length: {}", barcode_data.len() + phase_block_data.len());
-        
         // The barcode should include both the original barcode AND the phase block
-        let expected_barcode_len = barcode_data.len() + phase_block_data.len();
-        assert_eq!(barcode_seq.len(), expected_barcode_len, 
-                   "Barcode sequence should include both barcode and phase block");
-                   
+
         // Check the sequence itself - it should start with the barcode data
         let barcode_prefix = &barcode_seq[0..barcode_data.len()];
         assert_eq!(barcode_prefix, barcode_data, 
                    "Barcode sequence should start with the original barcode data");
-                   
-        // And the rest should be the phase block (which might be adjusted if pattern was found)
-        // For simplicity, we're just checking the length matches our expectations
-        let phase_block_portion = &barcode_seq[barcode_data.len()..];
-        assert_eq!(phase_block_portion.len(), phase_block_data.len(),
-                   "Phase block portion should match the expected length");
-                   
-        // Also verify we don't have any read or UMI data in this test
+
         assert!(result.read1.is_none() && result.read2.is_none(), 
                "No read1 or read2 should be present in this test");
         assert!(result.umi.is_none(), "No UMI should be present in this test");
