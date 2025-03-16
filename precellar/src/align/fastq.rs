@@ -751,24 +751,18 @@ impl<'a, R: std::io::Read> Iterator for NameCollatedRecords<'a, R> {
 
 #[cfg(test)]
 mod tests {
-    use bwa_mem2::{AlignerOpts, BurrowsWheelerAligner, FMIndex, PairedEndStats};
-    use env_logger;
+    use bwa_mem2::{AlignerOpts, BurrowsWheelerAligner, FMIndex};
 
     use super::*;
 
     #[test]
     fn test_seqspec_io() {
-        // Initialize logging with debug level
-        env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("debug"))
-            .init();
-
         let bwa_index = "/data/Public/BWA_MEM2_index/GRCh38";
         let seqspec = "/data/kzhang/dev/PreCellar/test/seqspec.yaml";
         let spec = Assay::from_path(seqspec).unwrap();
         let mut aligner = BurrowsWheelerAligner::new(
             FMIndex::read(bwa_index).unwrap(),
             AlignerOpts::default(),
-            PairedEndStats::default(),
         );
         let mut processor = FastqProcessor::new(spec).with_modality(Modality::ATAC);
 

@@ -4,7 +4,7 @@ use noodles::sam::Header;
 use precellar::{align::Aligner, transcript::{AlignmentAnnotator, Transcript}};
 use pyo3::prelude::*;
 use star_aligner::{StarAligner, StarOpts};
-use bwa_mem2::{AlignerOpts, BurrowsWheelerAligner, FMIndex, PairedEndStats};
+use bwa_mem2::{AlignerOpts, BurrowsWheelerAligner, FMIndex};
 
 pub enum AlignerRef<'py> {
     STAR(PyRefMut<'py, STAR>),
@@ -125,7 +125,6 @@ impl BWAMEM2 {
         let aligner = BurrowsWheelerAligner::new(
             FMIndex::read(index_path).unwrap(),
             AlignerOpts::default(),
-            PairedEndStats::default(),
         );
         Ok(BWAMEM2(aligner))
     }

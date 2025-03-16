@@ -7,7 +7,7 @@ pub use bwa_mem2::BurrowsWheelerAligner;
 use noodles::sam::alignment::Record;
 pub use star_aligner::StarAligner;
 
-use bwa_mem2::{AlignerOpts, FMIndex, PairedEndStats};
+use bwa_mem2::{AlignerOpts, FMIndex};
 use noodles::sam;
 use noodles::sam::alignment::record::data::field::tag::Tag;
 use noodles::sam::alignment::record_buf::{data::field::value::Value, RecordBuf};
@@ -132,7 +132,6 @@ impl Aligner for BurrowsWheelerAligner {
         BurrowsWheelerAligner::new(
             FMIndex::read(path).unwrap(),
             AlignerOpts::default(),
-            PairedEndStats::default(),
         )
     }
 
