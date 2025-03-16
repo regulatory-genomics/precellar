@@ -485,6 +485,7 @@ impl BarcodeFilterResults {
             filtered_bcs_var: 0.0,
             filtered_bcs_cv: 0.0,
             filtered_bcs_cutoff: 0,
+
             ..Default::default()
         }
     }
@@ -669,6 +670,7 @@ impl BarcodeFilterResults {
         
         Ok(())
     }
+
 }
 
 /// Constants for barcode filtering
@@ -689,7 +691,9 @@ const MAX_RECOVERED_CELLS_PER_GEM_GROUP: usize = 1 << 18; // 262,144
 /// * `num_probe_barcodes` - Number of probe barcodes
 /// * `ordmag_recovered_cells_quantile` - Quantile for determining baseline (default: 0.99)
 /// * `num_bootstrap_samples` - Number of bootstrap iterations (default: 100)
+
 /// * `output_metrics_path` - Optional path to write QC metrics
+
 ///
 /// # Returns
 ///
@@ -781,6 +785,7 @@ pub fn filter_cellular_barcodes_ordmag_advanced(
         top_n_boot.push(find_within_ordmag(&sample, baseline_bc_idx));
     }
     
+
     let mut metrics = summarize_bootstrapped_top_n(&top_n_boot, &nonzero_counts);
     
     // Apply the filter to the whitelist
