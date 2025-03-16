@@ -1,9 +1,13 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use log::warn;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::transcript::annotate::AnnotationRegion;
 
 use super::quantification::GeneAlignment;
+
+// Static flag to track if we've shown the missing UMI warning
+static UMI_WARNING_SHOWN: AtomicBool = AtomicBool::new(false);
 
 type Gene = usize;
 
@@ -38,17 +42,22 @@ where
     let mut umigene_counts_exon = HashMap::new();
     let mut umigene_counts_intron = HashMap::new();
     let mut gene_counter = HashMap::new();
-    let mut warned = false;
+    
+    // Convert to Vec to allow multiple passes through the data
+    let alignments_vec: Vec<GeneAlignment> = alignments.into_iter().collect();
+    
+    // Check if any alignments are missing UMI information before iteration
+    let has_missing_umi = alignments_vec.iter().any(|alignment| alignment.umi.is_none());
+    if has_missing_umi && !UMI_WARNING_SHOWN.load(Ordering::Relaxed) {
+        warn!("Encountered alignment(s) without UMI information. Using generated UMIs.");
+        UMI_WARNING_SHOWN.store(true, Ordering::Relaxed);
+    }
 
-    alignments.into_iter().for_each(|alignment| {
+    alignments_vec.into_iter().for_each(|alignment| {
         let gene = alignment.idx;
         let umi = match alignment.umi {
             Some(umi) => umi.into_bytes(),
             None => {
-                if !warned {
-                    warn!("Encountered alignment(s) without UMI information. Using generated UMIs.");
-                    warned = true;
-                }
                 // Create a unique UMI for each gene using a counter
                 let counter = gene_counter.entry(gene).or_insert(0u32);
                 *counter += 1;
