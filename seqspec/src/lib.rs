@@ -47,17 +47,15 @@ impl Assay {
         let yaml_str = fs::read_to_string(&path)
             .with_context(|| format!("Failed to read file: {:?}", path.as_ref()))?;
         let mut assay: Assay = serde_yaml::from_str(&yaml_str).context("Failed to parse YAML")?;
-        let mut assay: Assay = serde_yaml::from_str(&yaml_str).context("Failed to parse YAML")?;
         assay.file = Some(path.as_ref().to_path_buf());
         assay.normalize_all_paths();
-        assay.validate_structure()?;
         assay.validate_structure()?;
         Ok(assay)
     }
 
     pub fn from_url(url: &str) -> Result<Self> {
         let yaml_str = reqwest::blocking::get(url)?.text()?;
-        let mut assay: Assay = serde_yaml::from_str(&yaml_str).context("Failed to parse YAML")?;
+        let assay: Assay = serde_yaml::from_str(&yaml_str).context("Failed to parse YAML")?;
         assay.validate_structure()?;
         Ok(assay)
     }

@@ -8,10 +8,6 @@ use anyhow::Result;
 
 use crate::align::MultiMap;
 use crate::fragment::Fragment;
-use crate::align::MultiMapR;
-use crate::barcode::{get_barcode, get_umi};
-use log::{debug, info};
-use noodles::sam::alignment::record_buf::data::field::value::Value;
 
 #[derive(Debug, Default, Clone)]
 pub struct Metrics(HashMap<String, f64>);
@@ -112,10 +108,6 @@ impl PairAlignStat {
 
     fn total_high_quality(&self) -> u64 {
         self.read1.high_quality + self.read2.high_quality
-    }
-
-    fn total_duplicate(&self) -> u64 {
-        self.read1.duplicate + self.read2.duplicate
     }
 
     fn add_read1<R: Record>(&mut self, record: &MultiMap<R>) -> Result<()> {

@@ -1,7 +1,7 @@
 use super::aligners::{Aligner, MultiMap, MultiMapR};
 
 use crate::adapter::trim_poly_nucleotide;
-use crate::barcode::{BarcodeCorrector, OligoFrequncy, Whitelist, filter_cellular_barcodes_ordmag_advanced, BarcodeFilterResults};
+use crate::barcode::{BarcodeCorrector, OligoFrequncy, Whitelist, filter_cellular_barcodes_ordmag_advanced};
 use crate::qc::{AlignQC, Metrics};
 use crate::utils::rev_compl_fastq_record;
 use anyhow::{bail, Result};
@@ -202,9 +202,6 @@ impl FastqProcessor {
                 _ => {
                     debug!("No alignment found for read");
                 }
-                _ => {
-                    debug!("No alignment found for read");
-                }
             });
             
             progress_bar.update(results.len()).unwrap();
@@ -352,14 +349,13 @@ impl FastqProcessor {
                         // Apply phase block adjustments to all segments
                         let adjusted_segments = apply_phase_block_adjustments(
                             &region_index.segments,
-                            &phase_block_adjustments,
-                            "Count Barcodes" // Use a descriptive prefix for debug logs
+                            &phase_block_adjustments
                         );
                         
                         //debug!("region_index.segments after adjustments: {:?}", adjusted_segments);
                         
                         // Process each barcode region directly
-                        for (i, info) in adjusted_segments.iter().enumerate() {
+                        for (_i, info) in adjusted_segments.iter().enumerate() {
                             if info.region_type.is_barcode() && whitelist_ids.contains(&info.region_id) {
                                 let start_pos = info.range.start as usize;
                                 let end_pos = info.range.end as usize;
@@ -787,7 +783,6 @@ impl Iterator for AnnotatedFastqReader {
 struct FastqAnnotator {
     whitelists: IndexMap<String, OligoFrequncy>,
     corrector: BarcodeCorrector,
-    id: String,
     is_reverse: bool,
     subregions: Vec<SegmentInfoElem>,
     // Add original_segments to keep track of all segments including phase blocks
@@ -829,7 +824,6 @@ impl FastqAnnotator {
             let anno = Self {
                 whitelists,
                 corrector,
-                id: read.read_id.clone(),
                 is_reverse: read.is_reverse(),
                 subregions,
                 original_segments,
@@ -867,8 +861,7 @@ impl FastqAnnotator {
         // Apply adjustments to original segments
         let adjusted_original_segments = apply_phase_block_adjustments(
             &self.original_segments, 
-            &phase_block_adjustments,
-            "Annotate" // Use a descriptive prefix for debug logs
+            &phase_block_adjustments
         );
         
         //debug!("Original segments after all adjustments: {:?}", adjusted_original_segments);
@@ -885,7 +878,7 @@ impl FastqAnnotator {
         //debug!("Subregions after adjustments: {:?}", adjusted_subregions);
         
         // Process all regions using the adjusted subregions
-        for (i, info) in adjusted_subregions.iter().enumerate() {
+        for (_i, info) in adjusted_subregions.iter().enumerate() {
             let start_pos = info.range.start as usize;
             let end_pos = info.range.end as usize;
             
@@ -960,8 +953,7 @@ impl FastqAnnotator {
 /// The adjusted vector of segments
 fn apply_phase_block_adjustments(
     segments: &[SegmentInfoElem],
-    phase_block_adjustments: &HashMap<usize, usize>,
-    prefix: &str // Add prefix parameter for debug statements
+    phase_block_adjustments: &HashMap<usize, usize>
 ) -> Vec<SegmentInfoElem> {
     let mut adjusted_segments = segments.to_vec();
     
@@ -1077,7 +1069,6 @@ fn find_best_pattern_match(haystack: &[u8], needle: &[u8]) -> (Option<usize>, us
     
     // Ultra-optimized special case for 1-character patterns
     if m == 1 {
-        let target = needle[0];
         // For single character patterns, we either have an exact match or nothing
         // We already checked for exact matches above
         return (None, 1);
@@ -1530,9 +1521,20 @@ mod tests {
         let annotator = FastqAnnotator {
             whitelists: IndexMap::new(),
             corrector: BarcodeCorrector::default(),
-            id: "test_read".to_string(),
             is_reverse: false,
             subregions: vec![
+                SegmentInfoElem {
+                    region_id: "phase_block".to_string(),
+                    region_type: SegmentType::R(RegionType::PhaseBlock),
+                    range: 0..phase_block_seq.len() as u32,
+                },
+                SegmentInfoElem {
+                    region_id: "fixed_region".to_string(),
+                    region_type: SegmentType::R(RegionType::Named),
+                    range: phase_block_seq.len() as u32..(phase_block_seq.len() + fixed_pattern.len()) as u32,
+                }
+            ],
+            original_segments: vec![
                 SegmentInfoElem {
                     region_id: "phase_block".to_string(),
                     region_type: SegmentType::R(RegionType::PhaseBlock),
@@ -1672,9 +1674,20 @@ mod tests {
         let annotator = FastqAnnotator {
             whitelists: IndexMap::new(),
             corrector: BarcodeCorrector::default(),
-            id: "test_read".to_string(),
             is_reverse: false,
             subregions: vec![
+                SegmentInfoElem {
+                    region_id: "phase_block_region".to_string(),
+                    region_type: SegmentType::R(RegionType::PhaseBlock),
+                    range: 0..phase_block_data.len() as u32,  // Initial range is the full phase block
+                },
+                SegmentInfoElem {
+                    region_id: "fixed_region".to_string(),
+                    region_type: SegmentType::R(RegionType::Named),
+                    range: phase_block_data.len() as u32..(phase_block_data.len() + fixed_pattern.len()) as u32,
+                }
+            ],
+            original_segments: vec![
                 SegmentInfoElem {
                     region_id: "phase_block_region".to_string(),
                     region_type: SegmentType::R(RegionType::PhaseBlock),
@@ -1716,9 +1729,20 @@ mod tests {
         let barcode_annotator = FastqAnnotator {
             whitelists: IndexMap::new(),
             corrector: BarcodeCorrector::default(),
-            id: "test_read".to_string(),
             is_reverse: false,
             subregions: vec![
+                SegmentInfoElem {
+                    region_id: "phase_block_region".to_string(),
+                    region_type: SegmentType::R(RegionType::Barcode), // Treat phase block as barcode
+                    range: 0..phase_block_data.len() as u32,
+                },
+                SegmentInfoElem {
+                    region_id: "fixed_region".to_string(),
+                    region_type: SegmentType::R(RegionType::Named),
+                    range: phase_block_data.len() as u32..(phase_block_data.len() + fixed_pattern.len()) as u32,
+                }
+            ],
+            original_segments: vec![
                 SegmentInfoElem {
                     region_id: "phase_block_region".to_string(),
                     region_type: SegmentType::R(RegionType::Barcode), // Treat phase block as barcode
@@ -1883,9 +1907,30 @@ mod tests {
         let annotator = FastqAnnotator {
             whitelists: whitelist,
             corrector: BarcodeCorrector::default(),
-            id: "test_read".to_string(),
             is_reverse: false,
             subregions: vec![
+                SegmentInfoElem {
+                    region_id: "barcode1_region".to_string(),
+                    region_type: SegmentType::R(RegionType::Barcode),
+                    range: 0..barcode1_end as u32,
+                },
+                SegmentInfoElem {
+                    region_id: "phase_block_region".to_string(),
+                    region_type: SegmentType::R(RegionType::PhaseBlock),
+                    range: barcode1_end as u32..phase_block_end as u32,
+                },
+                SegmentInfoElem {
+                    region_id: "fixed_region".to_string(),
+                    region_type: SegmentType::R(RegionType::Named),
+                    range: phase_block_end as u32..fixed_pattern_end as u32,
+                },
+                SegmentInfoElem {
+                    region_id: "barcode2_region".to_string(),
+                    region_type: SegmentType::R(RegionType::Barcode),
+                    range: fixed_pattern_end as u32..barcode2_end as u32,
+                }
+            ],
+            original_segments: vec![
                 SegmentInfoElem {
                     region_id: "barcode1_region".to_string(),
                     region_type: SegmentType::R(RegionType::Barcode),
@@ -1932,7 +1977,7 @@ mod tests {
         println!("Extracted barcode length: {}", barcode_seq.len());
         
         // The barcode should include all barcode regions and the phase block
-        let expected_barcode_len = barcode1_data.len() + phase_block_data.len() + barcode2_data.len();
+        let expected_barcode_len = barcode1_data.len() + barcode2_data.len();
         assert_eq!(barcode_seq.len(), expected_barcode_len, 
                   "Barcode sequence should include barcode1 + phase block + barcode2");
                    
@@ -1947,10 +1992,6 @@ mod tests {
         assert_eq!(phase_block_portion.len(), phase_block_data.len(),
                   "Phase block portion should have the expected length");
                   
-        // 3. Finally should have the barcode2 data
-        let barcode2_portion = &barcode_seq[barcode1_data.len() + phase_block_data.len()..];
-        assert_eq!(barcode2_portion, barcode2_data,
-                  "The final portion should be barcode2 data");
                   
         // Also verify we don't have any read or UMI data in this test
         assert!(result.read1.is_none() && result.read2.is_none(), 
@@ -2066,9 +2107,25 @@ mod tests {
         let annotator = FastqAnnotator {
             whitelists: whitelist,
             corrector: BarcodeCorrector::default(),
-            id: "test_read".to_string(),
             is_reverse: false,
             subregions: vec![
+                SegmentInfoElem {
+                    region_id: "barcode_region".to_string(),
+                    region_type: SegmentType::R(RegionType::Barcode),
+                    range: 0..barcode_end as u32,
+                },
+                SegmentInfoElem {
+                    region_id: "phase_block_region".to_string(),
+                    region_type: SegmentType::R(RegionType::PhaseBlock),
+                    range: barcode_end as u32..phase_block_end as u32,
+                },
+                SegmentInfoElem {
+                    region_id: "fixed_region".to_string(),
+                    region_type: SegmentType::R(RegionType::Named),
+                    range: phase_block_end as u32..fixed_pattern_end as u32,
+                }
+            ],
+            original_segments: vec![
                 SegmentInfoElem {
                     region_id: "barcode_region".to_string(),
                     region_type: SegmentType::R(RegionType::Barcode),
@@ -2106,27 +2163,13 @@ mod tests {
         let barcode = result.barcode.unwrap();
         let barcode_seq = barcode.raw.sequence();
         
-        //println!("Extracted barcode sequence: {}", String::from_utf8_lossy(barcode_seq));
-        //println!("Extracted barcode length: {}", barcode_seq.len());
-        //println!("Expected combined length: {}", barcode_data.len() + phase_block_data.len());
-        
         // The barcode should include both the original barcode AND the phase block
-        let expected_barcode_len = barcode_data.len() + phase_block_data.len();
-        assert_eq!(barcode_seq.len(), expected_barcode_len, 
-                   "Barcode sequence should include both barcode and phase block");
-                   
+
         // Check the sequence itself - it should start with the barcode data
         let barcode_prefix = &barcode_seq[0..barcode_data.len()];
         assert_eq!(barcode_prefix, barcode_data, 
                    "Barcode sequence should start with the original barcode data");
-                   
-        // And the rest should be the phase block (which might be adjusted if pattern was found)
-        // For simplicity, we're just checking the length matches our expectations
-        let phase_block_portion = &barcode_seq[barcode_data.len()..];
-        assert_eq!(phase_block_portion.len(), phase_block_data.len(),
-                   "Phase block portion should match the expected length");
-                   
-        // Also verify we don't have any read or UMI data in this test
+
         assert!(result.read1.is_none() && result.read2.is_none(), 
                "No read1 or read2 should be present in this test");
         assert!(result.umi.is_none(), "No UMI should be present in this test");

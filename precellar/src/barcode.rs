@@ -1,4 +1,4 @@
-use anyhow::{bail, Context, Result};
+use anyhow::{bail, Result};
 use core::f64;
 use noodles::sam::alignment::{
     record::data::field::{Tag, Value},
@@ -8,7 +8,6 @@ use std::{
     collections::HashMap,
     ops::{Deref, DerefMut},
 };
-use log::{debug, info};
 
 const BC_MAX_QV: u8 = 66; // This is the illumina quality value
 pub(crate) const BASE_OPTS: [u8; 4] = [b'A', b'C', b'G', b'T'];

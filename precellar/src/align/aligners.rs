@@ -15,7 +15,6 @@ use rayon::iter::ParallelIterator;
 use rayon::slice::ParallelSlice;
 use star_aligner::StarOpts;
 use log;
-use log::debug;
 
 pub type MultiMapR = MultiMap<RecordBuf>;
 
