@@ -1,7 +1,7 @@
 use super::aligners::{Aligner, MultiMap, MultiMapR};
 
 use crate::adapter::trim_poly_nucleotide;
-use crate::barcode::{BarcodeCorrector, OligoFrequncy, Whitelist, filter_cellular_barcodes_ordmag_advanced};
+use crate::barcode::{BarcodeCorrector, OligoFrequncy, Whitelist, filter_cellular_barcodes_ordmag_advanced, BarcodeFilterResults};
 use crate::qc::{AlignQC, Metrics};
 use crate::utils::rev_compl_fastq_record;
 use anyhow::{bail, Result};
@@ -9,7 +9,7 @@ use bstr::BString;
 use indexmap::IndexMap;
 use itertools::Itertools;
 use kdam::{tqdm, BarExt};
-use log::{debug, info};
+use log::{debug, info, warn};
 use noodles::{bam, fastq};
 use rayon::iter::ParallelIterator;
 use rayon::slice::ParallelSlice;
@@ -18,6 +18,8 @@ use seqspec::read::SegmentType;
 use smallvec::SmallVec;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, RwLock};
+use std::path::PathBuf;
+use serde_json;
 
 pub struct FastqProcessor {
     assay: Assay,
@@ -32,6 +34,7 @@ pub struct FastqProcessor {
     expected_cells: Option<usize>, // Expected number of cells
     barcode_filtering_quantile: f64, // Quantile for barcode filtering
     barcode_bootstrap_samples: usize, // Number of bootstrap samples for filtering
+    metrics_path: Option<std::path::PathBuf>, // Path to write QC metrics
 }
 
 impl FastqProcessor {
@@ -48,6 +51,7 @@ impl FastqProcessor {
             expected_cells: None,
             barcode_filtering_quantile: 0.99,
             barcode_bootstrap_samples: 100,
+            metrics_path: None,
         }
     }
 
@@ -63,11 +67,17 @@ impl FastqProcessor {
         self
     }
     
-    pub fn with_barcode_filtering_params(mut self, quantile: f64, bootstrap_samples: usize) -> Self {
-        debug!("Setting barcode filtering parameters: quantile={}, bootstrap_samples={}", 
-               quantile, bootstrap_samples);
+    pub fn with_barcode_filtering_params(
+        mut self, 
+        quantile: f64, 
+        bootstrap_samples: usize,
+        metrics_path: Option<&std::path::Path>
+    ) -> Self {
+        debug!("Setting barcode filtering parameters: quantile={}, bootstrap_samples={}, metrics_path={:?}", 
+               quantile, bootstrap_samples, metrics_path);
         self.barcode_filtering_quantile = quantile;
         self.barcode_bootstrap_samples = bootstrap_samples;
+        self.metrics_path = metrics_path.map(|p| p.to_path_buf());
         self
     }
 
@@ -286,7 +296,16 @@ impl FastqProcessor {
         let mut whitelists = self.get_whitelists();
         let mut total_filtered_bcs = 0;
 
-        debug!("Counting barcodes");
+        debug!("Starting barcode counting process. Metrics path is: {:?}", self.metrics_path);
+        debug!("Number of whitelists found: {}", whitelists.len());
+        
+        // Log whitelist details
+        for (id, whitelist) in whitelists.iter() {
+            debug!("Whitelist '{}': has_predefined={}, total_count={}", 
+                  id, 
+                  !whitelist.get_barcode_counts().is_empty(),
+                  whitelist.total_count);
+        }
         
         // Create a list of IDs that need counting
         let whitelist_ids: Vec<RegionId> = whitelists.keys().cloned().collect();
@@ -368,6 +387,16 @@ impl FastqProcessor {
             if !has_predefined_whitelist  {
                 info!("No predefined whitelist for '{}', applying order-of-magnitude filtering", id);
                 
+                // Create metrics file path if metrics_path is provided
+                let metrics_file_path = self.metrics_path.as_ref().map(|path| {
+                    let file_name = format!("barcode_metrics_{}.json", id);
+                    let full_path = path.join(file_name);
+                    debug!("Creating metrics file path: {:?} for barcode region: {}", full_path, id);
+                    full_path
+                });
+                
+                debug!("Metrics path for barcode region {}: {:?}", id, metrics_file_path);
+                
                 let results = filter_cellular_barcodes_ordmag_advanced(
                     whitelist,
                     self.expected_cells,
@@ -375,6 +404,7 @@ impl FastqProcessor {
                     None,
                     Some(self.barcode_filtering_quantile),
                     Some(self.barcode_bootstrap_samples),
+                    metrics_file_path.as_deref(),
                 );
                 
                 info!(
@@ -387,18 +417,104 @@ impl FastqProcessor {
                 );
                 
                 total_filtered_bcs += results.filtered_bcs;
-                
-                // Store filtering metrics
-                self.metrics.entry(modality).or_default().insert(
-                    format!("filtered_bcs_{}", id),
-                    results.filtered_bcs as f64,
-                );
-                self.metrics.entry(modality).or_default().insert(
-                    format!("filtered_bcs_cutoff_{}", id),
-                    results.filtered_bcs_cutoff as f64,
-                );
             } else {
-                info!("Using predefined whitelist for '{}', skipping filtering", id);
+                info!("Using predefined whitelist for '{}'", id);
+                
+                // Create metrics file for predefined whitelists too
+                if let Some(metrics_path) = &self.metrics_path {
+                    let file_name = format!("barcode_metrics_{}.json", id);
+                    let full_path = metrics_path.join(file_name);
+                    debug!("Creating metrics file path for predefined whitelist: {:?} for barcode region: {}", full_path, id);
+                    
+                    // Create simple metrics structure
+                    let mut metrics = serde_json::Map::new();
+                    metrics.insert("whitelist_id".to_string(), serde_json::Value::String(id.clone()));
+                    metrics.insert("is_predefined".to_string(), serde_json::Value::Bool(true));
+                    metrics.insert("total_barcodes".to_string(), serde_json::Value::Number(serde_json::Number::from(whitelist.get_barcode_counts().len())));
+                    
+                    // Add barcode-specific metrics
+                    metrics.insert("frac_valid_barcode".to_string(), serde_json::Value::Number(serde_json::Number::from_f64(whitelist.frac_exact_match()).unwrap_or(serde_json::Number::from(0))));
+                    metrics.insert("frac_q30_bases_barcode".to_string(), serde_json::Value::Number(serde_json::Number::from_f64(whitelist.frac_q30_bases()).unwrap_or(serde_json::Number::from(0))));
+                    
+                    // Add general QC metrics from the processor's metrics if they exist
+                    if let Some(modality_metrics) = self.metrics.get(&modality) {
+                        // Add all existing metrics for this modality
+                        for (metric_name, metric_value) in modality_metrics.iter() {
+                            metrics.insert(metric_name.clone(), serde_json::Value::Number(serde_json::Number::from_f64(*metric_value).unwrap_or(serde_json::Number::from(0))));
+                        }
+                    }
+                    
+                    // Write metrics to file
+                    if let Ok(file) = std::fs::File::create(&full_path) {
+                        if let Err(e) = serde_json::to_writer_pretty(file, &metrics) {
+                            warn!("Failed to write metrics file for predefined whitelist '{}': {}", id, e);
+                        } else {
+                            debug!("Successfully wrote metrics for predefined whitelist '{}'", id);
+                        }
+                    } else {
+                        warn!("Failed to create metrics file for predefined whitelist '{}'", id);
+                    }
+                }
+                
+                // Count predefined barcodes toward the total
+                total_filtered_bcs += whitelist.get_barcode_counts().len();
+            }
+        }
+        
+        // After processing all barcodes, write a consolidated metrics file
+        if let Some(metrics_path) = &self.metrics_path {
+            // Create a consolidated metrics file with all QC metrics
+            let consolidated_file_path = PathBuf::from(metrics_path).join("consolidated_qc_metrics.json");
+            debug!("Creating consolidated QC metrics file at: {:?}", consolidated_file_path);
+            
+            if let Some(modality_metrics) = self.metrics.get(&modality) {
+                let mut consolidated_metrics = serde_json::Map::new();
+                
+                // Add all metrics for this modality
+                for (metric_name, metric_value) in modality_metrics.iter() {
+                    consolidated_metrics.insert(
+                        metric_name.clone(), 
+                        serde_json::Value::Number(
+                            serde_json::Number::from_f64(*metric_value).unwrap_or(serde_json::Number::from(0))
+                        )
+                    );
+                }
+                
+                // Add total filtered barcodes count
+                consolidated_metrics.insert(
+                    "total_filtered_bcs".to_string(),
+                    serde_json::Value::Number(serde_json::Number::from(total_filtered_bcs))
+                );
+                
+                // Add average barcode quality metrics across all whitelists
+                consolidated_metrics.insert(
+                    "frac_q30_bases_barcode".to_string(),
+                    serde_json::Value::Number(
+                        serde_json::Number::from_f64(
+                            whitelists.values().map(|x| x.frac_q30_bases()).sum::<f64>() / whitelists.len() as f64
+                        ).unwrap_or(serde_json::Number::from(0))
+                    )
+                );
+                
+                consolidated_metrics.insert(
+                    "frac_valid_barcode".to_string(),
+                    serde_json::Value::Number(
+                        serde_json::Number::from_f64(
+                            whitelists.values().map(|x| x.frac_exact_match()).sum::<f64>() / whitelists.len() as f64
+                        ).unwrap_or(serde_json::Number::from(0))
+                    )
+                );
+                
+                // Write the consolidated metrics to file
+                if let Ok(file) = std::fs::File::create(&consolidated_file_path) {
+                    if let Err(e) = serde_json::to_writer_pretty(file, &consolidated_metrics) {
+                        warn!("Failed to write consolidated metrics file: {}", e);
+                    } else {
+                        debug!("Successfully wrote consolidated QC metrics to {:?}", consolidated_file_path);
+                    }
+                } else {
+                    warn!("Failed to create consolidated metrics file at {:?}", consolidated_file_path);
+                }
             }
         }
         
@@ -1302,7 +1418,8 @@ mod tests {
             None,
             None,
             Some(0.99),
-            Some(10)
+            Some(10),
+            None
         );
         
         // Verify filtering worked
