@@ -249,7 +249,6 @@ impl Aligner for StarAligner {
                             });
                         (Some(ali1.try_into().unwrap()), Some(ali2.try_into().unwrap()))
                     } else if let Some(read) = read1.or(read2) {
-                    } else if let Some(read) = read1.or(read2) {
                         let mut ali = aligner.align_read(read).unwrap();
                         ali.iter_mut().for_each(|alignment| {
                             add_cell_barcode(
@@ -267,10 +266,6 @@ impl Aligner for StarAligner {
                         } else {
                             (None, Some(ali.try_into().unwrap()))
                         }
-                    } else {
-                        log::warn!("Found record with no reads (read1 and read2 are both None). Barcode: {:?}", 
-                                  String::from_utf8_lossy(bc.raw.sequence()));
-                        (None, None)
                     } else {
                         log::warn!("Found record with no reads (read1 and read2 are both None). Barcode: {:?}", 
                                   String::from_utf8_lossy(bc.raw.sequence()));
