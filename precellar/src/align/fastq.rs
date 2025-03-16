@@ -44,7 +44,7 @@ impl FastqProcessor {
             align_qc: HashMap::new(),
             mito_dna: HashSet::new(),
             barcode_correct_prob: 0.975,
-            mismatch_in_barcode: 1,
+            mismatch_in_barcode: 2,
             expected_cells: None,
             barcode_filtering_quantile: 0.99,
             barcode_bootstrap_samples: 100,
@@ -904,50 +904,41 @@ fn find_pattern(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     None
 }
 
-/// Find a pattern within a haystack, returning the position with minimal mismatches.
-/// Optimized for short patterns (< 10 characters) which is the common case.
+
+/// Find the best match for a pattern within a haystack, always returning the position
+/// with the minimal number of mismatches. Highly optimized for short patterns (< 10 characters).
 /// 
 /// # Arguments
 /// 
 /// * `haystack` - The sequence to search in
 /// * `needle` - The pattern to search for
-/// * `max_mismatches` - Maximum number of mismatches allowed (0 for exact matching)
 /// 
 /// # Returns
 /// 
-/// The position of the match with minimal Hamming distance, or None if no match is found
-fn find_pattern_with_mismatches(haystack: &[u8], needle: &[u8], max_mismatches: usize) -> Option<usize> {
+/// A tuple of (Option<position>, mismatch_count) with the best match position and its mismatch count
+fn find_best_pattern_match(haystack: &[u8], needle: &[u8]) -> (Option<usize>, usize) {
     if needle.is_empty() || haystack.is_empty() || needle.len() > haystack.len() {
-        return None;
+        return (None, usize::MAX);
     }
-    
-    // For exact matching, use the more efficient algorithm
-    if max_mismatches == 0 {
-        return find_pattern(haystack, needle);
+    // Try exact matching first - it's very efficient
+    if let Some(pos) = find_pattern(haystack, needle) {
+        return (Some(pos), 0);
     }
-    
     let n = haystack.len();
     let m = needle.len();
     
     // Ultra-optimized special case for 1-character patterns
     if m == 1 {
         let target = needle[0];
-        for i in 0..n {
-            if haystack[i] == target {
-                return Some(i);
-            }
-        }
-        // If no exact match, return None - for single character there's no concept of "minimal mismatch"
-        return None;
+        // For single character patterns, we either have an exact match or nothing
+        // We already checked for exact matches above
+        return (None, 1);
     }
-    
     let mut min_mismatches = usize::MAX;
     let mut best_pos = None;
-    
     // Simple and efficient approach for very short patterns
     for i in 0..=n.saturating_sub(m) {
         let mut mismatches = 0;
-        
         // Count mismatches at this position
         for j in 0..m {
             if haystack[i + j] != needle[j] {
@@ -957,26 +948,14 @@ fn find_pattern_with_mismatches(haystack: &[u8], needle: &[u8], max_mismatches: 
                     break;
                 }
             }
-        }
-        
+        }        
         // Update if this is a better match
         if mismatches < min_mismatches {
             min_mismatches = mismatches;
             best_pos = Some(i);
-            
-            // Early return for exact match
-            if mismatches == 0 {
-                return best_pos;
-            }
         }
     }
-    
-    // Return the position with minimal mismatches, even if above max_mismatches
-    if min_mismatches <= max_mismatches {
-        best_pos
-    } else {
-        None
-    }
+    (best_pos, min_mismatches)
 }
 
 #[derive(Debug)]
@@ -1200,17 +1179,22 @@ fn calculate_phase_block_adjustments(
                         let search_range = search_start..search_limit;
                         let limited_seq = &record.sequence()[search_range];
                         
-                        // Try to find pattern with allowed mismatches
-                        if let Some(match_pos) = find_pattern_with_mismatches(limited_seq, pattern, MAX_ALLOWED_MISMATCHES) {
-                            let phase_block_end = search_start + match_pos;
-                            //debug!("search_start: {}, match_pos: {}, phase_block_end: {}", search_start, match_pos, phase_block_end);
-                            
-                            //debug!("Found pattern at position {} (allowing up to {} mismatches)", 
-                            //       phase_block_end, MAX_ALLOWED_MISMATCHES);
-                            
-                            // Always record the adjustment, even if it's the same as the original position
-                            // This ensures consistent processing for all phase blocks
-                            phase_block_adjustments.insert(i, phase_block_end);
+                        // Try to find best pattern match using our improved function
+                        let (match_pos_opt, mismatches) = find_best_pattern_match(limited_seq, pattern);
+                        
+                        if let Some(match_pos) = match_pos_opt {
+                            // Only use the match if it has acceptable mismatches
+                            if mismatches <= MAX_ALLOWED_MISMATCHES {
+                                let phase_block_end = search_start + match_pos;
+                                //debug!("search_start: {}, match_pos: {}, phase_block_end: {}", search_start, match_pos, phase_block_end);
+                                
+                                //debug!("Found pattern at position {} (with {} mismatches)", 
+                                //       phase_block_end, mismatches);
+                                
+                                // Always record the adjustment, even if it's the same as the original position
+                                // This ensures consistent processing for all phase blocks
+                                phase_block_adjustments.insert(i, phase_block_end);
+                            }
                         }
                     }
                 }
@@ -1322,31 +1306,7 @@ mod tests {
         assert_eq!(find_pattern(&[], b"ACGT"), None);
     }
     
-    #[test]
-    fn test_find_pattern_with_mismatches() {
-        // Test exact matching (0 mismatches)
-        let haystack = b"ACGTACGTACGT";
-        let needle = b"ACGT";
-        assert_eq!(find_pattern_with_mismatches(haystack, needle, 0), Some(0));
-        assert_eq!(find_pattern_with_mismatches(haystack, b"CGTA", 0), Some(1));
-        
-        // Test with 1 mismatch allowed
-        assert_eq!(find_pattern_with_mismatches(haystack, b"ACCT", 1), Some(0)); // G -> C mismatch
-        assert_eq!(find_pattern_with_mismatches(haystack, b"CGTX", 1), Some(1)); // A -> X mismatch
-        assert_eq!(find_pattern_with_mismatches(haystack, b"XCGT", 1), Some(0)); // A -> X mismatch
-        
-        // Test with 2 mismatches allowed
-        assert_eq!(find_pattern_with_mismatches(haystack, b"AXCX", 2), Some(0)); // C,T -> X,X mismatches
-        assert_eq!(find_pattern_with_mismatches(haystack, b"XGTX", 2), Some(0)); // A,A -> X,X mismatches
-        
-        // Test where too many mismatches should cause failure
-        assert_eq!(find_pattern_with_mismatches(haystack, b"XXXX", 3), Some(0)); // 4 positions, 3 mismatches OK
-        assert_eq!(find_pattern_with_mismatches(haystack, b"XXXX", 2), None);    // 4 positions, only 2 mismatches allowed - should fail
-        
-        // Edge cases
-        assert_eq!(find_pattern_with_mismatches(haystack, b"", 0), None);
-        assert_eq!(find_pattern_with_mismatches(&[], b"ACGT", 0), None);
-    }
+
 
     #[test]
     fn test_phase_block_pattern_detection() {
@@ -2063,16 +2023,6 @@ mod tests {
             "Pattern '{}' should be found at position 11 in the sequence", 
             String::from_utf8_lossy(fixed_pattern));
         
-        // Test 2: Find the pattern with mismatches (0 allowed)
-        let pattern_pos_zero_mismatch = find_pattern_with_mismatches(sequence, fixed_pattern, 0);
-        assert_eq!(pattern_pos_zero_mismatch, Some(11), 
-            "Pattern with 0 mismatches should match exact pattern finding");
-        
-        // Test 3: Find the pattern with mismatches (1 allowed)
-        let pattern_pos_one_mismatch = find_pattern_with_mismatches(sequence, fixed_pattern, 1);
-        assert_eq!(pattern_pos_one_mismatch, Some(11), 
-            "Pattern with 1 mismatch allowed should also find position 11");
-        
         // Test 4: Introduce one mismatch in the pattern and verify detection
         let mut modified_pattern = fixed_pattern.to_vec();
         modified_pattern[2] = b'A';  // Change 'T' to 'A' in the pattern
@@ -2083,13 +2033,6 @@ mod tests {
         assert_eq!(modified_pattern_pos, None,
             "Modified pattern '{}' should not be found with exact matching", 
             modified_pattern_str);
-        
-        // But should be found with 1 mismatch allowed
-        let modified_pattern_pos_one_mismatch = find_pattern_with_mismatches(sequence, &modified_pattern, 1);
-        assert_eq!(modified_pattern_pos_one_mismatch, Some(11),
-            "Modified pattern '{}' should be found at position 11 with 1 mismatch", 
-            modified_pattern_str);
-        
         // Test 5: Create a scenario for phase block adjustment
         // Simulate a LibSpec with the necessary regions
         let lib_spec = LibSpec::new(vec![
@@ -2185,30 +2128,29 @@ mod tests {
         // Test exact matching (0 mismatches)
         let haystack = b"ACGTACGTACGT";
         let needle = b"ACGT";
-        assert_eq!(find_pattern_with_mismatches(haystack, needle, 0), Some(0));
-        assert_eq!(find_pattern_with_mismatches(haystack, b"CGTA", 0), Some(1));
+
+        // Now test the new find_best_pattern_match function
+        // Test exact matches
+        let (pos, mismatches) = find_best_pattern_match(haystack, needle);
+        assert_eq!(pos, Some(0));
+        assert_eq!(mismatches, 0);
         
-        // Test with very short patterns
-        assert_eq!(find_pattern_with_mismatches(b"ACGTACGT", b"A", 0), Some(0)); // Single character
-        assert_eq!(find_pattern_with_mismatches(b"ACGTACGT", b"X", 0), None);    // No match for single character
+        // Test with mismatches
+        let (pos, mismatches) = find_best_pattern_match(haystack, b"ACXT");
+        assert_eq!(pos, Some(0));
+        assert_eq!(mismatches, 1);
         
-        // Test with max_mismatches = 1
-        assert_eq!(find_pattern_with_mismatches(haystack, b"ACCT", 1), Some(0)); // G->C mismatch
+        // Test with multiple possible positions - should return the one with minimal mismatches
+        let multi_pos_haystack = b"ACGTXXXTACGT";
+        let (pos, mismatches) = find_best_pattern_match(multi_pos_haystack, b"ACGT");
+        assert_eq!(pos, Some(0)); // Should match at position 0 with 0 mismatches
+        assert_eq!(mismatches, 0);
         
-        // Test with max_mismatches = 2
-        assert_eq!(find_pattern_with_mismatches(haystack, b"ACXT", 2), Some(0)); // G->X mismatch
-        assert_eq!(find_pattern_with_mismatches(haystack, b"AXXT", 2), Some(0)); // CG->XX mismatches
-        
-        // Test where the mismatches exceed max_mismatches
-        assert_eq!(find_pattern_with_mismatches(haystack, b"XXXX", 2), None);    // 4 positions, all mismatch but max is 2
-        
-        // Find best match (minimal mismatches) anywhere in the sequence
-        let complex_haystack = b"AAAAACGTAAAAAA";
-        let complex_needle = b"ACGT";
-        assert_eq!(find_pattern_with_mismatches(complex_haystack, complex_needle, 4), Some(4));
-        
-        // Test with a needle that's one mismatch but in different positions
-        assert_eq!(find_pattern_with_mismatches(b"ACGTACGTA", b"ACXT", 1), Some(0));  // Position 0 with one mismatch
-        assert_eq!(find_pattern_with_mismatches(b"ACGTTCGTA", b"TCGT", 1), Some(3));  // Position 3 with one mismatch
+        // Test with a pattern that has mismatches everywhere, but lowest at some position
+        let varied_haystack = b"AXGTCCGTAAGTACCT";
+        let varied_needle = b"ACGT";
+        let (pos, mismatches) = find_best_pattern_match(varied_haystack, varied_needle);
+        assert_eq!(pos, Some(4)); // Position 4 has only 1 mismatch (C vs A)
+        assert_eq!(mismatches, 1);
     }
 }
