@@ -846,7 +846,6 @@ mod tests {
     const YAML_FILE: &str = "../seqspec_templates/10x_rna_atac.yaml";
     const YAML_FILE_2: &str = "../seqspec_templates/smartseq2.yaml";
     const YAML_FILE_3: &str = "../seqspec_templates/test_deep_nested.yaml";
-    const YAML_FILE_3: &str = "../seqspec_templates/test_deep_nested.yaml";
     #[test]
     fn test_parse() {
         let yaml_str = fs::read_to_string(YAML_FILE).expect("Failed to read file");
@@ -1178,7 +1177,7 @@ regions: []
     }
 
     #[test]
-    fn test_assay_nesting_validation() {
+    fn test_assay_nesting_validation_2() {
         // Helper function to print region structure
         fn print_region_structure(region: &Region, indent: usize) {
             let indent_str = " ".repeat(indent);
@@ -1237,7 +1236,7 @@ regions: []
         );
     }
     #[test]
-    fn test_case_insensitive_yaml() {
+    fn test_case_insensitive_yaml_2() {
         // Test YAML with different cases
         let yaml = r#"
 region_id: "test_region"
