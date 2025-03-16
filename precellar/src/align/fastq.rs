@@ -21,6 +21,7 @@ use std::sync::{Arc, RwLock};
 use std::path::PathBuf;
 use serde_json;
 
+
 pub struct FastqProcessor {
     assay: Assay,
     current_modality: Option<Modality>,
@@ -35,6 +36,7 @@ pub struct FastqProcessor {
     barcode_filtering_quantile: f64, // Quantile for barcode filtering
     barcode_bootstrap_samples: usize, // Number of bootstrap samples for filtering
     metrics_path: Option<std::path::PathBuf>, // Path to write QC metrics
+
 }
 
 impl FastqProcessor {
@@ -52,6 +54,7 @@ impl FastqProcessor {
             barcode_filtering_quantile: 0.99,
             barcode_bootstrap_samples: 100,
             metrics_path: None,
+
         }
     }
 
@@ -78,6 +81,7 @@ impl FastqProcessor {
         self.barcode_filtering_quantile = quantile;
         self.barcode_bootstrap_samples = bootstrap_samples;
         self.metrics_path = metrics_path.map(|p| p.to_path_buf());
+
         self
     }
 
@@ -296,6 +300,7 @@ impl FastqProcessor {
         let mut whitelists = self.get_whitelists();
         let mut total_filtered_bcs = 0;
 
+
         debug!("Starting barcode counting process. Metrics path is: {:?}", self.metrics_path);
         debug!("Number of whitelists found: {}", whitelists.len());
         
@@ -306,6 +311,7 @@ impl FastqProcessor {
                   !whitelist.get_barcode_counts().is_empty(),
                   whitelist.total_count);
         }
+
         
         // Create a list of IDs that need counting
         let whitelist_ids: Vec<RegionId> = whitelists.keys().cloned().collect();
@@ -387,6 +393,7 @@ impl FastqProcessor {
             if !has_predefined_whitelist  {
                 info!("No predefined whitelist for '{}', applying order-of-magnitude filtering", id);
                 
+
                 // Create metrics file path if metrics_path is provided
                 let metrics_file_path = self.metrics_path.as_ref().map(|path| {
                     let file_name = format!("barcode_metrics_{}.json", id);
@@ -397,6 +404,7 @@ impl FastqProcessor {
                 
                 debug!("Metrics path for barcode region {}: {:?}", id, metrics_file_path);
                 
+
                 let results = filter_cellular_barcodes_ordmag_advanced(
                     whitelist,
                     self.expected_cells,
@@ -405,6 +413,7 @@ impl FastqProcessor {
                     Some(self.barcode_filtering_quantile),
                     Some(self.barcode_bootstrap_samples),
                     metrics_file_path.as_deref(),
+
                 );
                 
                 info!(
@@ -1418,8 +1427,10 @@ mod tests {
             None,
             None,
             Some(0.99),
+
             Some(10),
             None
+
         );
         
         // Verify filtering worked

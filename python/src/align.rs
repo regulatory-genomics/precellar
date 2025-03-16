@@ -193,6 +193,7 @@ pub fn align(
         processor = processor.with_expected_cells(cells as usize);
     }
     
+
     // Configure barcode filtering parameters and metrics path
     processor = processor
         .with_barcode_filtering_params(
