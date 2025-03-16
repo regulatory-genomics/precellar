@@ -1,7 +1,7 @@
 use super::aligners::{Aligner, MultiMap, MultiMapR};
 
 use crate::adapter::trim_poly_nucleotide;
-use crate::barcode::{BarcodeCorrector, OligoFrequncy, Whitelist, filter_cellular_barcodes_ordmag_advanced, BarcodeFilterResults};
+use crate::barcode::{BarcodeCorrector, OligoFrequncy, Whitelist, filter_cellular_barcodes_ordmag_advanced};
 use crate::qc::{AlignQC, Metrics};
 use crate::utils::rev_compl_fastq_record;
 use anyhow::{bail, Result};
@@ -202,9 +202,6 @@ impl FastqProcessor {
                 _ => {
                     debug!("No alignment found for read");
                 }
-                _ => {
-                    debug!("No alignment found for read");
-                }
             });
             
             progress_bar.update(results.len()).unwrap();
@@ -352,14 +349,13 @@ impl FastqProcessor {
                         // Apply phase block adjustments to all segments
                         let adjusted_segments = apply_phase_block_adjustments(
                             &region_index.segments,
-                            &phase_block_adjustments,
-                            "Count Barcodes" // Use a descriptive prefix for debug logs
+                            &phase_block_adjustments
                         );
                         
                         //debug!("region_index.segments after adjustments: {:?}", adjusted_segments);
                         
                         // Process each barcode region directly
-                        for (i, info) in adjusted_segments.iter().enumerate() {
+                        for (_i, info) in adjusted_segments.iter().enumerate() {
                             if info.region_type.is_barcode() && whitelist_ids.contains(&info.region_id) {
                                 let start_pos = info.range.start as usize;
                                 let end_pos = info.range.end as usize;
@@ -867,8 +863,7 @@ impl FastqAnnotator {
         // Apply adjustments to original segments
         let adjusted_original_segments = apply_phase_block_adjustments(
             &self.original_segments, 
-            &phase_block_adjustments,
-            "Annotate" // Use a descriptive prefix for debug logs
+            &phase_block_adjustments
         );
         
         //debug!("Original segments after all adjustments: {:?}", adjusted_original_segments);
@@ -885,7 +880,7 @@ impl FastqAnnotator {
         //debug!("Subregions after adjustments: {:?}", adjusted_subregions);
         
         // Process all regions using the adjusted subregions
-        for (i, info) in adjusted_subregions.iter().enumerate() {
+        for (_i, info) in adjusted_subregions.iter().enumerate() {
             let start_pos = info.range.start as usize;
             let end_pos = info.range.end as usize;
             
@@ -960,8 +955,7 @@ impl FastqAnnotator {
 /// The adjusted vector of segments
 fn apply_phase_block_adjustments(
     segments: &[SegmentInfoElem],
-    phase_block_adjustments: &HashMap<usize, usize>,
-    prefix: &str // Add prefix parameter for debug statements
+    phase_block_adjustments: &HashMap<usize, usize>
 ) -> Vec<SegmentInfoElem> {
     let mut adjusted_segments = segments.to_vec();
     
@@ -1077,7 +1071,6 @@ fn find_best_pattern_match(haystack: &[u8], needle: &[u8]) -> (Option<usize>, us
     
     // Ultra-optimized special case for 1-character patterns
     if m == 1 {
-        let target = needle[0];
         // For single character patterns, we either have an exact match or nothing
         // We already checked for exact matches above
         return (None, 1);
@@ -1544,6 +1537,18 @@ mod tests {
                     range: phase_block_seq.len() as u32..(phase_block_seq.len() + fixed_pattern.len()) as u32,
                 }
             ],
+            original_segments: vec![
+                SegmentInfoElem {
+                    region_id: "phase_block".to_string(),
+                    region_type: SegmentType::R(RegionType::PhaseBlock),
+                    range: 0..phase_block_seq.len() as u32,
+                },
+                SegmentInfoElem {
+                    region_id: "fixed_region".to_string(),
+                    region_type: SegmentType::R(RegionType::Named),
+                    range: phase_block_seq.len() as u32..(phase_block_seq.len() + fixed_pattern.len()) as u32,
+                }
+            ],
             min_len: full_seq.len(),
             max_len: full_seq.len(),
             library_spec: Arc::new(RwLock::new(lib_spec)),
@@ -1686,6 +1691,18 @@ mod tests {
                     range: phase_block_data.len() as u32..(phase_block_data.len() + fixed_pattern.len()) as u32,
                 }
             ],
+            original_segments: vec![
+                SegmentInfoElem {
+                    region_id: "phase_block_region".to_string(),
+                    region_type: SegmentType::R(RegionType::PhaseBlock),
+                    range: 0..phase_block_data.len() as u32,  // Initial range is the full phase block
+                },
+                SegmentInfoElem {
+                    region_id: "fixed_region".to_string(),
+                    region_type: SegmentType::R(RegionType::Named),
+                    range: phase_block_data.len() as u32..(phase_block_data.len() + fixed_pattern.len()) as u32,
+                }
+            ],
             min_len: full_seq.len(),
             max_len: full_seq.len(),
             library_spec: Arc::new(RwLock::new(lib_spec)),
@@ -1719,6 +1736,18 @@ mod tests {
             id: "test_read".to_string(),
             is_reverse: false,
             subregions: vec![
+                SegmentInfoElem {
+                    region_id: "phase_block_region".to_string(),
+                    region_type: SegmentType::R(RegionType::Barcode), // Treat phase block as barcode
+                    range: 0..phase_block_data.len() as u32,
+                },
+                SegmentInfoElem {
+                    region_id: "fixed_region".to_string(),
+                    region_type: SegmentType::R(RegionType::Named),
+                    range: phase_block_data.len() as u32..(phase_block_data.len() + fixed_pattern.len()) as u32,
+                }
+            ],
+            original_segments: vec![
                 SegmentInfoElem {
                     region_id: "phase_block_region".to_string(),
                     region_type: SegmentType::R(RegionType::Barcode), // Treat phase block as barcode
@@ -1907,6 +1936,28 @@ mod tests {
                     range: fixed_pattern_end as u32..barcode2_end as u32,
                 }
             ],
+            original_segments: vec![
+                SegmentInfoElem {
+                    region_id: "barcode1_region".to_string(),
+                    region_type: SegmentType::R(RegionType::Barcode),
+                    range: 0..barcode1_end as u32,
+                },
+                SegmentInfoElem {
+                    region_id: "phase_block_region".to_string(),
+                    region_type: SegmentType::R(RegionType::PhaseBlock),
+                    range: barcode1_end as u32..phase_block_end as u32,
+                },
+                SegmentInfoElem {
+                    region_id: "fixed_region".to_string(),
+                    region_type: SegmentType::R(RegionType::Named),
+                    range: phase_block_end as u32..fixed_pattern_end as u32,
+                },
+                SegmentInfoElem {
+                    region_id: "barcode2_region".to_string(),
+                    region_type: SegmentType::R(RegionType::Barcode),
+                    range: fixed_pattern_end as u32..barcode2_end as u32,
+                }
+            ],
             min_len: full_seq.len(),
             max_len: full_seq.len(),
             library_spec: Arc::new(RwLock::new(lib_spec)),
@@ -2069,6 +2120,23 @@ mod tests {
             id: "test_read".to_string(),
             is_reverse: false,
             subregions: vec![
+                SegmentInfoElem {
+                    region_id: "barcode_region".to_string(),
+                    region_type: SegmentType::R(RegionType::Barcode),
+                    range: 0..barcode_end as u32,
+                },
+                SegmentInfoElem {
+                    region_id: "phase_block_region".to_string(),
+                    region_type: SegmentType::R(RegionType::PhaseBlock),
+                    range: barcode_end as u32..phase_block_end as u32,
+                },
+                SegmentInfoElem {
+                    region_id: "fixed_region".to_string(),
+                    region_type: SegmentType::R(RegionType::Named),
+                    range: phase_block_end as u32..fixed_pattern_end as u32,
+                }
+            ],
+            original_segments: vec![
                 SegmentInfoElem {
                     region_id: "barcode_region".to_string(),
                     region_type: SegmentType::R(RegionType::Barcode),
