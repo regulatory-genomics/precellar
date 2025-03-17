@@ -1,0 +1,235 @@
+!Assay
+seqspec_version: 0.3.0
+assay_id: sci-RNA-seq3
+name: sci-RNA-seq3
+doi: https://doi.org/10.1126/science.aax7364
+date: 19 August 2019
+description: Improved single-cell combinatorial indexing RNA-seq with hairpin ligation
+modalities:
+- rna
+lib_struct: Not-Specified
+library_protocol: sci-RNA-seq3
+library_kit: Custom
+sequence_protocol: Illumina
+sequence_kit: Custom
+sequence_spec:
+- !Read
+  read_id: R1
+  name: Read 1
+  modality: rna
+  primer_id: i5_primer
+  min_len: 36
+  max_len: 36
+  strand: pos
+- !Read
+  read_id: R2
+  name: Read 2
+  modality: rna
+  primer_id: me
+  min_len: 50
+  max_len: 150
+  strand: neg
+library_spec:
+- !Region
+  region_id: rna
+  region_type: rna
+  name: rna
+  sequence_type: joined
+  sequence: AATGATACGGCGACCACCGAGATCTACACNNNNNNNNNNACACTCTTTCCCTACACGACGCTCTTCCGATCTNNNNNNNNNNCAGAGCNNNNNNNNNNNNNNNNNN(dT)VXXX...XXXXCTGTCTCTTATACACATCTCCGAGCCCACGAGACNNNNNNNNNNATCTCGTATGCCGTCTTCTGCTTG
+  min_len: 190
+  max_len: 500
+  onlist: null
+  regions:
+  - !Region
+    region_id: illumina_p5
+    region_type: illumina_p5
+    name: Illumina P5
+    sequence_type: fixed
+    sequence: AATGATACGGCGACCACCGAGATCTACAC
+    min_len: 29
+    max_len: 29
+    onlist: null
+    regions: null
+    parent_id: rna
+  - !Region
+    region_id: i5_index
+    region_type: index5
+    name: i5 Index
+    sequence_type: onlist
+    sequence: NNNNNNNNNN
+    min_len: 10
+    max_len: 10
+    onlist: null
+    regions: null
+    parent_id: rna
+  - !Region
+    region_id: i5_primer
+    region_type: truseq_read1
+    name: Truseq Read 1
+    sequence_type: fixed
+    sequence: ACACTCTTTCCCTACACGACGCTCTTCCGATCT
+    min_len: 33
+    max_len: 33
+    onlist: null
+    regions: null
+    parent_id: rna
+  - !Region
+    region_id: hairpin_barcode
+    region_type: barcode
+    name: Hairpin Barcode
+    sequence_type: onlist
+    sequence: NNNNNNNNNN
+    min_len: 9
+    max_len: 9
+    onlist: !Onlist
+      file_id: sciRNAseq3_9bp_barcodes.txt
+      filename: sciRNAseq3_9bp_barcodes.txt
+      filetype: txt
+      filesize: 0
+      url: ../../data/barcode/sci-RNA-seq3_9bp_barcodes.txt
+      urltype: local
+      md5: 0
+      location: local
+    regions: null
+    parent_id: rna
+  - !Region
+    region_id: phase_block
+    region_type: phase_block
+    name: Pseuodo-phase block
+    sequence_type: onlist
+    sequence: NNNNNNNNNN
+    min_len: 0
+    max_len: 1
+    onlist: null
+    regions: null
+    parent_id: rna
+  - !Region
+    region_id: linker
+    region_type: linker
+    name: Linker CAGAGC
+    sequence_type: fixed
+    sequence: CAGAGC
+    min_len: 6
+    max_len: 6
+    onlist: null
+    regions: null
+    parent_id: rna
+  - !Region
+    region_id: umi
+    region_type: umi
+    name: UMI
+    sequence_type: random
+    sequence: NNNNNNNN
+    min_len: 8
+    max_len: 8
+    onlist: null
+    regions: null
+    parent_id: rna
+  - !Region
+    region_id: rt_barcode
+    region_type: barcode
+    name: RT Barcode
+    sequence_type: onlist
+    sequence: NNNNNNNNNN
+    min_len: 10
+    max_len: 10
+    onlist: !Onlist
+      file_id: sciRNAseq3_RT_384_bc.txt
+      filename: sciRNAseq3_RT_384_bc.txt
+      filetype: txt
+      filesize: 0
+      url: ../../data/barcode/sci-RNA-seq3_RT_384_bc.txt
+      urltype: local
+      md5: 0
+      location: local
+    regions: null
+    parent_id: rna
+  - !Region
+    region_id: poly_t
+    region_type: poly_t
+    name: Poly T
+    sequence_type: fixed
+    sequence: TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTVN
+    min_len: 30
+    max_len: 32
+    onlist: null
+    regions: null
+    parent_id: rna
+  - !Region
+    region_id: cdna
+    region_type: cdna
+    name: cDNA
+    sequence_type: random
+    sequence: XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
+    min_len: 1
+    max_len: 300
+    onlist: null
+    regions: null
+    parent_id: rna
+  - !Region
+    region_id: me
+    region_type: custom_primer
+    name: Mosaic End
+    sequence_type: fixed
+    sequence: CTGTCTCTTATACACATCT
+    min_len: 19
+    max_len: 19
+    onlist: null
+    regions: null
+    parent_id: rna
+  - !Region
+    region_id: s7
+    region_type: s7
+    name: s7
+    sequence_type: fixed
+    sequence: CCGAGCCCACGAGAC
+    min_len: 15
+    max_len: 15
+    onlist: null
+    regions: null
+    parent_id: rna
+  - !Region
+    region_id: i7_index
+    region_type: index7
+    name: i7 Index
+    sequence_type: onlist
+    sequence: NNNNNNNNNN
+    min_len: 10
+    max_len: 10
+    onlist: null
+    regions: null
+    parent_id: rna
+  - !Region
+    region_id: i7_primer
+    region_type: custom_primer
+    name: i7 Sequencing Primer
+    sequence_type: fixed
+    sequence: CTGTCTCTTATACACATCTCCGAGCCCACGAGAC
+    min_len: 34
+    max_len: 34
+    onlist: null
+    regions: null
+    parent_id: rna
+  - !Region
+    region_id: read2_primer
+    region_type: custom_primer
+    name: Read 2 Sequencing Primer
+    sequence_type: fixed
+    sequence: GTCTCGTGGGCTCGGAGATGTGTATAAGAGACAG
+    min_len: 34
+    max_len: 34
+    onlist: null
+    regions: null
+    parent_id: rna
+  - !Region
+    region_id: illumina_p7
+    region_type: illumina_p7
+    name: Illumina P7
+    sequence_type: fixed
+    sequence: ATCTCGTATGCCGTCTTCTGCTTG
+    min_len: 24
+    max_len: 24
+    onlist: null
+    regions: null
+    parent_id: rna
+  parent_id: null
