@@ -160,6 +160,18 @@ pub fn align(
     let start_time = Instant::now();
     debug!("Starting alignment process");
     
+    // Ensure qc_metrics_path directory exists if provided
+    if let Some(path) = &qc_metrics_path {
+        debug!("Checking if QC metrics directory exists: {:?}", path);
+        if !path.exists() {
+            debug!("Creating QC metrics directory: {:?}", path);
+            std::fs::create_dir_all(path)?;
+            info!("Created QC metrics directory: {:?}", path);
+        } else {
+            debug!("QC metrics directory already exists: {:?}", path);
+        }
+    }
+    
     let assay = match assay.extract::<PathBuf>() {
         Ok(p) => {
             debug!("Loading assay from path: {:?}", p);
@@ -239,7 +251,6 @@ pub fn align(
             // Write QC metrics to JSON file if metrics_path is provided
             if let Some(metrics_path) = &qc_metrics_path {
                 write_qc_metrics_to_json(metrics_path, &qc_map, "all_qc_metrics.json")?;
-                write_qc_metrics_to_json(metrics_path, &qc_map, "consolidated_qc_metrics.json")?;
             }
             
             Ok(qc_map)
@@ -279,7 +290,6 @@ pub fn align(
             // Write QC metrics to JSON file if metrics_path is provided
             if let Some(metrics_path) = &qc_metrics_path {
                 write_qc_metrics_to_json(metrics_path, &qc_map, "all_qc_metrics.json")?;
-                write_qc_metrics_to_json(metrics_path, &qc_map, "consolidated_qc_metrics.json")?;
             }
             
             Ok(qc_map)
@@ -299,7 +309,6 @@ pub fn align(
             // Write QC metrics to JSON file if metrics_path is provided
             if let Some(metrics_path) = &qc_metrics_path {
                 write_qc_metrics_to_json(metrics_path, &qc_map, "all_qc_metrics.json")?;
-                write_qc_metrics_to_json(metrics_path, &qc_map, "consolidated_qc_metrics.json")?;
             }
             
             Ok(qc_map)
@@ -376,17 +385,23 @@ fn write_qc_metrics_to_json(
     // Create a JSON-compatible structure
     let json_metrics = serde_json::to_value(qc)?;
     
-    // Ensure the directory exists
-    if let Some(parent) = metrics_file_path.parent() {
-        if !parent.exists() {
-            std::fs::create_dir_all(parent)?;
+    // Write the metrics to file
+    let file = match std::fs::File::create(&metrics_file_path) {
+        Ok(file) => file,
+        Err(e) => {
+            warn!("Failed to create metrics file: {:?}, error: {}", metrics_file_path, e);
+            return Err(anyhow::anyhow!("Failed to create metrics file: {}", e));
+        }
+    };
+    
+    match serde_json::to_writer_pretty(file, &json_metrics) {
+        Ok(_) => {
+            info!("Successfully wrote QC metrics to {:?}", metrics_file_path);
+            Ok(())
+        },
+        Err(e) => {
+            warn!("Failed to write metrics to file: {:?}, error: {}", metrics_file_path, e);
+            Err(anyhow::anyhow!("Failed to write metrics to file: {}", e))
         }
     }
-    
-    // Write the metrics to file
-    let file = std::fs::File::create(&metrics_file_path)?;
-    serde_json::to_writer_pretty(file, &json_metrics)?;
-    info!("Successfully wrote QC metrics to {:?}", metrics_file_path);
-    
-    Ok(())
 }

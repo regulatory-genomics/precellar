@@ -12,12 +12,17 @@ use polars::df;
 use rayon::iter::{IntoParallelIterator, ParallelIterator};
 use serde::{Deserialize, Serialize};
 use std::{collections::HashSet, path::PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use log::warn;
 
 use crate::{align::MultiMapR, qc::GeneQuantQC, transcript::Gene};
 
 use super::{
     annotate::AnnotationRegion, de_dups::count_unique_umi, AlignmentAnnotator, AnnotatedAlignment,
 };
+
+// Static flag to track if we've shown the missing UMI warning
+static UMI_WARNING_SHOWN: AtomicBool = AtomicBool::new(false);
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct GeneAlignment {
@@ -155,12 +160,28 @@ impl Quantifier {
             let rec1 = rec1.unwrap();
             let rec2 = rec2.unwrap();
             barcode = rec1.barcode().unwrap()?;
-            umi = rec1.umi().unwrap();
+            
+            // Get UMI or generate a warning once
+            let umi_result = rec1.umi().unwrap();
+            if umi_result.is_none() && !UMI_WARNING_SHOWN.load(Ordering::Relaxed) {
+                warn!("Encountered alignment(s) without UMI information. Using generated UMIs.");
+                UMI_WARNING_SHOWN.store(true, Ordering::Relaxed);
+            }
+            umi = umi_result;
+            
             self.annotator.annotate_alignments_pe(header, rec1, rec2)
         } else {
             let rec = rec1.or(rec2).unwrap();
             barcode = rec.barcode().unwrap()?;
-            umi = rec.umi().unwrap();
+            
+            // Get UMI or generate a warning once
+            let umi_result = rec.umi().unwrap();
+            if umi_result.is_none() && !UMI_WARNING_SHOWN.load(Ordering::Relaxed) {
+                warn!("Encountered alignment(s) without UMI information. Using generated UMIs.");
+                UMI_WARNING_SHOWN.store(true, Ordering::Relaxed);
+            }
+            umi = umi_result;
+            
             self.annotator.annotate_alignments_se(header, rec)
         }?;
 
