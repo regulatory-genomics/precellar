@@ -260,6 +260,22 @@ pub enum RegionType {
     Modality(Modality),
 }
 
+impl core::fmt::Display for RegionType {
+    fn fmt(&self, f: &mut core::fmt::Formatter) -> core::fmt::Result {
+        if self.is_barcode() {
+            write!(f, "B")
+        } else if self.is_umi() {
+            write!(f, "U")
+        } else if self.is_sequencing_primer() {
+            write!(f, "P")
+        } else if self.is_target() {
+            write!(f, "T")
+        } else {
+            write!(f, "O")
+        }
+    }
+}
+
 impl RegionType {
     pub fn is_modality(&self) -> bool {
         matches!(self, RegionType::Modality(_))
@@ -358,6 +374,16 @@ pub enum SequenceType {
     Random, // the sequence is not known a-priori
     Onlist, // the sequence is derived from an onlist
     Joined, // the sequence is created from nested regions and the regions property must contain Regions
+}
+
+impl SequenceType {
+    pub fn is_fixed(&self) -> bool {
+        matches!(self, SequenceType::Fixed)
+    }
+
+    pub fn is_joined(&self) -> bool {
+        matches!(self, SequenceType::Joined)
+    }
 }
 
 #[derive(Deserialize, Serialize, Debug, Clone, PartialEq)]

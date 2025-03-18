@@ -8,13 +8,13 @@ use noodles::sam::alignment::Record;
 pub use star_aligner::StarAligner;
 
 use bwa_mem2::{AlignerOpts, FMIndex};
+use log;
 use noodles::sam;
 use noodles::sam::alignment::record::data::field::tag::Tag;
 use noodles::sam::alignment::record_buf::{data::field::value::Value, RecordBuf};
 use rayon::iter::ParallelIterator;
 use rayon::slice::ParallelSlice;
 use star_aligner::StarOpts;
-use log;
 
 pub type MultiMapR = MultiMap<RecordBuf>;
 
@@ -129,10 +129,7 @@ pub trait Aligner {
 
 impl Aligner for BurrowsWheelerAligner {
     fn from_path<P: AsRef<std::path::Path>>(path: P) -> Self {
-        BurrowsWheelerAligner::new(
-            FMIndex::read(path).unwrap(),
-            AlignerOpts::default(),
-        )
+        BurrowsWheelerAligner::new(FMIndex::read(path).unwrap(), AlignerOpts::default())
     }
 
     fn header(&self) -> sam::Header {
@@ -300,7 +297,7 @@ fn add_cell_barcode(
         Tag::CELL_BARCODE_QUALITY_SCORES,
         Value::String(ori_qual.into()),
     );
-    
+
     if let Some(barcode) = correct_barcode {
         data.insert(Tag::CELL_BARCODE_ID, Value::String(barcode.into()));
     }

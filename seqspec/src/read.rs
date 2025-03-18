@@ -1,3 +1,4 @@
+mod segment;
 use crate::region::{Region, SequenceType};
 use crate::{Modality, RegionType};
 
@@ -170,7 +171,7 @@ impl Read {
     }
 
     pub(crate) fn get_segments<'a>(&'a self, region: &'a Region) -> Option<SegmentInfo> {
-        if region.sequence_type != SequenceType::Joined {
+        if !region.sequence_type.is_joined() {
             return None;
         }
 

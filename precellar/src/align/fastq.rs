@@ -13,7 +13,7 @@ use log::{debug, info, warn};
 use noodles::{bam, fastq};
 use rayon::iter::ParallelIterator;
 use rayon::slice::ParallelSlice;
-use seqspec::{Assay, FastqReader, Modality, Read, RegionId, SegmentInfo, SegmentInfoElem, RegionType, SequenceType, Region, LibSpec};
+use seqspec::{Assay, FastqReader, Modality, Read, RegionId, SegmentInfo, SegmentInfoElem, RegionType, SequenceType, LibSpec};
 use seqspec::read::SegmentType;
 use smallvec::SmallVec;
 use std::collections::{HashMap, HashSet};
@@ -21,13 +21,14 @@ use std::sync::{Arc, RwLock};
 use std::path::PathBuf;
 use serde_json;
 
-
+/// FastqProcessor manages the preprocessing of FASTQ files including barcode correction,
+/// alignment, and QC metrics.
 pub struct FastqProcessor {
-    assay: Assay,
-    current_modality: Option<Modality>,
-    mito_dna: HashSet<String>,
-    metrics: HashMap<Modality, Metrics>,
-    align_qc: HashMap<Modality, AlignQC>,
+    assay: Assay, // Specification of sequencing assay.
+    current_modality: Option<Modality>, // Current sequencing modality being processed (e.g., RNA, ATAC).
+    mito_dna: HashSet<String>, // Set of mitochondrial DNA sequence identifiers for special handling.
+    metrics: HashMap<Modality, Metrics>, // Quality control metrics for each modality.
+    align_qc: HashMap<Modality, AlignQC>, // Alignment QC data for each modality.
     barcode_correct_prob: f64, // if the posterior probability of a correction
     // exceeds this threshold, the barcode will be corrected.
     // cellrange uses 0.975 for ATAC and 0.9 for multiome.
@@ -36,12 +37,11 @@ pub struct FastqProcessor {
     barcode_filtering_quantile: f64, // Quantile for barcode filtering
     barcode_bootstrap_samples: usize, // Number of bootstrap samples for filtering
     metrics_path: Option<std::path::PathBuf>, // Path to write QC metrics
-
 }
 
 impl FastqProcessor {
+    /// Creates a new FastqProcessor with default settings.
     pub fn new(assay: Assay) -> Self {
-        debug!("Creating new FastqProcessor");
         Self {
             assay,
             current_modality: None,
@@ -54,18 +54,15 @@ impl FastqProcessor {
             barcode_filtering_quantile: 0.99,
             barcode_bootstrap_samples: 100,
             metrics_path: None,
-
         }
     }
 
     pub fn with_barcode_correct_prob(mut self, prob: f64) -> Self {
-        debug!("Setting barcode correction probability to {}", prob);
         self.barcode_correct_prob = prob;
         self
     }
 
     pub fn with_expected_cells(mut self, cells: usize) -> Self {
-        debug!("Setting expected number of cells to {}", cells);
         self.expected_cells = Some(cells);
         self
     }
@@ -76,12 +73,9 @@ impl FastqProcessor {
         bootstrap_samples: usize,
         metrics_path: Option<&std::path::Path>
     ) -> Self {
-        debug!("Setting barcode filtering parameters: quantile={}, bootstrap_samples={}, metrics_path={:?}", 
-               quantile, bootstrap_samples, metrics_path);
         self.barcode_filtering_quantile = quantile;
         self.barcode_bootstrap_samples = bootstrap_samples;
         self.metrics_path = metrics_path.map(|p| p.to_path_buf());
-
         self
     }
 
@@ -95,19 +89,16 @@ impl FastqProcessor {
     }
 
     pub fn with_modality(mut self, modality: Modality) -> Self {
-        debug!("Setting modality to {:?}", modality);
         self.current_modality = Some(modality);
         self
     }
 
     pub fn get_report(&self) -> Metrics {
-        debug!("Generating metrics report for modality {:?}", self.modality());
         let mut metrics = self
             .metrics
             .get(&self.modality())
             .map_or(Metrics::default(), |x| x.clone());
         if let Some(align_qc) = self.align_qc.get(&self.modality()) {
-            debug!("Adding alignment QC metrics to report");
             align_qc.report(&mut metrics);
         }
         metrics
@@ -134,8 +125,6 @@ impl FastqProcessor {
     ) -> impl Iterator<Item = Vec<(Option<MultiMapR>, Option<MultiMapR>)>> + 'a {
         debug!("Starting gen_barcoded_alignments with chunk_size={}", chunk_size);
         let fq_reader = self.gen_barcoded_fastq(true).with_chunk_size(chunk_size);
-        
-        debug!("FastqReader created. Is paired-end: {}", fq_reader.is_paired_end());
         
         let total_reads = fq_reader.total_reads.unwrap_or(0);
         debug!("Total reads reported: {}", total_reads);
@@ -864,8 +853,6 @@ impl FastqAnnotator {
             &phase_block_adjustments
         );
         
-        //debug!("Original segments after all adjustments: {:?}", adjusted_original_segments);
-        
         // Now create filtered subregions maintaining positions from adjusted original segments
         let mut adjusted_subregions = Vec::with_capacity(self.subregions.len());
         
@@ -874,8 +861,6 @@ impl FastqAnnotator {
                 adjusted_subregions.push(seg.clone());
             }
         }
-        
-        //debug!("Subregions after adjustments: {:?}", adjusted_subregions);
         
         // Process all regions using the adjusted subregions
         for (_i, info) in adjusted_subregions.iter().enumerate() {
@@ -1349,6 +1334,7 @@ mod tests {
     use bwa_mem2::{AlignerOpts, BurrowsWheelerAligner, FMIndex};
     use env_logger;
     use std::sync::{Arc, RwLock};
+    use seqspec::Region;
 
     use super::*;
 
