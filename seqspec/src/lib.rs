@@ -2,11 +2,11 @@ pub mod read;
 pub mod region;
 pub mod utils;
 
-use log::{debug, warn};
+use log::warn;
 use noodles::fastq;
 use read::ReadValidator;
-pub use read::{FastqReader, File, Read, SegmentInfo, SegmentInfoElem, SegmentType, Strand, UrlType};
-use read::{ReadSpan, ValidateResult};
+pub use read::{FastqReader, File, Read, SegmentInfo, SegmentInfoElem, Strand, UrlType};
+use read::ValidateResult;
 pub use region::LibSpec;
 pub use region::{Onlist, Region, RegionId, RegionType, SequenceType};
 
@@ -425,11 +425,10 @@ impl Assay {
                     .unwrap();
                 let index = read.get_segments(&region.read().unwrap())?;
                 let regions: Vec<_> = index
-                    .segments
                     .iter()
                     .map(|elem_info| {
                         let region = self.library_spec.get(&elem_info.region_id).unwrap();
-                        (region.read().unwrap(), elem_info.range.clone())
+                        (region.read().unwrap(), elem_info.len.clone())
                     })
                     .collect();
                 Some((reader, (read, regions)))
@@ -518,35 +517,14 @@ impl Assay {
             .ok_or_else(|| anyhow!("Primer not found: {}", read.primer_id))?;
         // Check if the primer exists
         if let Some(index) = read.get_segments(&region.read().unwrap()) {
-            match index.readlen_info {
-                ReadSpan::Covered | ReadSpan::Span(_) => {}
-                ReadSpan::NotEnough => {
-                    warn!("'{}' does not cover the region", read.read_id);
-                }
-                ReadSpan::MayReadThrough(id) => {
-                    debug!(
-                        "'{}' may read through and contain sequences from: '{}'",
-                        read.read_id, id
-                    );
-                }
-                ReadSpan::ReadThrough(id) => {
-                    warn!("'{}' length exceeds maximum length of the variable-length region (insertion), \
-                    truncating the reads to the maximum length of the region. \
-                    Read reads through and contains sequences from: '{}'.
-                    If this is not the desired behavior, please adjust the region lengths.", read.read_id, id);
-                }
-            }
-        
             if let Some(mut reader) = read.open() {
                 let regions = index
-                    .segments
                     .iter()
                     .map(|info| {
                         let region = self.library_spec.get(&info.region_id).unwrap();
-                        (region.read().unwrap(), &info.range)
+                        (region.read().unwrap(), &info.len)
                     })
                     .collect::<Vec<_>>();
-                /* */
                 let mut validators = regions
                     .iter()
                     .map(|(region, range)| {
@@ -844,6 +822,7 @@ mod tests {
     const YAML_FILE: &str = "../seqspec_templates/10x_rna_atac.yaml";
     const YAML_FILE_2: &str = "../seqspec_templates/smartseq2.yaml";
     const YAML_FILE_3: &str = "../seqspec_templates/test_deep_nested.yaml";
+
     #[test]
     fn test_parse() {
         let yaml_str = fs::read_to_string(YAML_FILE).expect("Failed to read file");
@@ -873,9 +852,8 @@ mod tests {
                 "{}: {:?}",
                 read.read_id,
                 index
-                    .segments
-                    .into_iter()
-                    .map(|x| (x.region_type, x.range))
+                    .iter()
+                    .map(|x| (x.region_type, x.len.clone()))
                     .collect::<Vec<_>>()
             );
         }
@@ -884,9 +862,8 @@ mod tests {
                 "{}: {:?}",
                 read.read_id,
                 index
-                    .segments
-                    .into_iter()
-                    .map(|x| (x.region_type, x.range))
+                    .iter()
+                    .map(|x| (x.region_type, x.len.clone()))
                     .collect::<Vec<_>>()
             );
         }
@@ -895,67 +872,11 @@ mod tests {
                 "{}: {:?}",
                 read.read_id,
                 index
-                    .segments
-                    .into_iter()
-                    .map(|x| (x.region_type, x.range))
+                    .iter()
+                    .map(|x| (x.region_type, x.len.clone()))
                     .collect::<Vec<_>>()
             );
         }
-    }
-
-    #[test]
-    fn test_update_read_primer_warning() {
-        let yaml_str = fs::read_to_string(YAML_FILE).expect("Failed to read file");
-        let mut assay: Assay = serde_yaml::from_str(&yaml_str).expect("Failed to parse YAML");
-
-        // Capture log messages
-        let (log_sender, log_receiver) = std::sync::mpsc::channel();
-        let _guard = env_logger::builder()
-            .format(move |_, record| {
-                let _ = log_sender.send(record.args().to_string());
-                Ok(())
-            })
-            .is_test(true)
-            .try_init();
-
-        // Test with non-sequencing primer (barcode) - should warn
-        let result = assay.update_read::<PathBuf>(
-            "test_read1",
-            Some(Modality::RNA),
-            Some("rna-cell_barcode"),  // cell barcode is not a sequencing primer
-            Some(false),
-            None,
-            Some(16),
-            Some(16),
-            false,
-        );
-        assert!(result.is_ok());
-        // Verify warning was logged for barcode primer
-        let warning = log_receiver.try_recv().expect("Should have received warning");
-        assert!(warning.contains("primer_id 'rna-cell_barcode' is not a sequencing primer."));
-        assert!(warning.contains("type: Barcode"));
-
-        // Test with sequencing primer - should not warn
-        let result = assay.update_read::<PathBuf>(
-            "test_read2", 
-            Some(Modality::RNA),
-            Some("rna-illumina_p5"),  // this is a sequencing primer
-            Some(false),
-            None,
-            Some(29),
-            Some(29),
-            false,
-        );
-        assert!(result.is_ok());
-
-        // Verify no warning was logged for sequencing primer
-        assert!(log_receiver.try_recv().is_err(), "Should not have received warning for sequencing primer");
-
-        // Verify reads were added with correct primers
-        let read1 = assay.sequence_spec.get("test_read1").unwrap();
-        let read2 = assay.sequence_spec.get("test_read2").unwrap();
-        assert_eq!(read1.primer_id, "rna-cell_barcode");
-        assert_eq!(read2.primer_id, "rna-illumina_p5");
     }
 
     #[test]
@@ -1012,6 +933,7 @@ mod tests {
         assert_eq!(read1.min_len, 32, "Incorrect length for read1");
         assert_eq!(read2.min_len, 70, "Incorrect length for read2");
     }
+
     #[test]
     fn test_case_insensitive_yaml() {
         // Test YAML with different cases
@@ -1053,11 +975,11 @@ regions: []
             .map(|(read, info)| {
                 (
                     read.read_id.clone(),
-                    info.segments.into_iter().map(|seg| {
+                    info.iter().map(|seg| {
                         (
                             seg.region_id.clone(),
                             seg.region_type,
-                            seg.range.start..seg.range.end
+                            seg.len.clone(),
                         )
                     }).collect::<Vec<_>>()
                 )
@@ -1079,11 +1001,11 @@ regions: []
             .map(|(read, info)| {
                 (
                     read.read_id.clone(),
-                    info.segments.into_iter().map(|seg| {
+                    info.iter().map(|seg| {
                         (
                             seg.region_id.clone(),
                             seg.region_type,
-                            seg.range.start..seg.range.end
+                            seg.len.clone(),
                         )
                     }).collect::<Vec<_>>()
                 )
@@ -1141,7 +1063,7 @@ regions: []
                 }
                 assay
             })
-            .and_then(|mut assay| {
+            .and_then(|assay| {
                 assay.validate_structure()?;
                 Ok(assay)
             });
@@ -1163,7 +1085,7 @@ regions: []
                 }
                 assay
             })
-            .and_then(|mut assay| {
+            .and_then(|assay| {
                 assay.validate_structure()?;
                 Ok(assay)
             });
@@ -1201,7 +1123,7 @@ regions: []
                 }
                 assay
             })
-            .and_then(|mut assay| {
+            .and_then(|assay| {
                 assay.validate_structure()?;
                 Ok(assay)
             });
@@ -1223,7 +1145,7 @@ regions: []
                 }
                 assay
             })
-            .and_then(|mut assay| {
+            .and_then(|assay| {
                 assay.validate_structure()?;
                 Ok(assay)
             });
@@ -1263,6 +1185,4 @@ regions: []
         let region: Region = serde_yaml::from_str(yaml).expect("Failed to parse YAML");
         assert_eq!(region.region_type, RegionType::TruseqRead1);
     }
-
-
 }

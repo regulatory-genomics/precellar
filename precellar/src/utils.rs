@@ -54,19 +54,21 @@ pub fn strip_fastq(
 
 pub fn rev_compl_fastq_record(mut record: fastq::Record) -> fastq::Record {
     *record.quality_scores_mut() = record.quality_scores().iter().rev().copied().collect();
-    *record.sequence_mut() = record
-        .sequence()
-        .iter()
+    *record.sequence_mut() = rev_compl(record.sequence());
+    record
+}
+
+pub fn rev_compl(seq: &[u8]) -> Vec<u8> {
+    seq.iter()
         .rev()
         .map(|&x| match x {
-            b'A' => b'T',
-            b'T' => b'A',
-            b'C' => b'G',
-            b'G' => b'C',
+            b'A' | b'a' => b'T',
+            b'T' | b't' => b'A',
+            b'C' | b'c' => b'G',
+            b'G' | b'g' => b'C',
             _ => x,
         })
-        .collect();
-    record
+        .collect()
 }
 
 fn strip_from(

@@ -1,19 +1,22 @@
-use std::ops::Range;
+use std::ops::{Deref, Range};
 
-use noodles::fastq;
+use noodles::fastq::{self, record::Definition};
 
-use crate::{RegionType, SequenceType};
+use crate::{Region, RegionType, SequenceType};
 
 #[derive(Debug, Clone)]
-pub enum SegmentType {
-    Single(RegionType),
+pub enum SegmentType<'a> {
+    Single {
+        region_id: &'a str,
+        region_type: RegionType,
+    },
     Joined(Vec<RegionType>),
 }
 
-impl core::fmt::Display for SegmentType {
+impl core::fmt::Display for SegmentType<'_> {
     fn fmt(&self, f: &mut core::fmt::Formatter) -> core::fmt::Result {
         match self {
-            SegmentType::Single(region_type) => write!(f, "{}", region_type),
+            SegmentType::Single { region_type, .. } => write!(f, "{}", region_type),
             SegmentType::Joined(region_types) => {
                 let joined = region_types
                     .iter()
@@ -28,7 +31,7 @@ impl core::fmt::Display for SegmentType {
 
 #[derive(Debug, Clone)]
 pub struct Segment<'a> {
-    pub region_type: SegmentType,
+    pub region_type: SegmentType<'a>,
     pub seq: &'a [u8],
     pub qual: &'a [u8],
 }
@@ -45,11 +48,43 @@ impl core::fmt::Display for Segment<'_> {
 }
 
 impl<'a> Segment<'a> {
-    pub fn new(region_type: SegmentType, seq: &'a [u8], qual: &'a [u8]) -> Self {
+    pub fn new(region_type: SegmentType<'a>, seq: &'a [u8], qual: &'a [u8]) -> Self {
         Self {
             region_type,
             seq,
             qual,
+        }
+    }
+
+    pub fn region_id(&self) -> &str {
+        match &self.region_type {
+            SegmentType::Single { region_id, .. } => region_id,
+            SegmentType::Joined(_) => panic!("Joined segments have no region id"),
+        }
+    }
+
+    pub fn into_fq(&self, defi: &Definition) -> fastq::Record {
+        fastq::Record::new(defi.clone(), self.seq, self.qual)
+    }
+
+    pub fn is_barcode(&self) -> bool {
+        match &self.region_type {
+            SegmentType::Single { region_type, .. } => region_type.is_barcode(),
+            _ => false,
+        }
+    }
+
+    pub fn is_umi(&self) -> bool {
+        match &self.region_type {
+            SegmentType::Single { region_type, .. } => region_type.is_umi(),
+            _ => false,
+        }
+    }
+
+    pub fn contains_target(&self) -> bool {
+        match &self.region_type {
+            SegmentType::Single { region_type, .. } => region_type.is_target(),
+            SegmentType::Joined(region_types) => region_types.iter().any(|r| r.is_target()),
         }
     }
 }
@@ -57,11 +92,35 @@ impl<'a> Segment<'a> {
 #[derive(Debug, Clone)]
 pub struct SegmentInfo(Vec<SegmentInfoElem>);
 
+impl Deref for SegmentInfo {
+    type Target = Vec<SegmentInfoElem>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl FromIterator<SegmentInfoElem> for SegmentInfo {
+    fn from_iter<I: IntoIterator<Item = SegmentInfoElem>>(iter: I) -> Self {
+        Self(iter.into_iter().collect())
+    }
+}
+
+impl FromIterator<Region> for SegmentInfo {
+    fn from_iter<T: IntoIterator<Item = Region>>(iter: T) -> Self {
+        Self(iter.into_iter().map(SegmentInfoElem::from).collect())
+    }
+}
+
 impl SegmentInfo {
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
     /// Split a read into segments according to the segment information.
     pub fn split<'a>(&'a self, read: &'a fastq::Record) -> Option<Vec<Segment<'a>>> {
         fn consume_buf<'a>(
-            buf: &mut Vec<&SegmentInfoElem>,
+            buf: &mut Vec<&'a SegmentInfoElem>,
             mut seq: &'a [u8],
             mut qual: &'a [u8],
             result: &mut Vec<Segment<'a>>,
@@ -79,12 +138,22 @@ impl SegmentInfo {
                 let q = &qual[i..l];
                 seq = &seq[..i];
                 qual = &qual[..i];
-                result.push(Segment::new(SegmentType::Single(elem.region_type), s, q));
+                result.push(Segment::new(
+                    SegmentType::Single {
+                        region_id: elem.region_id.as_str(),
+                        region_type: elem.region_type,
+                    },
+                    s,
+                    q,
+                ));
             }
 
             if !buf.is_empty() {
                 let segment_type = if buf.len() == 1 {
-                    SegmentType::Single(buf[0].region_type)
+                    SegmentType::Single {
+                        region_id: buf[0].region_id.as_str(),
+                        region_type: buf[0].region_type,
+                    }
                 } else {
                     SegmentType::Joined(buf.iter().map(|s| s.region_type).collect())
                 };
@@ -108,20 +177,26 @@ impl SegmentInfo {
             let min_len = segment.min_len();
             let max_len = segment.max_len();
 
-            if min_offset + min_len > len {
+            // Check if the segment is within the read bounds
+            if max_offset >= len || min_offset + min_len > len {
                 break;
             }
 
             if min_len == max_len {
                 if !buffer.is_empty() {
+                    // if the sequcence contains fixed patterns, we can try to use them as anchors
+                    // to find the location of the next segment
                     if segment.sequence_type.is_fixed() {
+                        // by definition, the pattern can only be found within the window defined by [min_offset, max_offset+max_len]
                         let seq = read
                             .sequence()
-                            .get(min_offset..max_offset + max_len)
+                            .get(min_offset..len.min(max_offset + max_len))
                             .unwrap();
                         if let (Some(pos), _) =
                             find_best_pattern_match(seq, segment.sequence.as_bytes())
                         {
+                            // [offset_left, offset_right] is the region of the read that
+                            // contains segments prior to the matched pattern
                             let offset_left =
                                 min_offset - buffer.iter().map(|s| s.min_len()).sum::<usize>();
                             let offset_right = min_offset + pos;
@@ -133,6 +208,12 @@ impl SegmentInfo {
                                     .unwrap(),
                                 &mut result,
                             );
+
+                            // as the lengths of the previous segments are identified, we can now
+                            // update the min_offset and max_offset
+                            min_offset = offset_right;
+                            max_offset = offset_right;
+
                             let seq = read
                                 .sequence()
                                 .get(offset_right..offset_right + max_len)
@@ -142,7 +223,10 @@ impl SegmentInfo {
                                 .get(offset_right..offset_right + max_len)
                                 .unwrap();
                             result.push(Segment::new(
-                                SegmentType::Single(segment.region_type),
+                                SegmentType::Single {
+                                    region_id: segment.region_id.as_str(),
+                                    region_type: segment.region_type,
+                                },
                                 seq,
                                 qual,
                             ))
@@ -162,7 +246,10 @@ impl SegmentInfo {
                         .get(max_offset..max_offset + max_len)
                         .unwrap();
                     result.push(Segment::new(
-                        SegmentType::Single(segment.region_type),
+                        SegmentType::Single {
+                            region_id: segment.region_id.as_str(),
+                            region_type: segment.region_type,
+                        },
                         seq,
                         qual,
                     ))
@@ -200,6 +287,24 @@ pub struct SegmentInfoElem {
     pub sequence_type: SequenceType,
     pub sequence: String,
     pub len: Range<usize>, // length of the segment
+}
+
+impl From<Region> for SegmentInfoElem {
+    fn from(region: Region) -> Self {
+        Self {
+            region_id: region.region_id,
+            region_type: region.region_type,
+            sequence_type: region.sequence_type,
+            sequence: region.sequence,
+            len: region.min_len as usize..region.max_len as usize,
+        }
+    }
+}
+
+impl From<&Region> for SegmentInfoElem {
+    fn from(region: &Region) -> Self {
+        region.clone().into()
+    }
 }
 
 impl SegmentInfoElem {
@@ -342,7 +447,10 @@ mod tests {
     fn new_fq(seq: &str) -> fastq::Record {
         fastq::Record::new(
             fastq::record::Definition::default(),
-            seq.chars().filter(|c| !c.is_whitespace()).collect::<String>().as_bytes(),
+            seq.chars()
+                .filter(|c| !c.is_whitespace())
+                .collect::<String>()
+                .as_bytes(),
             '@'.to_string().repeat(seq.len()).as_bytes(),
         )
     }
@@ -431,12 +539,20 @@ mod tests {
             split_seq_by("AAAA TT CCG GG", [bc(4), umi(2), cdna(2, 4), poly(2, 4)]),
             "[B]AAAA,[U]TT,[TO]CCGGG",
         );
+
+        assert_eq!(
+            split_seq_by("AAAA TT CCCCCCC GGGGGGG AAAA TT", [bc(4), umi(2), cdna(2, 10), poly(2, 10), bc(4), umi(2)]),
+            "[B]AAAA,[U]TT,[TO]CCCCCCCGGGGGGGAAAATT",
+        );
     }
 
     #[test]
     fn test_variable() {
         assert_eq!(
-            split_seq_by("AAAA A TT ACTG CCC", [bc(4), var(1, 3), umi(2), linker("ACTG")]),
+            split_seq_by(
+                "AAAA A TT ACTG CCC",
+                [bc(4), var(1, 3), umi(2), linker("ACTG")]
+            ),
             "[B]AAAA,[O]A,[U]TT,[O]ACTG",
         );
 
@@ -459,7 +575,7 @@ mod tests {
         assert_eq!(
             split_seq_by(
                 "AAAA A TT ACCG CCCACTG",
-                [bc(4), var(1, 3), umi(2), linker("ACTG"), cdna(1, 100)]
+                [bc(4), var(1,3), umi(2), linker("ACTG"), cdna(1, 100)]
             ),
             "[B]AAAA,[O]A,[U]TT,[O]ACCG,[T]CCCACTG",
         );
@@ -478,10 +594,10 @@ mod tests {
                     var(2, 4),
                     bc(2),
                     linker("GGGG"),
-                    cdna(1,100),
+                    cdna(1, 100),
                 ]
             ),
-            "[B]AAAA,[O]A,[U]TT,[O]ACCG,[O]CC,[B]CA,[L]GGGG,[O]TTTT,[B]AT,[O]GGGG,[T]ACTGGGGGACTG",
+            "[B]AAAA,[O]A,[U]TT,[O]ACCG,[O]CC,[B]CA,[O]GGGG,[O]TTTT,[B]AT,[O]GGGG,[T]ACTGGGGGACTG",
         );
     }
 }
