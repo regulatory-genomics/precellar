@@ -120,14 +120,8 @@ impl FastqProcessor {
         num_threads: u16,
         chunk_size: usize,
     ) -> impl Iterator<Item = Vec<(Option<MultiMapR>, Option<MultiMapR>)>> + 'a {
-        debug!("Starting gen_barcoded_alignments with chunk_size={}", chunk_size);
         let fq_reader = self.gen_barcoded_fastq(true).with_chunk_size(chunk_size);
         
-        let total_reads = fq_reader.total_reads.unwrap_or(0);
-        debug!("Total reads reported: {}", total_reads);
-
-        let modality = self.modality();
-        debug!("Aligning {} reads...", total_reads);
         let header = aligner.header();
         let mut qc = AlignQC::default();
         self.mito_dna.iter().for_each(|mito| {
@@ -136,45 +130,15 @@ impl FastqProcessor {
                 .get_index_of(&BString::from(mito.as_str()))
                 .map(|x| qc.mito_dna.insert(x));
         });
+        let modality = self.modality();
         self.align_qc.insert(modality, qc);
 
+        let total_reads = fq_reader.total_reads.unwrap_or(0);
         let mut progress_bar = tqdm!(total = total_reads);
+        info!("Aligning {} reads...", total_reads);
         fq_reader.map(move |data| {
-            info!("Processing chunk with {} records", data.len());
-            // Log details of first few records in chunk
-            if !data.is_empty() {
-                let sample = &data[0];
-                info!("Sample record - Barcode present: {}, UMI present: {}, Read1 present: {}, Read2 present: {}", 
-                    sample.barcode.is_some(),
-                    sample.umi.is_some(),
-                    sample.read1.is_some(),
-                    sample.read2.is_some()
-                );
-                
-                // Check if at least one read is present
-                if sample.read1.is_none() && sample.read2.is_none() {
-                    panic!("Neither Read1 nor Read2 is present. Please provide at least one read.");
-                }
-            }
-            
             let align_qc = self.align_qc.get_mut(&modality).unwrap();
-            
-            debug!("Processing chunk with {} records", data.len());
-            
-            // Perform alignment
-            debug!("Aligning {} records...", data.len());
             let results: Vec<_> = aligner.align_reads(num_threads, data);
-            
-            debug!("Got {} alignment results", results.len());
-            
-            // Get QC stats about valid barcode counts
-            let valid_ratio = align_qc.frac_valid_barcode();
-            if !results.is_empty() && valid_ratio > 0.0 {
-                debug!("Current barcoded alignment statistics:");
-                debug!("  Valid barcode ratio: {:.2}%", valid_ratio * 100.0);
-            }
-            
-            // Process results for QC metrics
             results.iter().for_each(|ali| match ali {
                 (Some(ali1), Some(ali2)) => {
                     align_qc.add_pair(&header, ali1, ali2).unwrap();
@@ -197,26 +161,23 @@ impl FastqProcessor {
 
     pub fn gen_barcoded_fastq(&mut self, correct_barcode: bool) -> AnnotatedFastqReader {
         let modality = self.modality();
-        info!("Starting gen_barcoded_fastq for modality: {:?}", modality);
 
         let whitelists = if correct_barcode {
-            debug!("Counting barcodes...");
-            match self.count_barcodes() {
-                Ok(wl) => {
-                    debug!("Successfully counted barcodes. Found {} whitelists", wl.len());
-                    wl
-                }
-                Err(e) => {
-                    debug!("Error counting barcodes: {}", e);
-                    IndexMap::new()
-                }
+            info!("Counting barcodes...");
+            let whitelists = self.count_barcodes().unwrap();
+            for (id, whitelist) in whitelists.iter() {
+                info!(
+                    "{:.2}% of sequences have an exact match in whitelist '{}'. Number of unique barcodes: {}.",
+                    whitelist.frac_exact_match() * 100.0,
+                    id,
+                    whitelist.num_seen_barcodes(),
+                );
             }
+            whitelists
         } else {
-            debug!("Skipping barcode correction");
             IndexMap::new()
         };
 
-        debug!("Creating BarcodeCorrector with threshold={}", self.barcode_correct_prob);
         let corrector = BarcodeCorrector::default()
             .with_max_missmatch(self.mismatch_in_barcode)
             .with_bc_confidence_threshold(self.barcode_correct_prob);
@@ -233,11 +194,7 @@ impl FastqProcessor {
 
         if !whitelists.is_empty() {
             fq_reader.total_reads = Some(whitelists[0].total_count);
-            debug!("Set total_reads to {}", whitelists[0].total_count);
-        } else {
-            debug!("No whitelists available, total_reads not set");
         }
-
         fq_reader
     }
 
