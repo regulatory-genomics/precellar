@@ -239,8 +239,6 @@ pub enum RegionType {
     NexteraRead1,
     #[serde(rename = "nextera_read2")]
     NexteraRead2,
-    #[serde(rename = "phase_block")]
-    PhaseBlock,
     #[serde(rename = "poly_a")]
     PolyA,
     #[serde(rename = "poly_g")]
@@ -337,7 +335,6 @@ impl RegionType {
             "named" => Some(RegionType::Named),
             "nextera_read1" | "nexteraread1" => Some(RegionType::NexteraRead1),
             "nextera_read2" | "nexteraread2" => Some(RegionType::NexteraRead2),
-            "phase_block" | "phaseblock" => Some(RegionType::PhaseBlock),
             "poly_a" | "polya" => Some(RegionType::PolyA),
             "poly_g" | "polyg" => Some(RegionType::PolyG),
             "poly_t" | "polyt" => Some(RegionType::PolyT),

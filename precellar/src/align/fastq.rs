@@ -943,7 +943,7 @@ mod tests {
 
     #[test]
     fn test_io() {
-        let seqspec = "data/test1.yaml";
+        let seqspec = "data/test4.yaml";
         let assay = Assay::from_path(seqspec).unwrap();
         let mut fq_proc = FastqProcessor::new(assay).with_modality(Modality::RNA);
         // open a file
@@ -959,5 +959,6 @@ mod tests {
         test_fq("data/test1.yaml", "data/test1.out.gz");
         test_fq("data/test2.yaml", "data/test2.out.gz");
         test_fq("data/test3.yaml", "data/test3.out.gz");
+        test_fq("data/test4.yaml", "data/test4.out.gz");
     }
 }
