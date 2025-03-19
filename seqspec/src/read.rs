@@ -1,5 +1,7 @@
+mod segment;
+pub use segment::{Segment, SegmentInfo, SegmentInfoElem};
 use crate::region::{Region, SequenceType};
-use crate::{Modality, RegionType};
+use crate::Modality;
 
 use anyhow::Result;
 use cached_path::Cache;
@@ -8,7 +10,6 @@ use noodles::fastq;
 use serde::{Deserialize, Serialize, Serializer};
 use std::ops::{Deref, DerefMut};
 use std::path::Path;
-use std::sync::{Arc, RwLock};
 use std::{
     io::{BufRead, BufReader},
     ops::Range,
@@ -170,11 +171,10 @@ impl Read {
     }
 
     pub(crate) fn get_segments<'a>(&'a self, region: &'a Region) -> Option<SegmentInfo> {
-        if region.sequence_type != SequenceType::Joined {
+        if !region.sequence_type.is_joined() {
             return None;
         }
 
-        let mut found_primer = false;
         let subregions = region.subregions.iter();
         let subregions: Box<dyn Iterator<Item = _>> = if self.is_reverse() {
             Box::new(subregions.rev())
@@ -182,231 +182,22 @@ impl Read {
             Box::new(subregions)
         };
 
-        let result = self.get_read_span(
-            subregions
-                .skip_while(|region| {
-                    let region = region.read().unwrap();
-                    let found = region.region_type.is_sequencing_primer()
-                        && region.region_id == self.primer_id;
-                    if found {
-                        found_primer = true;
-                    }
-                    !found
-                })
-                .skip(1),
-        );
-
-        if found_primer {
-            Some(result)
+        let segment_info: SegmentInfo = subregions
+            .skip_while(|region| {
+                let region = region.read().unwrap();
+                let found = region.region_type.is_sequencing_primer()
+                    && region.region_id == self.primer_id;
+                !found
+            })
+            .skip(1)
+            .map(|x| x.read().unwrap().deref().clone())
+            .collect();
+        if segment_info.len() > 0 {
+            Some(segment_info)
         } else {
             None
         }
     }
-
-    /// Helper function to get the region index for a read.
-    fn get_read_span<'a, I>(&self, mut regions: I) -> SegmentInfo
-    where
-        I: Iterator<Item = &'a Arc<RwLock<Region>>>,
-    {
-        let mut segments = Vec::new();
-        let read_len = self.max_len;
-        let mut cur_pos = 0;
-        let mut readlen_info = ReadSpan::Covered;
-        while let Some(region) = regions.next() {
-            let mut region = region.read().unwrap();
-            let mut region_id = region.region_id.clone();
-            let mut region_type = SegmentType::R(region.region_type);
-            
-            // Special handling for PhaseBlock regions to prevent truncation
-            if let RegionType::PhaseBlock = region.region_type {
-                // For phase blocks, initially allocate a larger range up to either:
-                // 1. The maximum specified length if provided
-                // 2. Or up to the read length if the max length is too small
-                
-                // We'll use max_len parameter as a guide, but won't strictly limit to it
-                // This allows the pattern detection code in fastq.rs to work properly
-                let phase_block_max = if region.max_len > 0 { region.max_len } else { 20 }; // Default to 20 if not specified
-                
-                // Calculate potential end position - preferring to give the phase block more space
-                let potential_end = cur_pos + phase_block_max;
-                let end_pos = if potential_end < read_len {
-                    // If we can fit at least the specified max_len, use that length
-                    potential_end
-                } else {
-                    // If that would exceed the read length, use what's available
-                    // This leaves space for future adjustments by the pattern detection code
-                    read_len
-                };
-                
-                // Create the segment with this generous allocation
-                segments.push(SegmentInfoElem::new(
-                    region_id,
-                    region_type,
-                    cur_pos..end_pos,
-                ));
-                
-                // If we've reached the end of the read, break
-                if end_pos >= read_len {
-                    readlen_info = ReadSpan::Span((read_len - cur_pos) as usize);
-                    break;
-                }
-                
-                // Move to the next region
-                cur_pos = end_pos;
-                continue;
-            }
-            
-            if region.is_fixed_length() {
-                // Fixed-length region
-                let end = cur_pos + region.min_len;
-                if end >= read_len {
-                    segments.push(SegmentInfoElem::new(
-                        region_id,
-                        region_type,
-                        cur_pos..read_len,
-                    ));
-                    if end > read_len {
-                        readlen_info = ReadSpan::NotEnough;
-                    }
-                    break;
-                } else {
-                    segments.push(SegmentInfoElem::new(region_id, region_type, cur_pos..end));
-                    cur_pos = end;
-                }
-            } else {
-                // Variable-length region
-                if let Some(nucl) = region.region_type.is_poly_nucl() {
-                    if let Some(next_region) = regions.next() {
-                        region = next_region.read().unwrap();
-                        region_id = region.region_id.clone();
-                        region_type = SegmentType::PolyNucl((nucl, region.region_type));
-                    }
-                }
-                if cur_pos + region.min_len >= read_len {
-                    // Variable-length region and read is shorter
-                    segments.push(SegmentInfoElem::new(
-                        region_id,
-                        region_type,
-                        cur_pos..read_len,
-                    ));
-                    readlen_info = ReadSpan::Span((read_len - cur_pos) as usize);
-                    break;
-                } else if cur_pos + region.max_len < read_len {
-                    // Variable-length region and read is longer than max length
-                    segments.push(SegmentInfoElem::new(
-                        region_id,
-                        region_type,
-                        cur_pos..cur_pos + region.max_len,
-                    ));
-                    if let Some(next_region) = regions.next() {
-                        let next_region = next_region.read().unwrap();
-                        readlen_info = ReadSpan::ReadThrough(next_region.region_id.clone());
-                    }
-                    break;
-                } else {
-                    // Variable-length region and read is within the length range
-                    segments.push(SegmentInfoElem::new(
-                        region_id,
-                        region_type,
-                        cur_pos..read_len,
-                    ));
-                    if let Some(next_region) = regions.next() {
-                        let next_region = next_region.read().unwrap();
-                        readlen_info = ReadSpan::MayReadThrough(next_region.region_id.clone());
-                    }
-                    break;
-                }
-            }
-        }
-        SegmentInfo {
-            segments,
-            readlen_info,
-        }
-    }
-}
-
-/// A read may be divided into multiple segments, each corresponding to a region
-/// with biological meaning. SegmentInfo stores the information about the regions
-/// that the read is divided into.
-#[derive(Debug, Clone)]
-pub struct SegmentInfo {
-    pub segments: Vec<SegmentInfoElem>,
-    pub readlen_info: ReadSpan,
-}
-
-#[derive(Clone)]
-pub enum SegmentType {
-    R(RegionType),
-    PolyNucl((u8, RegionType)), // (nucleotide, region_type)
-}
-
-impl std::fmt::Debug for SegmentType {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            SegmentType::R(region_type) => write!(f, "{:?}", region_type),
-            SegmentType::PolyNucl((nucl, region_type)) => {
-                write!(f, "poly{}+{:?}", *nucl as char, region_type)
-            }
-        }
-    }
-}
-
-impl SegmentType {
-    pub fn is_barcode(&self) -> bool {
-        match self {
-            SegmentType::R(region_type) => region_type.is_barcode(),
-            _ => false,
-        }
-    }
-
-    pub fn is_umi(&self) -> bool {
-        match self {
-            SegmentType::R(region_type) => region_type.is_umi(),
-            _ => false,
-        }
-    }
-
-    pub fn is_target(&self) -> bool {
-        match self {
-            SegmentType::R(region_type) => region_type.is_target(),
-            SegmentType::PolyNucl((_, region_type)) => region_type.is_target(),
-        }
-    }
-
-    pub fn poly_nucl(&self) -> Option<u8> {
-        match self {
-            SegmentType::PolyNucl((nucl, _)) => Some(*nucl),
-            _ => None,
-        }
-    }
-}
-
-/// Information about a segment in a read.
-#[derive(Debug, Clone)]
-pub struct SegmentInfoElem {
-    pub region_id: String,
-    pub region_type: SegmentType,
-    pub range: Range<u32>,
-}
-
-impl SegmentInfoElem {
-    pub fn new(region_id: String, region_type: SegmentType, range: Range<u32>) -> Self {
-        Self {
-            region_id,
-            region_type: region_type,
-            range,
-        }
-    }
-}
-
-/// Information about the region index for a read.
-#[derive(Debug, Clone)]
-pub enum ReadSpan {
-    Covered,                // The read is fully contained within the target region
-    Span(usize),            // The read spans the target region
-    NotEnough,              // Read is too short to reach the target region
-    ReadThrough(String),    // Read is longer than the target region
-    MayReadThrough(String), // Read may be longer than the target region
 }
 
 #[derive(Deserialize, Serialize, Debug, Copy, Clone, PartialEq)]

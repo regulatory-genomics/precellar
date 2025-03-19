@@ -239,8 +239,6 @@ pub enum RegionType {
     NexteraRead1,
     #[serde(rename = "nextera_read2")]
     NexteraRead2,
-    #[serde(rename = "phase_block")]
-    PhaseBlock,
     #[serde(rename = "poly_a")]
     PolyA,
     #[serde(rename = "poly_g")]
@@ -258,6 +256,22 @@ pub enum RegionType {
     Umi,
     #[serde(untagged)]
     Modality(Modality),
+}
+
+impl core::fmt::Display for RegionType {
+    fn fmt(&self, f: &mut core::fmt::Formatter) -> core::fmt::Result {
+        if self.is_barcode() {
+            write!(f, "B")
+        } else if self.is_umi() {
+            write!(f, "U")
+        } else if self.is_sequencing_primer() {
+            write!(f, "P")
+        } else if self.is_target() {
+            write!(f, "T")
+        } else {
+            write!(f, "O")
+        }
+    }
 }
 
 impl RegionType {
@@ -321,7 +335,6 @@ impl RegionType {
             "named" => Some(RegionType::Named),
             "nextera_read1" | "nexteraread1" => Some(RegionType::NexteraRead1),
             "nextera_read2" | "nexteraread2" => Some(RegionType::NexteraRead2),
-            "phase_block" | "phaseblock" => Some(RegionType::PhaseBlock),
             "poly_a" | "polya" => Some(RegionType::PolyA),
             "poly_g" | "polyg" => Some(RegionType::PolyG),
             "poly_t" | "polyt" => Some(RegionType::PolyT),
@@ -358,6 +371,16 @@ pub enum SequenceType {
     Random, // the sequence is not known a-priori
     Onlist, // the sequence is derived from an onlist
     Joined, // the sequence is created from nested regions and the regions property must contain Regions
+}
+
+impl SequenceType {
+    pub fn is_fixed(&self) -> bool {
+        matches!(self, SequenceType::Fixed)
+    }
+
+    pub fn is_joined(&self) -> bool {
+        matches!(self, SequenceType::Joined)
+    }
 }
 
 #[derive(Deserialize, Serialize, Debug, Clone, PartialEq)]

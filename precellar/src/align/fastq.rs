@@ -1,9 +1,10 @@
 use super::aligners::{Aligner, MultiMap, MultiMapR};
 
-use crate::adapter::trim_poly_nucleotide;
-use crate::barcode::{BarcodeCorrector, OligoFrequncy, Whitelist, filter_cellular_barcodes_ordmag_advanced};
+use crate::barcode::{
+    filter_cellular_barcodes_ordmag_advanced, BarcodeCorrector, OligoFrequncy, Whitelist,
+};
 use crate::qc::{AlignQC, Metrics};
-use crate::utils::rev_compl_fastq_record;
+use crate::utils::{rev_compl, rev_compl_fastq_record};
 use anyhow::{bail, Result};
 use bstr::BString;
 use indexmap::IndexMap;
@@ -13,21 +14,20 @@ use log::{debug, info, warn};
 use noodles::{bam, fastq};
 use rayon::iter::ParallelIterator;
 use rayon::slice::ParallelSlice;
-use seqspec::{Assay, FastqReader, Modality, Read, RegionId, SegmentInfo, SegmentInfoElem, RegionType, SequenceType, Region, LibSpec};
-use seqspec::read::SegmentType;
+use seqspec::{Assay, FastqReader, Modality, Read, RegionId, SegmentInfo};
+use serde_json;
 use smallvec::SmallVec;
 use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, RwLock};
 use std::path::PathBuf;
-use serde_json;
 
-
+/// FastqProcessor manages the preprocessing of FASTQ files including barcode correction,
+/// alignment, and QC metrics.
 pub struct FastqProcessor {
-    assay: Assay,
-    current_modality: Option<Modality>,
-    mito_dna: HashSet<String>,
-    metrics: HashMap<Modality, Metrics>,
-    align_qc: HashMap<Modality, AlignQC>,
+    assay: Assay,                         // Specification of sequencing assay.
+    current_modality: Option<Modality>, // Current sequencing modality being processed (e.g., RNA, ATAC).
+    mito_dna: HashSet<String>, // Set of mitochondrial DNA sequence identifiers for special handling.
+    metrics: HashMap<Modality, Metrics>, // Quality control metrics for each modality.
+    align_qc: HashMap<Modality, AlignQC>, // Alignment QC data for each modality.
     barcode_correct_prob: f64, // if the posterior probability of a correction
     // exceeds this threshold, the barcode will be corrected.
     // cellrange uses 0.975 for ATAC and 0.9 for multiome.
@@ -36,12 +36,11 @@ pub struct FastqProcessor {
     barcode_filtering_quantile: f64, // Quantile for barcode filtering
     barcode_bootstrap_samples: usize, // Number of bootstrap samples for filtering
     metrics_path: Option<std::path::PathBuf>, // Path to write QC metrics
-
 }
 
 impl FastqProcessor {
+    /// Creates a new FastqProcessor with default settings.
     pub fn new(assay: Assay) -> Self {
-        debug!("Creating new FastqProcessor");
         Self {
             assay,
             current_modality: None,
@@ -49,39 +48,33 @@ impl FastqProcessor {
             align_qc: HashMap::new(),
             mito_dna: HashSet::new(),
             barcode_correct_prob: 0.975,
-            mismatch_in_barcode: 2,
+            mismatch_in_barcode: 1,
             expected_cells: None,
             barcode_filtering_quantile: 0.99,
             barcode_bootstrap_samples: 100,
             metrics_path: None,
-
         }
     }
 
     pub fn with_barcode_correct_prob(mut self, prob: f64) -> Self {
-        debug!("Setting barcode correction probability to {}", prob);
         self.barcode_correct_prob = prob;
         self
     }
 
     pub fn with_expected_cells(mut self, cells: usize) -> Self {
-        debug!("Setting expected number of cells to {}", cells);
         self.expected_cells = Some(cells);
         self
     }
-    
+
     pub fn with_barcode_filtering_params(
-        mut self, 
-        quantile: f64, 
+        mut self,
+        quantile: f64,
         bootstrap_samples: usize,
-        metrics_path: Option<&std::path::Path>
+        metrics_path: Option<&std::path::Path>,
     ) -> Self {
-        debug!("Setting barcode filtering parameters: quantile={}, bootstrap_samples={}, metrics_path={:?}", 
-               quantile, bootstrap_samples, metrics_path);
         self.barcode_filtering_quantile = quantile;
         self.barcode_bootstrap_samples = bootstrap_samples;
         self.metrics_path = metrics_path.map(|p| p.to_path_buf());
-
         self
     }
 
@@ -95,19 +88,16 @@ impl FastqProcessor {
     }
 
     pub fn with_modality(mut self, modality: Modality) -> Self {
-        debug!("Setting modality to {:?}", modality);
         self.current_modality = Some(modality);
         self
     }
 
     pub fn get_report(&self) -> Metrics {
-        debug!("Generating metrics report for modality {:?}", self.modality());
         let mut metrics = self
             .metrics
             .get(&self.modality())
             .map_or(Metrics::default(), |x| x.clone());
         if let Some(align_qc) = self.align_qc.get(&self.modality()) {
-            debug!("Adding alignment QC metrics to report");
             align_qc.report(&mut metrics);
         }
         metrics
@@ -132,16 +122,8 @@ impl FastqProcessor {
         num_threads: u16,
         chunk_size: usize,
     ) -> impl Iterator<Item = Vec<(Option<MultiMapR>, Option<MultiMapR>)>> + 'a {
-        debug!("Starting gen_barcoded_alignments with chunk_size={}", chunk_size);
         let fq_reader = self.gen_barcoded_fastq(true).with_chunk_size(chunk_size);
-        
-        debug!("FastqReader created. Is paired-end: {}", fq_reader.is_paired_end());
-        
-        let total_reads = fq_reader.total_reads.unwrap_or(0);
-        debug!("Total reads reported: {}", total_reads);
 
-        let modality = self.modality();
-        debug!("Aligning {} reads...", total_reads);
         let header = aligner.header();
         let mut qc = AlignQC::default();
         self.mito_dna.iter().for_each(|mito| {
@@ -150,45 +132,15 @@ impl FastqProcessor {
                 .get_index_of(&BString::from(mito.as_str()))
                 .map(|x| qc.mito_dna.insert(x));
         });
+        let modality = self.modality();
         self.align_qc.insert(modality, qc);
 
+        let total_reads = fq_reader.total_reads.unwrap_or(0);
         let mut progress_bar = tqdm!(total = total_reads);
+        info!("Aligning {} reads...", total_reads);
         fq_reader.map(move |data| {
-            info!("Processing chunk with {} records", data.len());
-            // Log details of first few records in chunk
-            if !data.is_empty() {
-                let sample = &data[0];
-                info!("Sample record - Barcode present: {}, UMI present: {}, Read1 present: {}, Read2 present: {}", 
-                    sample.barcode.is_some(),
-                    sample.umi.is_some(),
-                    sample.read1.is_some(),
-                    sample.read2.is_some()
-                );
-                
-                // Check if at least one read is present
-                if sample.read1.is_none() && sample.read2.is_none() {
-                    panic!("Neither Read1 nor Read2 is present. Please provide at least one read.");
-                }
-            }
-            
             let align_qc = self.align_qc.get_mut(&modality).unwrap();
-            
-            debug!("Processing chunk with {} records", data.len());
-            
-            // Perform alignment
-            debug!("Aligning {} records...", data.len());
             let results: Vec<_> = aligner.align_reads(num_threads, data);
-            
-            debug!("Got {} alignment results", results.len());
-            
-            // Get QC stats about valid barcode counts
-            let valid_ratio = align_qc.frac_valid_barcode();
-            if !results.is_empty() && valid_ratio > 0.0 {
-                debug!("Current barcoded alignment statistics:");
-                debug!("  Valid barcode ratio: {:.2}%", valid_ratio * 100.0);
-            }
-            
-            // Process results for QC metrics
             results.iter().for_each(|ali| match ali {
                 (Some(ali1), Some(ali2)) => {
                     align_qc.add_pair(&header, ali1, ali2).unwrap();
@@ -203,7 +155,7 @@ impl FastqProcessor {
                     debug!("No alignment found for read");
                 }
             });
-            
+
             progress_bar.update(results.len()).unwrap();
             results
         })
@@ -211,195 +163,152 @@ impl FastqProcessor {
 
     pub fn gen_barcoded_fastq(&mut self, correct_barcode: bool) -> AnnotatedFastqReader {
         let modality = self.modality();
-        info!("Starting gen_barcoded_fastq for modality: {:?}", modality);
 
         let whitelists = if correct_barcode {
-            debug!("Counting barcodes...");
-            match self.count_barcodes() {
-                Ok(wl) => {
-                    debug!("Successfully counted barcodes. Found {} whitelists", wl.len());
-                    wl
-                }
-                Err(e) => {
-                    debug!("Error counting barcodes: {}", e);
-                    IndexMap::new()
-                }
+            info!("Counting barcodes...");
+            let whitelists = self.count_barcodes().unwrap();
+            for (id, whitelist) in whitelists.iter() {
+                info!(
+                    "{:.2}% of sequences have an exact match in whitelist '{}'. Number of unique barcodes: {}.",
+                    whitelist.frac_exact_match() * 100.0,
+                    id,
+                    whitelist.num_seen_barcodes(),
+                );
             }
+            whitelists
         } else {
-            debug!("Skipping barcode correction");
             IndexMap::new()
         };
 
-        debug!("Creating BarcodeCorrector with threshold={}", self.barcode_correct_prob);
         let corrector = BarcodeCorrector::default()
             .with_max_missmatch(self.mismatch_in_barcode)
             .with_bc_confidence_threshold(self.barcode_correct_prob);
 
-        debug!("Creating FastqAnnotators from segments");
-        
-        let segments_by_modality: Vec<_> = self.assay.get_segments_by_modality(modality).collect();
-        debug!("Found {} read segments for modality {:?}", segments_by_modality.len(), modality);
-        
         let mut fq_reader: AnnotatedFastqReader = self
             .assay
             .get_segments_by_modality(modality)
-            .filter(|(read, _)| {
-                let read_id = &read.read_id;
-                let open_result = read.open();
-                if open_result.is_none() {
-                    debug!("ERROR: Unable to open FASTQ file for read ID: {}", read_id);
-                    false
-                } else {
-                    true
-                }
-            })
-            .filter_map(|(read, index)| {
-                debug!("Processing read {} with {} segments", read.read_id, index.segments.len());
-
-                let library_spec = Arc::new(RwLock::new(self.assay.library_spec.clone()));
-                let annotator = match FastqAnnotator::new(read, index, &whitelists, corrector.clone(), library_spec) {
-                    Some(a) => a,
-                    None => {
-                        debug!("Failed to create annotator for read {}", read.read_id);
-                        return None;
-                    }
-                };
-                
-                let reader = match read.open() {
-                    Some(r) => r,
-                    None => {
-                        debug!("Failed to open reader for {}", read.read_id);
-                        return None;
-                    }
-                };
-                
+            .filter_map(|(read, segment_info)| {
+                let annotator =
+                    FastqAnnotator::new(read, segment_info, &whitelists, corrector.clone())?;
+                let reader = read.open()?;
                 Some((annotator, reader))
             })
             .collect();
 
         if !whitelists.is_empty() {
             fq_reader.total_reads = Some(whitelists[0].total_count);
-            debug!("Set total_reads to {}", whitelists[0].total_count);
-        } else {
-            debug!("No whitelists available, total_reads not set");
         }
-
-        if fq_reader.readers.is_empty() {
-            debug!("CRITICAL ERROR: No valid FASTQ readers were created!");
-        }
-
-        debug!("Completed gen_barcoded_fastq setup");
         fq_reader
     }
 
     fn count_barcodes(&mut self) -> Result<IndexMap<RegionId, Whitelist>> {
         let modality = self.modality();
         let mut whitelists = self.get_whitelists();
-        let mut total_filtered_bcs = 0;
 
-
-        debug!("Starting barcode counting process. Metrics path is: {:?}", self.metrics_path);
-        debug!("Number of whitelists found: {}", whitelists.len());
-        
-        // Log whitelist details
-        for (id, whitelist) in whitelists.iter() {
-            debug!("Whitelist '{}': has_predefined={}, total_count={}", 
-                  id, 
-                  !whitelist.get_barcode_counts().is_empty(),
-                  whitelist.total_count);
-        }
-
-        
-        // Create a list of IDs that need counting
-        let whitelist_ids: Vec<RegionId> = whitelists.keys().cloned().collect();
-        
-        if !whitelist_ids.is_empty() {
-            debug!("Found {} whitelists that need counting", whitelist_ids.len());
-            
-            // Get segments with barcode regions
-            let barcode_segments: Vec<_> = self.assay
-                .get_segments_by_modality(modality)
-                .filter(|(_, region_index)| {
-                    region_index.segments.iter().any(|x| x.region_type.is_barcode())
-                })
-                .collect();
-            
-            debug!("Processing {} segment groups with barcode regions", barcode_segments.len());
-            
-            // Process each read segment for barcodes
-            for (read, region_index) in barcode_segments {
-                debug!("Processing read {}", read.read_id);
-                
+        self.assay
+            .get_segments_by_modality(modality)
+            .for_each(|(read, segment_info)| {
                 let is_reverse = read.is_reverse();
-                debug!("region_index.segments before adjustments: {:?}", region_index.segments);
-                
-                // Read all records for this segment
                 if let Some(mut reader) = read.open() {
-                    for fastq_record_result in reader.records() {
-                        let fastq_record = fastq_record_result.unwrap();
-                        
-                        // Calculate phase block adjustments for this record - store for reuse
-                        let library_spec = Arc::new(RwLock::new(self.assay.library_spec.clone()));
-                        let phase_block_adjustments = calculate_phase_block_adjustments(
-                            &region_index.segments, 
-                            &fastq_record, 
-                            &library_spec
-                        );
-                        
-                        // Apply phase block adjustments to all segments
-                        let adjusted_segments = apply_phase_block_adjustments(
-                            &region_index.segments,
-                            &phase_block_adjustments
-                        );
-                        
-                        //debug!("region_index.segments after adjustments: {:?}", adjusted_segments);
-                        
-                        // Process each barcode region directly
-                        for (_i, info) in adjusted_segments.iter().enumerate() {
-                            if info.region_type.is_barcode() && whitelist_ids.contains(&info.region_id) {
-                                let start_pos = info.range.start as usize;
-                                let end_pos = info.range.end as usize;
-                                
-                                // Extract barcode from this region
-                                let mut barcode_slice = slice_fastq_record(&fastq_record, start_pos, end_pos);
+                    for fq in reader.records() {
+                        let fq = fq.unwrap();
+                        segment_info.split(&fq).unwrap().iter().for_each(|segment| {
+                            if segment.is_barcode() {
+                                let wl = whitelists.get_mut(segment.region_id()).expect(&format!(
+                                    "whitelist not found for region {}",
+                                    segment.region_id()
+                                ));
                                 if is_reverse {
-                                    barcode_slice = rev_compl_fastq_record(barcode_slice);
-                                }
-                                
-                                // Find the corresponding whitelist and count the barcode
-                                if let Some(whitelist) = whitelists.get_mut(&info.region_id) {
-                                    // Count the barcode directly - DO NOT include phase block with the barcode
-                                    whitelist.count_barcode(barcode_slice.sequence(), barcode_slice.quality_scores());
+                                    wl.count_barcode(
+                                        &rev_compl(segment.seq),
+                                        &segment.qual.iter().rev().copied().collect::<Vec<_>>(),
+                                    );
+                                } else {
+                                    wl.count_barcode(segment.seq, segment.qual);
                                 }
                             }
-                        }
+                        });
                     }
                 }
-            }
-        } else {
-            debug!("No whitelists found for counting");
+            });
+
+        self.metrics.entry(modality).or_default().insert(
+            "frac_q30_bases_barcode".to_string(),
+            whitelists.values().map(|x| x.frac_q30_bases()).sum::<f64>() / whitelists.len() as f64,
+        );
+        Ok(whitelists)
+    }
+
+    /*
+    fn count_barcodes(&mut self) -> Result<IndexMap<RegionId, Whitelist>> {
+        let mut whitelists = self.get_whitelists();
+        debug!("Number of whitelists found: {}", whitelists.len());
+
+        if whitelists.is_empty() {
+            return Ok(whitelists);
         }
+
+        let modality = self.modality();
+        let mut total_filtered_bcs = 0;
+
+        debug!(
+            "Starting barcode counting process. Metrics path is: {:?}",
+            self.metrics_path
+        );
+
+        self.assay
+            .get_segments_by_modality(modality)
+            .filter(|(_, segments)| segments.iter().any(|x| x.region_type.is_barcode()))
+            .for_each(|(read, segment_info)| {
+                let is_reverse = read.is_reverse();
+                if let Some(mut reader) = read.open() {
+                    for fq in reader.records() {
+                        let fq = fq.unwrap();
+                        segment_info.split(&fq).unwrap().iter().for_each(|segment| {
+                            if segment.is_barcode() {
+                                if let Some(wl) = whitelists.get_mut(segment.region_id()) {
+                                    if is_reverse {
+                                        wl.count_barcode(
+                                            &rev_compl(segment.seq),
+                                            &segment.qual.iter().rev().copied().collect::<Vec<_>>(),
+                                        );
+                                    } else {
+                                        wl.count_barcode(segment.seq, segment.qual);
+                                    }
+                                }
+                            }
+                        });
+                    }
+                }
+            });
 
         // Apply advanced filtering to each whitelist if needed
         for (id, whitelist) in whitelists.iter_mut() {
             // Check if this whitelist needs filtering (no predefined entries or has counts)
             let is_empty = whitelist.get_barcode_counts().is_empty();
             let has_predefined_whitelist = !is_empty;
-            
-            if !has_predefined_whitelist  {
-                info!("No predefined whitelist for '{}', applying order-of-magnitude filtering", id);
-                
+
+            if !has_predefined_whitelist {
+                info!(
+                    "No predefined whitelist for '{}', applying order-of-magnitude filtering",
+                    id
+                );
 
                 // Create metrics file path if metrics_path is provided
                 let metrics_file_path = self.metrics_path.as_ref().map(|path| {
                     let file_name = format!("barcode_metrics_{}.json", id);
                     let full_path = path.join(file_name);
-                    debug!("Creating metrics file path: {:?} for barcode region: {}", full_path, id);
+                    debug!(
+                        "Creating metrics file path: {:?} for barcode region: {}",
+                        full_path, id
+                    );
                     full_path
                 });
-                
-                debug!("Metrics path for barcode region {}: {:?}", id, metrics_file_path);
-                
+
+                debug!(
+                    "Metrics path for barcode region {}: {:?}",
+                    id, metrics_file_path
+                );
 
                 let results = filter_cellular_barcodes_ordmag_advanced(
                     whitelist,
@@ -409,137 +318,189 @@ impl FastqProcessor {
                     Some(self.barcode_filtering_quantile),
                     Some(self.barcode_bootstrap_samples),
                     metrics_file_path.as_deref(),
-
                 );
-                
+
                 info!(
                     "Found {} cellular barcodes (95% CI: {}-{}) for '{}' with counts >= {}",
-                    results.filtered_bcs, 
+                    results.filtered_bcs,
                     results.filtered_bcs_lb,
                     results.filtered_bcs_ub,
                     id,
                     results.filtered_bcs_cutoff
                 );
-                
+
                 total_filtered_bcs += results.filtered_bcs;
             } else {
                 info!("Using predefined whitelist for '{}'", id);
-                
+
                 // Create metrics file for predefined whitelists too
                 if let Some(metrics_path) = &self.metrics_path {
                     let file_name = format!("barcode_metrics_{}.json", id);
                     let full_path = metrics_path.join(file_name);
                     debug!("Creating metrics file path for predefined whitelist: {:?} for barcode region: {}", full_path, id);
-                    
+
                     // Create simple metrics structure
                     let mut metrics = serde_json::Map::new();
-                    metrics.insert("whitelist_id".to_string(), serde_json::Value::String(id.clone()));
+                    metrics.insert(
+                        "whitelist_id".to_string(),
+                        serde_json::Value::String(id.clone()),
+                    );
                     metrics.insert("is_predefined".to_string(), serde_json::Value::Bool(true));
-                    metrics.insert("total_barcodes".to_string(), serde_json::Value::Number(serde_json::Number::from(whitelist.get_barcode_counts().len())));
-                    
+                    metrics.insert(
+                        "total_barcodes".to_string(),
+                        serde_json::Value::Number(serde_json::Number::from(
+                            whitelist.get_barcode_counts().len(),
+                        )),
+                    );
+
                     // Add barcode-specific metrics
-                    metrics.insert("frac_valid_barcode".to_string(), serde_json::Value::Number(serde_json::Number::from_f64(whitelist.frac_exact_match()).unwrap_or(serde_json::Number::from(0))));
-                    metrics.insert("frac_q30_bases_barcode".to_string(), serde_json::Value::Number(serde_json::Number::from_f64(whitelist.frac_q30_bases()).unwrap_or(serde_json::Number::from(0))));
-                    
+                    metrics.insert(
+                        "frac_valid_barcode".to_string(),
+                        serde_json::Value::Number(
+                            serde_json::Number::from_f64(whitelist.frac_exact_match())
+                                .unwrap_or(serde_json::Number::from(0)),
+                        ),
+                    );
+                    metrics.insert(
+                        "frac_q30_bases_barcode".to_string(),
+                        serde_json::Value::Number(
+                            serde_json::Number::from_f64(whitelist.frac_q30_bases())
+                                .unwrap_or(serde_json::Number::from(0)),
+                        ),
+                    );
+
                     // Add general QC metrics from the processor's metrics if they exist
                     if let Some(modality_metrics) = self.metrics.get(&modality) {
                         // Add all existing metrics for this modality
                         for (metric_name, metric_value) in modality_metrics.iter() {
-                            metrics.insert(metric_name.clone(), serde_json::Value::Number(serde_json::Number::from_f64(*metric_value).unwrap_or(serde_json::Number::from(0))));
+                            metrics.insert(
+                                metric_name.clone(),
+                                serde_json::Value::Number(
+                                    serde_json::Number::from_f64(*metric_value)
+                                        .unwrap_or(serde_json::Number::from(0)),
+                                ),
+                            );
                         }
                     }
-                    
+
                     // Write metrics to file
                     if let Ok(file) = std::fs::File::create(&full_path) {
                         if let Err(e) = serde_json::to_writer_pretty(file, &metrics) {
-                            warn!("Failed to write metrics file for predefined whitelist '{}': {}", id, e);
+                            warn!(
+                                "Failed to write metrics file for predefined whitelist '{}': {}",
+                                id, e
+                            );
                         } else {
-                            debug!("Successfully wrote metrics for predefined whitelist '{}'", id);
+                            debug!(
+                                "Successfully wrote metrics for predefined whitelist '{}'",
+                                id
+                            );
                         }
                     } else {
-                        warn!("Failed to create metrics file for predefined whitelist '{}'", id);
+                        warn!(
+                            "Failed to create metrics file for predefined whitelist '{}'",
+                            id
+                        );
                     }
                 }
-                
+
                 // Count predefined barcodes toward the total
                 total_filtered_bcs += whitelist.get_barcode_counts().len();
             }
         }
-        
+
         // After processing all barcodes, write a consolidated metrics file
         if let Some(metrics_path) = &self.metrics_path {
             // Create a consolidated metrics file with all QC metrics
-            let consolidated_file_path = PathBuf::from(metrics_path).join("consolidated_qc_metrics.json");
-            debug!("Creating consolidated QC metrics file at: {:?}", consolidated_file_path);
-            
+            let consolidated_file_path =
+                PathBuf::from(metrics_path).join("consolidated_qc_metrics.json");
+            debug!(
+                "Creating consolidated QC metrics file at: {:?}",
+                consolidated_file_path
+            );
+
             if let Some(modality_metrics) = self.metrics.get(&modality) {
                 let mut consolidated_metrics = serde_json::Map::new();
-                
+
                 // Add all metrics for this modality
                 for (metric_name, metric_value) in modality_metrics.iter() {
                     consolidated_metrics.insert(
-                        metric_name.clone(), 
+                        metric_name.clone(),
                         serde_json::Value::Number(
-                            serde_json::Number::from_f64(*metric_value).unwrap_or(serde_json::Number::from(0))
-                        )
+                            serde_json::Number::from_f64(*metric_value)
+                                .unwrap_or(serde_json::Number::from(0)),
+                        ),
                     );
                 }
-                
+
                 // Add total filtered barcodes count
                 consolidated_metrics.insert(
                     "total_filtered_bcs".to_string(),
-                    serde_json::Value::Number(serde_json::Number::from(total_filtered_bcs))
+                    serde_json::Value::Number(serde_json::Number::from(total_filtered_bcs)),
                 );
-                
+
                 // Add average barcode quality metrics across all whitelists
                 consolidated_metrics.insert(
                     "frac_q30_bases_barcode".to_string(),
                     serde_json::Value::Number(
                         serde_json::Number::from_f64(
-                            whitelists.values().map(|x| x.frac_q30_bases()).sum::<f64>() / whitelists.len() as f64
-                        ).unwrap_or(serde_json::Number::from(0))
-                    )
+                            whitelists.values().map(|x| x.frac_q30_bases()).sum::<f64>()
+                                / whitelists.len() as f64,
+                        )
+                        .unwrap_or(serde_json::Number::from(0)),
+                    ),
                 );
-                
+
                 consolidated_metrics.insert(
                     "frac_valid_barcode".to_string(),
                     serde_json::Value::Number(
                         serde_json::Number::from_f64(
-                            whitelists.values().map(|x| x.frac_exact_match()).sum::<f64>() / whitelists.len() as f64
-                        ).unwrap_or(serde_json::Number::from(0))
-                    )
+                            whitelists
+                                .values()
+                                .map(|x| x.frac_exact_match())
+                                .sum::<f64>()
+                                / whitelists.len() as f64,
+                        )
+                        .unwrap_or(serde_json::Number::from(0)),
+                    ),
                 );
-                
+
                 // Write the consolidated metrics to file
                 if let Ok(file) = std::fs::File::create(&consolidated_file_path) {
                     if let Err(e) = serde_json::to_writer_pretty(file, &consolidated_metrics) {
                         warn!("Failed to write consolidated metrics file: {}", e);
                     } else {
-                        debug!("Successfully wrote consolidated QC metrics to {:?}", consolidated_file_path);
+                        debug!(
+                            "Successfully wrote consolidated QC metrics to {:?}",
+                            consolidated_file_path
+                        );
                     }
                 } else {
-                    warn!("Failed to create consolidated metrics file at {:?}", consolidated_file_path);
+                    warn!(
+                        "Failed to create consolidated metrics file at {:?}",
+                        consolidated_file_path
+                    );
                 }
             }
         }
-        
+
         if total_filtered_bcs > 0 {
-            self.metrics.entry(modality).or_default().insert(
-                "total_filtered_bcs".to_string(),
-                total_filtered_bcs as f64,
-            );
+            self.metrics
+                .entry(modality)
+                .or_default()
+                .insert("total_filtered_bcs".to_string(), total_filtered_bcs as f64);
         }
 
         self.metrics.entry(modality).or_default().insert(
             "frac_q30_bases_barcode".to_string(),
             whitelists.values().map(|x| x.frac_q30_bases()).sum::<f64>() / whitelists.len() as f64,
         );
-        
+
         Ok(whitelists)
     }
+    */
 
     fn get_whitelists(&self) -> IndexMap<RegionId, Whitelist> {
-        debug!("Getting whitelists for modality {:?}", self.modality());
         let regions = self
             .assay
             .library_spec
@@ -547,8 +508,7 @@ impl FastqProcessor {
             .unwrap()
             .read()
             .unwrap();
-        
-        let whitelists: IndexMap<RegionId, Whitelist> = regions
+        regions
             .subregions
             .iter()
             .filter_map(|r| {
@@ -556,10 +516,8 @@ impl FastqProcessor {
                 if r.region_type.is_barcode() {
                     let id = r.region_id.to_string();
                     let list = if let Some(onlist) = r.onlist.as_ref() {
-                        debug!("Found whitelist for barcode region {}", id);
                         Whitelist::new(onlist.read().unwrap())
                     } else {
-                        debug!("No whitelist found for barcode region {}, using empty list", id);
                         Whitelist::empty()
                     };
                     Some((id, list))
@@ -567,10 +525,7 @@ impl FastqProcessor {
                     None
                 }
             })
-            .collect();
-
-        debug!("Found {} whitelists", whitelists.len());
-        whitelists
+            .collect()
     }
 }
 
@@ -600,10 +555,10 @@ impl AnnotatedFastqReader {
             .iter()
             .flat_map(|annotator| {
                 annotator
-                    .subregions
+                    .segment_info
                     .iter()
                     .filter(|info| info.region_type.is_barcode())
-                    .map(|info| (info.region_id.as_str(), info.range.len()))
+                    .map(|info| (info.region_id.as_str(), info.len.len()))
             })
             .collect()
     }
@@ -613,10 +568,10 @@ impl AnnotatedFastqReader {
             .iter()
             .flat_map(|annotator| {
                 annotator
-                    .subregions
+                    .segment_info
                     .iter()
                     .filter(|info| info.region_type.is_umi())
-                    .map(|info| (info.region_id.as_str(), info.range.len()))
+                    .map(|info| (info.region_id.as_str(), info.len.len()))
             })
             .collect()
     }
@@ -625,7 +580,7 @@ impl AnnotatedFastqReader {
         let mut has_read1 = false;
         let mut has_read2 = false;
         self.annotators.iter().for_each(|x| {
-            x.subregions.iter().for_each(|info| {
+            x.segment_info.iter().for_each(|info| {
                 if info.region_type.is_target() {
                     if x.is_reverse {
                         has_read1 = true;
@@ -640,71 +595,43 @@ impl AnnotatedFastqReader {
 
     /// Read a chunk of records from the fastq files.
     fn read_chunk(&mut self) -> usize {
-        //info!("Starting to read chunk. Target chunk size: {}", self.chunk_size);
         self.chunk.clear();
 
         let mut accumulated_length = 0;
-        let mut _total_records = 0;
 
         while accumulated_length < self.chunk_size {
             let mut max_read = 0;
             let mut min_read = usize::MAX;
-            
-            // Track which readers failed/succeeded for this chunk
-            let mut successful_readers = 0;
-            let mut empty_readers = 0;
-            let mut error_readers = 0;
-            
             let records: SmallVec<[_; 4]> = self
                 .readers
                 .iter_mut()
-                .enumerate()
-                .flat_map(|(_i, reader)| {
-                    let result = reader.read_record(&mut self.buffer);
-                    
-                    if let Err(_e) = &result {
-                        error_readers += 1;
-                        return None;
-                    }
-                    
-                    let n = result.expect("error reading fastq record");
-                    
+                .flat_map(|reader| {
+                    let n = reader
+                        .read_record(&mut self.buffer)
+                        .expect("error reading fastq record");
+                    min_read = min_read.min(n);
+                    max_read = max_read.max(n);
                     if n > 0 {
-                        successful_readers += 1;
-                        min_read = min_read.min(n);
-                        max_read = max_read.max(n);
                         accumulated_length += self.buffer.sequence().len();
                         Some(self.buffer.clone())
                     } else {
-                        empty_readers += 1;
-                        min_read = 0;
                         None
                     }
                 })
                 .collect();
-            
-            
             if max_read == 0 {
-                debug!("No more records to read");
                 break;
-            } else if min_read == 0 && successful_readers > 0 {
-                // Existing commented code
+            } else if min_read == 0 {
+                panic!("Unequal number of reads in the chunk");
             } else {
-                _total_records += 1;
-                
-                // Check records for name consistency
-                if records.len() > 0 {
-                    assert!(
-                        records.iter().map(|r| r.name()).all_equal(),
-                        "read names mismatch"
-                    );
-                }
-                
+                assert!(
+                    records.iter().map(|r| r.name()).all_equal(),
+                    "read names mismatch"
+                );
                 self.chunk.push(records);
             }
         }
-        
-        debug!("Finished read_chunk, got {} chunk entries", self.chunk.len());
+
         self.chunk.len()
     }
 }
@@ -730,22 +657,11 @@ impl Iterator for AnnotatedFastqReader {
 
     fn next(&mut self) -> Option<Self::Item> {
         let n = self.read_chunk();
-        debug!("read_chunk returned {} entries", n);
-        
         if n == 0 {
-            debug!("No chunks read, returning None");
             None
         } else {
             let n = (n / 256).max(256);
             let annotators = &self.annotators;
-            
-            debug!("Processing chunk with {} annotators", annotators.len());
-            
-            if annotators.is_empty() {
-                debug!("ERROR: No annotators available!");
-                return None;
-            }
-            
             let result: Vec<AnnotatedFastq> = self
                 .chunk
                 .par_chunks(n)
@@ -754,12 +670,7 @@ impl Iterator for AnnotatedFastqReader {
                         records
                             .iter()
                             .enumerate()
-                            .map(|(i, record)| {
-                                if i >= annotators.len() {
-                                    panic!("Annotator index out of bounds");
-                                }
-                                annotators[i].annotate(record).unwrap()
-                            })
+                            .map(|(i, record)| annotators[i].annotate(record).unwrap())
                             .reduce(|mut this, other| {
                                 this.join(other);
                                 this
@@ -770,8 +681,7 @@ impl Iterator for AnnotatedFastqReader {
                     })
                 })
                 .collect();
-            
-            debug!("Returning {} processed records", result.len());
+
             Some(result)
         }
     }
@@ -784,52 +694,37 @@ struct FastqAnnotator {
     whitelists: IndexMap<String, OligoFrequncy>,
     corrector: BarcodeCorrector,
     is_reverse: bool,
-    subregions: Vec<SegmentInfoElem>,
-    // Add original_segments to keep track of all segments including phase blocks
-    original_segments: Vec<SegmentInfoElem>,
+    segment_info: SegmentInfo,
     min_len: usize,
     max_len: usize,
-    library_spec: Arc<RwLock<LibSpec>>,
 }
 
 impl FastqAnnotator {
     pub fn new(
         read: &Read,
-        index: SegmentInfo,
+        segment_info: SegmentInfo,
         whitelists: &IndexMap<String, Whitelist>,
         corrector: BarcodeCorrector,
-        library_spec: Arc<RwLock<LibSpec>>,
     ) -> Option<Self> {
-        // Keep a copy of the original segments including phase blocks
-        let original_segments = index.segments.clone();
-        
-        // Filter as before for the main processing
-        let subregions: Vec<_> = index
-            .segments
-            .into_iter()
-            .filter(|x| {
-                x.region_type.is_barcode() || x.region_type.is_umi() || x.region_type.is_target()
-            }) // only barcode and target regions
-            .collect();
-        if subregions.is_empty() {
+        if !segment_info.iter().any(|x| {
+            x.region_type.is_barcode() || x.region_type.is_umi() || x.region_type.is_target()
+        }) {
             None
         } else {
-            let whitelists = subregions
+            let whitelists = segment_info
                 .iter()
-                .flat_map(|info| {
-                    let v = whitelists.get(&info.region_id)?;
-                    Some((info.region_id.clone(), v.get_barcode_counts().clone()))
+                .flat_map(|segment| {
+                    let v = whitelists.get(&segment.region_id)?;
+                    Some((segment.region_id.clone(), v.get_barcode_counts().clone()))
                 })
                 .collect();
             let anno = Self {
                 whitelists,
                 corrector,
                 is_reverse: read.is_reverse(),
-                subregions,
-                original_segments,
+                segment_info,
                 min_len: read.min_len as usize,
                 max_len: read.max_len as usize,
-                library_spec,
             };
             Some(anno)
         }
@@ -845,93 +740,55 @@ impl FastqAnnotator {
                 self.max_len
             );
         }
-        
+
         let mut barcode: Option<Barcode> = None;
         let mut umi = None;
         let mut read1 = None;
         let mut read2 = None;
 
-        // Calculate phase block adjustments using the original segments that include phase blocks
-        let phase_block_adjustments = calculate_phase_block_adjustments(
-            &self.original_segments, 
-            record, 
-            &self.library_spec
-        );
-        
-        // Apply adjustments to original segments
-        let adjusted_original_segments = apply_phase_block_adjustments(
-            &self.original_segments, 
-            &phase_block_adjustments
-        );
-        
-        //debug!("Original segments after all adjustments: {:?}", adjusted_original_segments);
-        
-        // Now create filtered subregions maintaining positions from adjusted original segments
-        let mut adjusted_subregions = Vec::with_capacity(self.subregions.len());
-        
-        for seg in &adjusted_original_segments {
-            if seg.region_type.is_barcode() || seg.region_type.is_umi() || seg.region_type.is_target() {
-                adjusted_subregions.push(seg.clone());
-            }
-        }
-        
-        //debug!("Subregions after adjustments: {:?}", adjusted_subregions);
-        
-        // Process all regions using the adjusted subregions
-        for (_i, info) in adjusted_subregions.iter().enumerate() {
-            let start_pos = info.range.start as usize;
-            let end_pos = info.range.end as usize;
-            
-            // Extract the appropriate slice of the record
-            let mut record_slice = slice_fastq_record(record, start_pos, end_pos);
-            
-            // Reverse complement if needed
-            if self.is_reverse && (info.region_type.is_barcode() || info.region_type.is_umi()) {
-                record_slice = rev_compl_fastq_record(record_slice);
-            }
-            
-            // Handle based on region type
-            if info.region_type.is_barcode() {
-                let corrected = self.whitelists.get(&info.region_id).map_or(
-                    Some(record_slice.sequence().to_vec()),
-                    |counts| {
-                        self.corrector
-                            .correct(counts, record_slice.sequence(), record_slice.quality_scores())
-                            .ok()
-                            .map(|x| x.to_vec())
-                    },
-                );
-                
-                if let Some(bc) = &mut barcode {
-                    bc.extend(&Barcode { raw: record_slice, corrected });
-                } else {
-                    barcode = Some(Barcode { raw: record_slice, corrected });
-                }
-            } else if info.region_type.is_umi() {
-                umi = Some(record_slice);
-            } else if info.region_type.is_target() {
-                if read1.is_some() || read2.is_some() {
-                    panic!("Both Read1 and Read2 are set");
-                } else {
-                    if let Some(nucl) = info.region_type.poly_nucl() {
-                        if let Some(idx) = trim_poly_nucleotide(nucl, record_slice.sequence().iter().copied())
-                        {
-                            record_slice = slice_fastq_record(&record_slice, idx, record_slice.sequence().len());
-                        }
+        if let Some(segments) = self.segment_info.split(record) {
+            segments.into_iter().for_each(|segment| {
+                if segment.is_barcode() || segment.is_umi() {
+                    let mut fq = segment.into_fq(record.definition());
+                    if self.is_reverse {
+                        fq = rev_compl_fastq_record(fq);
                     }
-                    // Only keep reads with length >= 8
-                    if record_slice.sequence().len() >= 8 {
-                        if self.is_reverse {
-                            read2 = Some(record_slice);
+
+                    if segment.is_barcode() {
+                        let corrected = self.whitelists.get(segment.region_id()).map_or(
+                            Some(fq.sequence().to_vec()),
+                            |counts| {
+                                self.corrector
+                                    .correct(counts, fq.sequence(), fq.quality_scores())
+                                    .ok()
+                                    .map(|x| x.to_vec())
+                            },
+                        );
+
+                        if let Some(bc) = &mut barcode {
+                            bc.extend(&Barcode { raw: fq, corrected });
                         } else {
-                            read1 = Some(record_slice);
+                            barcode = Some(Barcode { raw: fq, corrected });
+                        }
+                    } else {
+                        umi = Some(fq);
+                    }
+                } else if segment.contains_target() {
+                    if read1.is_some() || read2.is_some() {
+                        panic!("Both Read1 and Read2 are set");
+                    } else {
+                        let fq = segment.into_fq(record.definition());
+                        // TODO: polyA and adapter trimming
+                        if self.is_reverse {
+                            read2 = Some(fq);
+                        } else {
+                            read1 = Some(fq);
                         }
                     }
                 }
-            }
-            // We simply ignore phase blocks
+            });
         }
-        
+
         Ok(AnnotatedFastq {
             barcode,
             umi,
@@ -939,162 +796,6 @@ impl FastqAnnotator {
             read2,
         })
     }
-}
-
-/// Helper function to apply phase block adjustments to a vector of segments
-/// 
-/// # Arguments
-/// 
-/// * `segments` - The vector of segments to adjust
-/// * `phase_block_adjustments` - Map of segment index to adjusted end position
-/// 
-/// # Returns
-/// 
-/// The adjusted vector of segments
-fn apply_phase_block_adjustments(
-    segments: &[SegmentInfoElem],
-    phase_block_adjustments: &HashMap<usize, usize>
-) -> Vec<SegmentInfoElem> {
-    let mut adjusted_segments = segments.to_vec();
-    
-    for (i, adjustment) in phase_block_adjustments {
-        if *i < adjusted_segments.len() {
-            // Calculate the adjustment offset
-            let original_end = adjusted_segments[*i].range.end;
-            let new_end = *adjustment as u32;
-            let offset = original_end as i32 - new_end as i32; // How much we're adjusting by
-            
-            //debug!("{}: phase block adjustment at original index {}: end position set to {}", 
-            //      prefix, *i, new_end);
-            //debug!("{}: calculating offset - original end: {}, new end: {}, offset: {}", 
-            //      prefix, original_end, new_end, offset);
-            
-            // Adjust this segment's end position
-            adjusted_segments[*i].range.end = new_end;
-            //debug!("{}: adjusted segment {} end to {}", prefix, *i, new_end);
-            
-            // Adjust all subsequent segments by the same offset
-            for j in (*i + 1)..adjusted_segments.len() {
-                // Adjust start position
-                let original_start = adjusted_segments[j].range.start;
-                let new_start = (original_start as i32 - offset) as u32;
-                adjusted_segments[j].range.start = new_start;
-                
-                // Adjust end position
-                let original_end = adjusted_segments[j].range.end;
-                let new_end = (original_end as i32 - offset) as u32;
-                adjusted_segments[j].range.end = new_end;
-                
-                //debug!("{}: adjusted segment {} range from {:?} to {:?}", 
-                //    prefix, j, 
-                //    (original_start..original_end), 
-                //    (new_start..new_end));
-            }
-        }
-    }
-    
-    adjusted_segments
-}
-
-/// Find a pattern with the Knuth-Morris-Pratt (KMP) algorithm - more efficient for large patterns
-fn find_pattern(haystack: &[u8], needle: &[u8]) -> Option<usize> {
-    if needle.is_empty() || haystack.is_empty() || needle.len() > haystack.len() {
-        return None;
-    }
-    
-    // Compute the KMP failure function
-    let mut lps = vec![0; needle.len()];
-    let mut len = 0;
-    let mut i = 1;
-    
-    while i < needle.len() {
-        if needle[i] == needle[len] {
-            len += 1;
-            lps[i] = len;
-            i += 1;
-        } else if len != 0 {
-            len = lps[len - 1];
-        } else {
-            lps[i] = 0;
-            i += 1;
-        }
-    }
-    
-    // Search for the pattern
-    let mut i = 0; // index for haystack
-    let mut j = 0; // index for needle
-    
-    while i < haystack.len() {
-        if needle[j] == haystack[i] {
-            i += 1;
-            j += 1;
-        }
-        
-        if j == needle.len() {
-            return Some(i - j);
-        } else if i < haystack.len() && needle[j] != haystack[i] {
-            if j != 0 {
-                j = lps[j - 1];
-            } else {
-                i += 1;
-            }
-        }
-    }
-    
-    None
-}
-
-
-/// Find the best match for a pattern within a haystack, always returning the position
-/// with the minimal number of mismatches. Highly optimized for short patterns (< 10 characters).
-/// 
-/// # Arguments
-/// 
-/// * `haystack` - The sequence to search in
-/// * `needle` - The pattern to search for
-/// 
-/// # Returns
-/// 
-/// A tuple of (Option<position>, mismatch_count) with the best match position and its mismatch count
-fn find_best_pattern_match(haystack: &[u8], needle: &[u8]) -> (Option<usize>, usize) {
-    if needle.is_empty() || haystack.is_empty() || needle.len() > haystack.len() {
-        return (None, usize::MAX);
-    }
-    // Try exact matching first - it's very efficient
-    if let Some(pos) = find_pattern(haystack, needle) {
-        return (Some(pos), 0);
-    }
-    let n = haystack.len();
-    let m = needle.len();
-    
-    // Ultra-optimized special case for 1-character patterns
-    if m == 1 {
-        // For single character patterns, we either have an exact match or nothing
-        // We already checked for exact matches above
-        return (None, 1);
-    }
-    let mut min_mismatches = usize::MAX;
-    let mut best_pos = None;
-    // Simple and efficient approach for very short patterns
-    for i in 0..=n.saturating_sub(m) {
-        let mut mismatches = 0;
-        // Count mismatches at this position
-        for j in 0..m {
-            if haystack[i + j] != needle[j] {
-                mismatches += 1;
-                // Early termination if we exceed current best
-                if mismatches >= min_mismatches && min_mismatches != usize::MAX {
-                    break;
-                }
-            }
-        }        
-        // Update if this is a better match
-        if mismatches < min_mismatches {
-            min_mismatches = mismatches;
-            best_pos = Some(i);
-        }
-    }
-    (best_pos, min_mismatches)
 }
 
 #[derive(Debug)]
@@ -1174,15 +875,6 @@ impl AnnotatedFastq {
     }
 }
 
-fn slice_fastq_record(record: &fastq::Record, start: usize, end: usize) -> fastq::Record {
-    let end = end.min(record.sequence().len());
-    fastq::Record::new(
-        record.definition().clone(),
-        &record.sequence()[start..end],
-        record.quality_scores().get(start..end).unwrap(),
-    )
-}
-
 pub fn extend_fastq_record(this: &mut fastq::Record, other: &fastq::Record) {
     this.sequence_mut().extend_from_slice(other.sequence());
     this.quality_scores_mut()
@@ -1236,1110 +928,62 @@ impl<'a, R: std::io::Read> Iterator for NameCollatedRecords<'a, R> {
     }
 }
 
-
-// Helper function to get a region from a region ID and library spec
-
-/// Calculate phase block adjustments based on subsequent fixed patterns
-/// 
-/// This function analyzes segments in a FASTQ record to find phase blocks 
-/// that are followed by fixed pattern regions. When it finds such patterns,
-/// it calculates the appropriate adjustment to the phase block end position.
-///
-/// # Arguments
-///
-/// * `segments` - The segments to analyze
-/// * `record` - The FASTQ record containing the sequence data
-/// * `library_spec` - Library specification with region definitions
-///
-/// # Returns
-///
-/// A HashMap mapping segment index to adjusted end position
-fn calculate_phase_block_adjustments(
-    segments: &[SegmentInfoElem], 
-    record: &fastq::Record,
-    library_spec: &Arc<RwLock<LibSpec>>
-) -> HashMap<usize, usize> {
-    let mut phase_block_adjustments = HashMap::new();
-    let mut iter = segments.iter().enumerate().peekable();
-    
-    // Maximum allowed mismatches in pattern matching
-    const MAX_ALLOWED_MISMATCHES: usize = 1;
-    
-    // Pre-fetch regions to avoid repeated lookups
-    let lib_spec_guard = library_spec.read().ok();
-    if lib_spec_guard.is_none() {
-        return phase_block_adjustments;
-    }
-    let lib_spec_guard = lib_spec_guard.unwrap();
-    
-    while let Some((i, info)) = iter.next() {
-        if let SegmentType::R(RegionType::PhaseBlock) = info.region_type {
-            // Try to find the next fixed region after this phase block
-            if let Some(&(_, next_info)) = iter.peek() {
-                // Get region info once
-                let region = match lib_spec_guard.get(&next_info.region_id) {
-                    Some(r) => r.read().ok(),
-                    None => continue,
-                };
-                
-                let region = match region {
-                    Some(r) => r,
-                    None => continue,
-                };
-                
-                // Get the phase block region to retrieve its max_len from seqspec
-                let phase_block_region = match lib_spec_guard.get(&info.region_id) {
-                    Some(r) => r.read().ok(),
-                    None => continue,
-                };
-                
-                let phase_block_region = match phase_block_region {
-                    Some(r) => r,
-                    None => continue,
-                };
-                
-                if region.sequence_type == SequenceType::Fixed && !region.sequence.is_empty() {
-                    let pattern = region.sequence.as_bytes();
-                    // IMPORTANT: Use the START of the phase block for searching
-                    let search_start = info.range.start as usize;
-                    
-                    if search_start < record.sequence().len() {
-                        // Get the max_len values from the region definitions
-                        let phase_block_max_len = phase_block_region.max_len as usize;
-                        let fixed_region_max_len = region.max_len as usize;
-                        
-                        // Calculate search limit based on the phase block's max_len from seqspec
-                        let search_limit = std::cmp::min(
-                            search_start + phase_block_max_len + fixed_region_max_len,
-                            record.sequence().len()
-                        );
-                        
-                        //debug!("Searching for pattern from position {} to {}", search_start, search_limit);
-                        let search_range = search_start..search_limit;
-                        let limited_seq = &record.sequence()[search_range];
-                        
-                        // Try to find best pattern match using our improved function
-                        let (match_pos_opt, mismatches) = find_best_pattern_match(limited_seq, pattern);
-                        
-                        if let Some(match_pos) = match_pos_opt {
-                            // Only use the match if it has acceptable mismatches
-                            if mismatches <= MAX_ALLOWED_MISMATCHES {
-                                let phase_block_end = search_start + match_pos;
-                                //debug!("search_start: {}, match_pos: {}, phase_block_end: {}", search_start, match_pos, phase_block_end);
-                                
-                                //debug!("Found pattern at position {} (with {} mismatches)", 
-                                //       phase_block_end, mismatches);
-                                
-                                // Always record the adjustment, even if it's the same as the original position
-                                // This ensures consistent processing for all phase blocks
-                                phase_block_adjustments.insert(i, phase_block_end);
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-    
-    phase_block_adjustments
-}
-
 #[cfg(test)]
 mod tests {
-    use bwa_mem2::{AlignerOpts, BurrowsWheelerAligner, FMIndex};
-    use env_logger;
-    use std::sync::{Arc, RwLock};
-
     use super::*;
 
-    #[test]
-    fn test_seqspec_io() {
-        let bwa_index = "/data/Public/BWA_MEM2_index/GRCh38";
-        let seqspec = "/data/kzhang/dev/PreCellar/test/seqspec.yaml";
-        let spec = Assay::from_path(seqspec).unwrap();
-        let mut aligner = BurrowsWheelerAligner::new(
-            FMIndex::read(bwa_index).unwrap(),
-            AlignerOpts::default(),
-        );
-        let mut processor = FastqProcessor::new(spec).with_modality(Modality::ATAC);
+    use std::io::{BufRead, Write};
 
-        processor
-            .gen_barcoded_alignments(&mut aligner, 4, 40000)
-            .take(6)
-            .for_each(|x| {
-                println!("{:?}", x);
-            });
-
-        println!("{}", processor.get_report());
-    }
-    
-    #[test]
-    fn test_barcode_filtering_control() {
-        // Create a test whitelist with no predefined barcodes
-        let mut whitelist = Whitelist::empty();
-        
-        // Add a mix of high and low count barcodes
-        for i in 0..20 {
-            let count = 1000 - i * 50;
-            let barcode = format!("CELL_{:03}", i).into_bytes();
-            let quality = vec![b'F'; barcode.len()];
-            
-            for _ in 0..count {
-                whitelist.count_barcode(&barcode, &quality);
-            }
-        }
-        
-        // Add background noise
-        for i in 0..100 {
-            let count = 10;
-            let barcode = format!("BG_{:03}", i).into_bytes();
-            let quality = vec![b'F'; barcode.len()];
-            
-            for _ in 0..count {
-                whitelist.count_barcode(&barcode, &quality);
-            }
-        }
-        
-        // Check barcode count before filtering
-        let initial_count = whitelist.num_seen_barcodes();
-        
-        // Create a copy for comparison
-        let whitelist_no_filtering = whitelist.clone();
-        
-        // Apply the filtering
-        let results = filter_cellular_barcodes_ordmag_advanced(
-            &mut whitelist,
-            Some(20),
-            None,
-            None,
-            Some(0.99),
-
-            Some(10),
-            None
-
-        );
-        
-        // Verify filtering worked
-        assert!(whitelist.num_seen_barcodes() < initial_count, 
-            "Filtering should reduce the number of barcodes");
-        assert!(whitelist.num_seen_barcodes() <= results.filtered_bcs,
-            "Number of barcodes should match the filtering results");
-        
-        // Verify we can skip filtering by not calling the function
-        assert_eq!(whitelist_no_filtering.num_seen_barcodes(), initial_count,
-            "Whitelist without filtering should maintain all barcodes");
+    fn show_fq(fq: &AnnotatedFastq) -> String {
+        format!(
+            "{}\t{}\t{}\t{}",
+            fq.barcode
+                .as_ref()
+                .map_or("", |x| std::str::from_utf8(x.raw.sequence()).unwrap()),
+            fq.umi
+                .as_ref()
+                .map_or("", |x| std::str::from_utf8(x.sequence()).unwrap()),
+            fq.read1
+                .as_ref()
+                .map_or("", |x| std::str::from_utf8(x.sequence()).unwrap()),
+            fq.read2
+                .as_ref()
+                .map_or("", |x| std::str::from_utf8(x.sequence()).unwrap())
+        )
     }
 
-    #[test]
-    fn test_find_pattern() {
-        // Basic pattern matching test
-        let haystack = b"ACGTACGTACGT";
-        let needle = b"ACGT";
-        assert_eq!(find_pattern(haystack, needle), Some(0));
-        assert_eq!(find_pattern(haystack, b"CGTA"), Some(1));
-        assert_eq!(find_pattern(haystack, b"ACGT"), Some(0));
-        assert_eq!(find_pattern(haystack, b"CGTX"), None);
-        assert_eq!(find_pattern(haystack, b""), None);
-        assert_eq!(find_pattern(&[], b"ACGT"), None);
-    }
-    
-
-
-    #[test]
-    fn test_phase_block_pattern_detection() {
-        // Initialize logging for debugging
-        let _ = env_logger::builder().is_test(true).try_init();
-        
-        // Create a test sequence with a phase block followed by a fixed pattern
-        // Format: [PHASE_BLOCK_REGION][FIXED_PATTERN][OTHER_SEQUENCE]
-        //         |<--- 10bp --->|<-- 5bp -->|<-- rest -->|
-        // The phase block should end at the start of the fixed pattern
-        let phase_block_seq = b"AAAAAAAAAA"; // 10bp phase block
-        let fixed_pattern = b"CGTAG";        // 5bp fixed pattern
-        let remaining_seq = b"TTTTTTTTTTT"; // 11bp remaining sequence
-        
-        // Combine sequences
-        let mut full_seq = Vec::new();
-        full_seq.extend_from_slice(phase_block_seq);
-        full_seq.extend_from_slice(fixed_pattern);
-        full_seq.extend_from_slice(remaining_seq);
-        
-        // Create a quality score of the same length
-        let quality = vec![b'F'; full_seq.len()];
-        
-        // Create a FASTQ record with this sequence
-        let fastq_record = fastq::Record::new(
-            fastq::record::Definition::new("test_read", ""),
-            full_seq.clone(),
-            quality.clone()
-        );
-        
-        // Create a minimal LibSpec with the necessary regions
-        let lib_spec = LibSpec::new(vec![
-            Region {
-                region_id: "modality".to_string(),
-                region_type: RegionType::Modality(Modality::RNA),
-                name: "RNA".to_string(),
-                sequence_type: SequenceType::Joined,
-                sequence: "".to_string(),
-                min_len: 0,
-                max_len: 100,
-                onlist: None,
-                subregions: vec![
-                    Arc::new(RwLock::new(Region {
-                        region_id: "phase_block".to_string(),
-                        region_type: RegionType::PhaseBlock,
-                        name: "Phase Block".to_string(),
-                        sequence_type: SequenceType::Random,
-                        sequence: "".to_string(),
-                        min_len: 5,
-                        max_len: 15,
-                        onlist: None,
-                        subregions: vec![],
-                    })),
-                    Arc::new(RwLock::new(Region {
-                        region_id: "fixed_region".to_string(),
-                        region_type: RegionType::Named,
-                        name: "Fixed Region".to_string(),
-                        sequence_type: SequenceType::Fixed,
-                        sequence: String::from_utf8(fixed_pattern.to_vec()).unwrap(),
-                        min_len: 5,
-                        max_len: 5,
-                        onlist: None,
-                        subregions: vec![],
-                    })),
-                ],
-            }
-        ]).unwrap();
-        
-        // Create a FastqAnnotator
-        let annotator = FastqAnnotator {
-            whitelists: IndexMap::new(),
-            corrector: BarcodeCorrector::default(),
-            is_reverse: false,
-            subregions: vec![
-                SegmentInfoElem {
-                    region_id: "phase_block".to_string(),
-                    region_type: SegmentType::R(RegionType::PhaseBlock),
-                    range: 0..phase_block_seq.len() as u32,
-                },
-                SegmentInfoElem {
-                    region_id: "fixed_region".to_string(),
-                    region_type: SegmentType::R(RegionType::Named),
-                    range: phase_block_seq.len() as u32..(phase_block_seq.len() + fixed_pattern.len()) as u32,
-                }
-            ],
-            original_segments: vec![
-                SegmentInfoElem {
-                    region_id: "phase_block".to_string(),
-                    region_type: SegmentType::R(RegionType::PhaseBlock),
-                    range: 0..phase_block_seq.len() as u32,
-                },
-                SegmentInfoElem {
-                    region_id: "fixed_region".to_string(),
-                    region_type: SegmentType::R(RegionType::Named),
-                    range: phase_block_seq.len() as u32..(phase_block_seq.len() + fixed_pattern.len()) as u32,
-                }
-            ],
-            min_len: full_seq.len(),
-            max_len: full_seq.len(),
-            library_spec: Arc::new(RwLock::new(lib_spec)),
-        };
-        
-        // Annotate the record - this will trigger the phase block detection
-        let _result = annotator.annotate(&fastq_record).unwrap();
-        
-        // For debugging, print the input and output sequences
-        println!("Original phase block sequence: {:?}", String::from_utf8_lossy(phase_block_seq));
-        println!("Fixed pattern: {:?}", String::from_utf8_lossy(fixed_pattern));
-        println!("Original range: 0..{}", phase_block_seq.len());
-        
-        // Verify the find_pattern works as expected
-        let search_start = phase_block_seq.len();
-        let remaining = &full_seq[search_start..];
-        assert_eq!(find_pattern(remaining, fixed_pattern), Some(0), 
-            "Pattern '{}' should be found at position 0 in '{}'", 
-            String::from_utf8_lossy(fixed_pattern),
-            String::from_utf8_lossy(remaining));
-        
-        // Additional test for find_pattern with different positions
-        let offset_remaining = b"NNNCGTAGTTT"; // pattern starts at position 3
-        assert_eq!(find_pattern(offset_remaining, fixed_pattern), Some(3),
-            "Pattern '{}' should be found at position 3 in '{}'",
-            String::from_utf8_lossy(fixed_pattern),
-            String::from_utf8_lossy(offset_remaining));
-            
-        // Test with mismatched pattern
-        let mut wrong_pattern = fixed_pattern.to_vec();
-        wrong_pattern[0] = b'T'; // Change first letter to mismatch
-        assert_eq!(find_pattern(remaining, &wrong_pattern), None,
-            "Modified pattern '{}' should not be found in '{}'",
-            String::from_utf8_lossy(&wrong_pattern),
-            String::from_utf8_lossy(remaining));
-    }
-
-    #[test]
-    fn test_phase_block_adjustment() {
-        // Initialize logging for debugging
-        let _ = env_logger::builder()
-            .filter_level(log::LevelFilter::Debug)
-            .is_test(true)
-            .try_init();
-        
-        // Setup a sequence where a phase block should be dynamically adjusted
-        // AAAAAAAAAAACGTAGTTTTTTT
-        // |<--PB-->|<-FP->|<--->|
-        // Where PB = Phase Block, FP = Fixed Pattern
-        let phase_block_data = b"AAAAAAAAAAAA"; // 12bp phase block
-        let fixed_pattern = b"CGTAG";          // 5bp fixed pattern
-        let rest_data = b"TTTTTTT";            // remaining sequence
-        
-        // Based on test results, it looks like the phase block isn't being trimmed
-        // Our implementation is identifying the pattern but not adjusting the phase block
-        let expected_phase_block_length = phase_block_data.len(); // The full length
-        
-        // Create the full sequence
-        let mut full_seq = Vec::new();
-        full_seq.extend_from_slice(phase_block_data);
-        full_seq.extend_from_slice(fixed_pattern);
-        full_seq.extend_from_slice(rest_data);
-        
-        // Print the sequence for debugging
-        println!("Full sequence: {:?}", String::from_utf8_lossy(&full_seq));
-        println!("Full sequence length: {}", full_seq.len());
-        println!("Phase block data: {:?} (length: {})", 
-               String::from_utf8_lossy(phase_block_data), 
-               phase_block_data.len());
-        println!("Fixed pattern: {:?} (length: {})",
-               String::from_utf8_lossy(fixed_pattern),
-               fixed_pattern.len());
-        
-        // Quality scores (all the same value)
-        let quality = vec![b'I'; full_seq.len()];
-        
-        // Create the FASTQ record
-        let record = fastq::Record::new(
-            fastq::record::Definition::new("test_read", ""),
-            full_seq.clone(),
-            quality.clone()
-        );
-        
-        // Create a LibSpec with the phase block and fixed regions
-        let lib_spec = LibSpec::new(vec![
-            Region {
-                region_id: "test_modality".to_string(),
-                region_type: RegionType::Modality(Modality::RNA),
-                name: "Test Modality".to_string(),
-                sequence_type: SequenceType::Joined,
-                sequence: "".to_string(),
-                min_len: 0,
-                max_len: 100,
-                onlist: None,
-                subregions: vec![
-                    Arc::new(RwLock::new(Region {
-                        region_id: "phase_block_region".to_string(),
-                        region_type: RegionType::PhaseBlock,
-                        name: "Phase Block".to_string(),
-                        sequence_type: SequenceType::Random,
-                        sequence: "".to_string(),
-                        min_len: 5,
-                        max_len: 15,
-                        onlist: None,
-                        subregions: vec![],
-                    })),
-                    Arc::new(RwLock::new(Region {
-                        region_id: "fixed_region".to_string(),
-                        region_type: RegionType::Named,
-                        name: "Fixed Region".to_string(),
-                        sequence_type: SequenceType::Fixed,
-                        sequence: String::from_utf8(fixed_pattern.to_vec()).unwrap(),
-                        min_len: fixed_pattern.len() as u32,
-                        max_len: fixed_pattern.len() as u32,
-                        onlist: None,
-                        subregions: vec![],
-                    })),
-                ],
-            }
-        ]).unwrap();
-        
-        // Clone the lib_spec before using it
-        let lib_spec_clone = lib_spec.clone();
-        
-        // Create an annotator that should detect and adjust the phase block
-        let annotator = FastqAnnotator {
-            whitelists: IndexMap::new(),
-            corrector: BarcodeCorrector::default(),
-            is_reverse: false,
-            subregions: vec![
-                SegmentInfoElem {
-                    region_id: "phase_block_region".to_string(),
-                    region_type: SegmentType::R(RegionType::PhaseBlock),
-                    range: 0..phase_block_data.len() as u32,  // Initial range is the full phase block
-                },
-                SegmentInfoElem {
-                    region_id: "fixed_region".to_string(),
-                    region_type: SegmentType::R(RegionType::Named),
-                    range: phase_block_data.len() as u32..(phase_block_data.len() + fixed_pattern.len()) as u32,
-                }
-            ],
-            original_segments: vec![
-                SegmentInfoElem {
-                    region_id: "phase_block_region".to_string(),
-                    region_type: SegmentType::R(RegionType::PhaseBlock),
-                    range: 0..phase_block_data.len() as u32,  // Initial range is the full phase block
-                },
-                SegmentInfoElem {
-                    region_id: "fixed_region".to_string(),
-                    region_type: SegmentType::R(RegionType::Named),
-                    range: phase_block_data.len() as u32..(phase_block_data.len() + fixed_pattern.len()) as u32,
-                }
-            ],
-            min_len: full_seq.len(),
-            max_len: full_seq.len(),
-            library_spec: Arc::new(RwLock::new(lib_spec)),
-        };
-        
-        // First, test the specific slices of the sequence
-        for pos in 0..phase_block_data.len() {
-            let slice = &full_seq[pos..];
-            let find_result = find_pattern(slice, fixed_pattern);
-            println!("Pattern at position {}: {:?}", pos, find_result);
-            if find_result.is_some() {
-                println!("  Found pattern at position {} + {} = {}", 
-                      pos, find_result.unwrap(), pos + find_result.unwrap());
-            }
-        }
-        
-        // Then call annotate and check that all elements were properly processed
-        let _result = annotator.annotate(&record).unwrap();
-        
-        // Verify that we still have the expected elements in the result
-        assert!(_result.barcode.is_none(), "No barcode should be present");
-        assert!(_result.umi.is_none(), "No UMI should be present");
-        assert!(_result.read1.is_none() && _result.read2.is_none(), 
-               "No read1 or read2 should be present since phase block is neither");
-               
-        // Now create an annotator that treats the phase block as a barcode, so we can
-        // examine the extracted sequence to verify the phase block was correctly adjusted
-        let barcode_annotator = FastqAnnotator {
-            whitelists: IndexMap::new(),
-            corrector: BarcodeCorrector::default(),
-            is_reverse: false,
-            subregions: vec![
-                SegmentInfoElem {
-                    region_id: "phase_block_region".to_string(),
-                    region_type: SegmentType::R(RegionType::Barcode), // Treat phase block as barcode
-                    range: 0..phase_block_data.len() as u32,
-                },
-                SegmentInfoElem {
-                    region_id: "fixed_region".to_string(),
-                    region_type: SegmentType::R(RegionType::Named),
-                    range: phase_block_data.len() as u32..(phase_block_data.len() + fixed_pattern.len()) as u32,
-                }
-            ],
-            original_segments: vec![
-                SegmentInfoElem {
-                    region_id: "phase_block_region".to_string(),
-                    region_type: SegmentType::R(RegionType::Barcode), // Treat phase block as barcode
-                    range: 0..phase_block_data.len() as u32,
-                },
-                SegmentInfoElem {
-                    region_id: "fixed_region".to_string(),
-                    region_type: SegmentType::R(RegionType::Named),
-                    range: phase_block_data.len() as u32..(phase_block_data.len() + fixed_pattern.len()) as u32,
-                }
-            ],
-            min_len: full_seq.len(),
-            max_len: full_seq.len(),
-            library_spec: Arc::new(RwLock::new(lib_spec_clone)),
-        };
-        
-        // Run annotation and check the extracted barcode length
-        let barcode_result = barcode_annotator.annotate(&record).unwrap();
-        assert!(barcode_result.barcode.is_some(), "Barcode should be present");
-        
-        let barcode = barcode_result.barcode.unwrap();
-        let barcode_seq = barcode.raw.sequence();
-        
-        //println!("Extracted barcode sequence: {:?}", String::from_utf8_lossy(barcode_seq));
-        //println!("Original phase block sequence: {:?}", String::from_utf8_lossy(phase_block_data));
-        //println!("Expected phase block length: {}", expected_phase_block_length);
-        //println!("Actual extracted barcode length: {}", barcode_seq.len());
-        
-        // Although our code finds the pattern after the phase block, it doesn't appear to be
-        // adjusting the phase block length. We'll update our test to match the actual behavior.
-        assert_eq!(barcode_seq.len(), expected_phase_block_length, 
-                   "The extracted barcode length should match the expected phase block length");
-    }
-
-    #[test]
-    fn test_multiple_barcodes_with_phase_block() {
-        // Initialize logging for debugging
-        let _ = env_logger::builder()
-            .filter_level(log::LevelFilter::Debug)
-            .is_test(true)
-            .try_init();
-        
-        // Set up a test sequence with:
-        // 1. Barcode region 1
-        // 2. Phase block region
-        // 3. Fixed pattern region
-        // 4. Barcode region 2 (after fixed pattern)
-        // 5. The rest of the sequence
-        let barcode1_data = b"ACGTACGTACGT";      // 12bp first barcode
-        let phase_block_data = b"NNNNNNNNNN";     // 10bp phase block
-        let fixed_pattern = b"CGTAG";             // 5bp fixed pattern
-        let barcode2_data = b"TGCATGCATGCA";      // 12bp second barcode
-        let rest_data = b"GGGGGGG";               // 7bp remaining sequence
-        
-        println!("Setting up test with:");
-        println!("  Barcode1: {} (len={})", String::from_utf8_lossy(barcode1_data), barcode1_data.len());
-        println!("  Phase block: {} (len={})", String::from_utf8_lossy(phase_block_data), phase_block_data.len());
-        println!("  Fixed pattern: {} (len={})", String::from_utf8_lossy(fixed_pattern), fixed_pattern.len());
-        println!("  Barcode2: {} (len={})", String::from_utf8_lossy(barcode2_data), barcode2_data.len());
-        
-        // Calculate positions
-        let barcode1_end = barcode1_data.len();
-        let phase_block_end = barcode1_end + phase_block_data.len();
-        let fixed_pattern_end = phase_block_end + fixed_pattern.len();
-        let barcode2_end = fixed_pattern_end + barcode2_data.len();
-        
-        // Combine sequences to create the full test sequence
-        let mut full_seq = Vec::new();
-        full_seq.extend_from_slice(barcode1_data);
-        full_seq.extend_from_slice(phase_block_data);
-        full_seq.extend_from_slice(fixed_pattern);
-        full_seq.extend_from_slice(barcode2_data);
-        full_seq.extend_from_slice(rest_data);
-        
-        // Create quality scores of the same length
-        let quality = vec![b'I'; full_seq.len()];
-        
-        // Create a FASTQ record with this sequence
-        let fastq_record = fastq::Record::new(
-            fastq::record::Definition::new("test_read", ""),
-            full_seq.clone(),
-            quality.clone()
-        );
-        
-        println!("Full sequence: {}", String::from_utf8_lossy(&full_seq));
-        println!("Full sequence length: {}", full_seq.len());
-        
-        // Create a LibSpec with all required regions
-        let lib_spec = LibSpec::new(vec![
-            Region {
-                region_id: "test_modality".to_string(),
-                region_type: RegionType::Modality(Modality::RNA),
-                name: "Test Modality".to_string(),
-                sequence_type: SequenceType::Joined,
-                sequence: "".to_string(),
-                min_len: 0,
-                max_len: 100,
-                onlist: None,
-                subregions: vec![
-                    Arc::new(RwLock::new(Region {
-                        region_id: "barcode1_region".to_string(),
-                        region_type: RegionType::Barcode,
-                        name: "Barcode 1".to_string(),
-                        sequence_type: SequenceType::Random,
-                        sequence: "".to_string(),
-                        min_len: barcode1_data.len() as u32,
-                        max_len: barcode1_data.len() as u32,
-                        onlist: None,
-                        subregions: vec![],
-                    })),
-                    Arc::new(RwLock::new(Region {
-                        region_id: "phase_block_region".to_string(),
-                        region_type: RegionType::PhaseBlock,
-                        name: "Phase Block".to_string(),
-                        sequence_type: SequenceType::Random,
-                        sequence: "".to_string(),
-                        min_len: 5,
-                        max_len: 15,
-                        onlist: None,
-                        subregions: vec![],
-                    })),
-                    Arc::new(RwLock::new(Region {
-                        region_id: "fixed_region".to_string(),
-                        region_type: RegionType::Named,
-                        name: "Fixed Region".to_string(),
-                        sequence_type: SequenceType::Fixed,
-                        sequence: String::from_utf8(fixed_pattern.to_vec()).unwrap(),
-                        min_len: fixed_pattern.len() as u32,
-                        max_len: fixed_pattern.len() as u32,
-                        onlist: None,
-                        subregions: vec![],
-                    })),
-                    Arc::new(RwLock::new(Region {
-                        region_id: "barcode2_region".to_string(),
-                        region_type: RegionType::Barcode,
-                        name: "Barcode 2".to_string(),
-                        sequence_type: SequenceType::Random,
-                        sequence: "".to_string(),
-                        min_len: barcode2_data.len() as u32,
-                        max_len: barcode2_data.len() as u32,
-                        onlist: None,
-                        subregions: vec![],
-                    })),
-                ],
-            }
-        ]).unwrap();
-        
-        // Create a whitelist for both barcodes
-        let mut whitelist = IndexMap::new();
-        
-        // Add first barcode to whitelist
-        let mut barcode1_counts = OligoFrequncy::default();
-        barcode1_counts.insert(barcode1_data.to_vec(), 100);
-        whitelist.insert("barcode1_region".to_string(), barcode1_counts);
-        
-        // Add second barcode to whitelist
-        let mut barcode2_counts = OligoFrequncy::default();
-        barcode2_counts.insert(barcode2_data.to_vec(), 100);
-        whitelist.insert("barcode2_region".to_string(), barcode2_counts);
-        
-        // Create a FastqAnnotator with both barcodes, phase block, and fixed pattern
-        let annotator = FastqAnnotator {
-            whitelists: whitelist,
-            corrector: BarcodeCorrector::default(),
-            is_reverse: false,
-            subregions: vec![
-                SegmentInfoElem {
-                    region_id: "barcode1_region".to_string(),
-                    region_type: SegmentType::R(RegionType::Barcode),
-                    range: 0..barcode1_end as u32,
-                },
-                SegmentInfoElem {
-                    region_id: "phase_block_region".to_string(),
-                    region_type: SegmentType::R(RegionType::PhaseBlock),
-                    range: barcode1_end as u32..phase_block_end as u32,
-                },
-                SegmentInfoElem {
-                    region_id: "fixed_region".to_string(),
-                    region_type: SegmentType::R(RegionType::Named),
-                    range: phase_block_end as u32..fixed_pattern_end as u32,
-                },
-                SegmentInfoElem {
-                    region_id: "barcode2_region".to_string(),
-                    region_type: SegmentType::R(RegionType::Barcode),
-                    range: fixed_pattern_end as u32..barcode2_end as u32,
-                }
-            ],
-            original_segments: vec![
-                SegmentInfoElem {
-                    region_id: "barcode1_region".to_string(),
-                    region_type: SegmentType::R(RegionType::Barcode),
-                    range: 0..barcode1_end as u32,
-                },
-                SegmentInfoElem {
-                    region_id: "phase_block_region".to_string(),
-                    region_type: SegmentType::R(RegionType::PhaseBlock),
-                    range: barcode1_end as u32..phase_block_end as u32,
-                },
-                SegmentInfoElem {
-                    region_id: "fixed_region".to_string(),
-                    region_type: SegmentType::R(RegionType::Named),
-                    range: phase_block_end as u32..fixed_pattern_end as u32,
-                },
-                SegmentInfoElem {
-                    region_id: "barcode2_region".to_string(),
-                    region_type: SegmentType::R(RegionType::Barcode),
-                    range: fixed_pattern_end as u32..barcode2_end as u32,
-                }
-            ],
-            min_len: full_seq.len(),
-            max_len: full_seq.len(),
-            library_spec: Arc::new(RwLock::new(lib_spec)),
-        };
-        
-        // Test pattern detection
-        let search_start = phase_block_end;
-        let remaining = &full_seq[search_start..];
-        assert_eq!(find_pattern(remaining, fixed_pattern), Some(0), 
-            "Pattern should be found at start of fixed region");
-            
-        // Now run the annotate method and check the results
-        let result = annotator.annotate(&fastq_record).unwrap();
-        
-        // Verify we have a barcode in the result
-        assert!(result.barcode.is_some(), "Barcode should be present in result");
-        
-        // Get the barcode sequence and analyze it
-        let barcode = result.barcode.unwrap();
-        let barcode_seq = barcode.raw.sequence();
-        
-        println!("Extracted barcode sequence: {}", String::from_utf8_lossy(barcode_seq));
-        println!("Extracted barcode length: {}", barcode_seq.len());
-        
-        // The barcode should include all barcode regions and the phase block
-        let expected_barcode_len = barcode1_data.len() + barcode2_data.len();
-        assert_eq!(barcode_seq.len(), expected_barcode_len, 
-                  "Barcode sequence should include barcode1 + phase block + barcode2");
-                   
-        // Check the sequence components:
-        // 1. It should start with the barcode1 data
-        let barcode1_portion = &barcode_seq[0..barcode1_data.len()];
-        assert_eq!(barcode1_portion, barcode1_data, 
-                  "Barcode sequence should start with barcode1 data");
-                  
-        // 2. Then should have the phase block portion
-        let phase_block_portion = &barcode_seq[barcode1_data.len()..barcode1_data.len() + phase_block_data.len()];
-        assert_eq!(phase_block_portion.len(), phase_block_data.len(),
-                  "Phase block portion should have the expected length");
-                  
-                  
-        // Also verify we don't have any read or UMI data in this test
-        assert!(result.read1.is_none() && result.read2.is_none(), 
-               "No read1 or read2 should be present in this test");
-        assert!(result.umi.is_none(), "No UMI should be present in this test");
-    }
-
-    #[test]
-    fn test_barcode_with_phase_block_adjustment() {
-        // Initialize logging for debugging
-        let _ = env_logger::builder()
-            .filter_level(log::LevelFilter::Debug)
-            .is_test(true)
-            .try_init();
-        
-        // Set up a test sequence with:
-        // 1. A barcode region
-        // 2. A phase block region
-        // 3. A fixed pattern region
-        // 4. The rest of the sequence
-        let barcode_data = b"ACGTACGTACGT";       // 12bp barcode
-        let phase_block_data = b"NNNNNNNNNN";      // 10bp phase block (variable length)
-        let fixed_pattern = b"CGTAG";             // 5bp fixed pattern
-        let rest_data = b"TTTTTTTTTTT";           // 11bp remaining sequence
-        
-        println!("Setting up test with:");
-        println!("  Barcode: {} (len={})", String::from_utf8_lossy(barcode_data), barcode_data.len());
-        println!("  Phase block: {} (len={})", String::from_utf8_lossy(phase_block_data), phase_block_data.len());
-        println!("  Fixed pattern: {} (len={})", String::from_utf8_lossy(fixed_pattern), fixed_pattern.len());
-        
-        // Calculate positions
-        let barcode_end = barcode_data.len();
-        let phase_block_end = barcode_end + phase_block_data.len();
-        let fixed_pattern_end = phase_block_end + fixed_pattern.len();
-        
-        // Combine sequences to create the full test sequence
-        let mut full_seq = Vec::new();
-        full_seq.extend_from_slice(barcode_data);
-        full_seq.extend_from_slice(phase_block_data);
-        full_seq.extend_from_slice(fixed_pattern);
-        full_seq.extend_from_slice(rest_data);
-        
-        // Create quality scores of the same length
-        let quality = vec![b'I'; full_seq.len()];
-        
-        // Create a FASTQ record with this sequence
-        let fastq_record = fastq::Record::new(
-            fastq::record::Definition::new("test_read", ""),
-            full_seq.clone(),
-            quality.clone()
-        );
-        
-        println!("Full sequence: {}", String::from_utf8_lossy(&full_seq));
-        println!("Full sequence length: {}", full_seq.len());
-        
-        // Create a LibSpec with all required regions
-        let lib_spec = LibSpec::new(vec![
-            Region {
-                region_id: "test_modality".to_string(),
-                region_type: RegionType::Modality(Modality::RNA),
-                name: "Test Modality".to_string(),
-                sequence_type: SequenceType::Joined,
-                sequence: "".to_string(),
-                min_len: 0,
-                max_len: 100,
-                onlist: None,
-                subregions: vec![
-                    Arc::new(RwLock::new(Region {
-                        region_id: "barcode_region".to_string(),
-                        region_type: RegionType::Barcode,
-                        name: "Barcode".to_string(),
-                        sequence_type: SequenceType::Random,
-                        sequence: "".to_string(),
-                        min_len: barcode_data.len() as u32,
-                        max_len: barcode_data.len() as u32,
-                        onlist: None,
-                        subregions: vec![],
-                    })),
-                    Arc::new(RwLock::new(Region {
-                        region_id: "phase_block_region".to_string(),
-                        region_type: RegionType::PhaseBlock,
-                        name: "Phase Block".to_string(),
-                        sequence_type: SequenceType::Random,
-                        sequence: "".to_string(),
-                        min_len: 5,
-                        max_len: 15,
-                        onlist: None,
-                        subregions: vec![],
-                    })),
-                    Arc::new(RwLock::new(Region {
-                        region_id: "fixed_region".to_string(),
-                        region_type: RegionType::Named,
-                        name: "Fixed Region".to_string(),
-                        sequence_type: SequenceType::Fixed,
-                        sequence: String::from_utf8(fixed_pattern.to_vec()).unwrap(),
-                        min_len: fixed_pattern.len() as u32,
-                        max_len: fixed_pattern.len() as u32,
-                        onlist: None,
-                        subregions: vec![],
-                    })),
-                ],
-            }
-        ]).unwrap();
-        
-        // Create a whitelist - needed for barcode processing
-        let mut whitelist = IndexMap::new();
-        let mut barcode_counts = OligoFrequncy::default();
-        // Add the barcode to the counts so it's recognized
-        barcode_counts.insert(barcode_data.to_vec(), 100);
-        whitelist.insert("barcode_region".to_string(), barcode_counts);
-        
-        // Create a FastqAnnotator to test with barcode, phase block, and fixed pattern
-        let annotator = FastqAnnotator {
-            whitelists: whitelist,
-            corrector: BarcodeCorrector::default(),
-            is_reverse: false,
-            subregions: vec![
-                SegmentInfoElem {
-                    region_id: "barcode_region".to_string(),
-                    region_type: SegmentType::R(RegionType::Barcode),
-                    range: 0..barcode_end as u32,
-                },
-                SegmentInfoElem {
-                    region_id: "phase_block_region".to_string(),
-                    region_type: SegmentType::R(RegionType::PhaseBlock),
-                    range: barcode_end as u32..phase_block_end as u32,
-                },
-                SegmentInfoElem {
-                    region_id: "fixed_region".to_string(),
-                    region_type: SegmentType::R(RegionType::Named),
-                    range: phase_block_end as u32..fixed_pattern_end as u32,
-                }
-            ],
-            original_segments: vec![
-                SegmentInfoElem {
-                    region_id: "barcode_region".to_string(),
-                    region_type: SegmentType::R(RegionType::Barcode),
-                    range: 0..barcode_end as u32,
-                },
-                SegmentInfoElem {
-                    region_id: "phase_block_region".to_string(),
-                    region_type: SegmentType::R(RegionType::PhaseBlock),
-                    range: barcode_end as u32..phase_block_end as u32,
-                },
-                SegmentInfoElem {
-                    region_id: "fixed_region".to_string(),
-                    region_type: SegmentType::R(RegionType::Named),
-                    range: phase_block_end as u32..fixed_pattern_end as u32,
-                }
-            ],
-            min_len: full_seq.len(),
-            max_len: full_seq.len(),
-            library_spec: Arc::new(RwLock::new(lib_spec)),
-        };
-        
-        // Test pattern detection - verify the pattern can be found
-        let search_start = phase_block_end;
-        let remaining = &full_seq[search_start..];
-        assert_eq!(find_pattern(remaining, fixed_pattern), Some(0), 
-            "Pattern should be found at start of fixed region");
-            
-        // Now run the annotate method and check the results
-        let result = annotator.annotate(&fastq_record).unwrap();
-        
-        // Verify we have a barcode in the result
-        assert!(result.barcode.is_some(), "Barcode should be present in result");
-        
-        // Get the barcode sequence and analyze it
-        let barcode = result.barcode.unwrap();
-        let barcode_seq = barcode.raw.sequence();
-        
-        // The barcode should include both the original barcode AND the phase block
-
-        // Check the sequence itself - it should start with the barcode data
-        let barcode_prefix = &barcode_seq[0..barcode_data.len()];
-        assert_eq!(barcode_prefix, barcode_data, 
-                   "Barcode sequence should start with the original barcode data");
-
-        assert!(result.read1.is_none() && result.read2.is_none(), 
-               "No read1 or read2 should be present in this test");
-        assert!(result.umi.is_none(), "No UMI should be present in this test");
-    }
-
-    #[test]
-    fn test_user_specific_sequence_pattern_matching() {
-        // Initialize logging for debugging
-        let _ = env_logger::builder()
-            .filter_level(log::LevelFilter::Debug)
-            .is_test(true)
-            .try_init();
-        
-        // The test sequence provided by the user
-        let sequence = b"NGGTACGAAGCTATGCATGACTGTCGCTAGTCACTGAGATTGCCTTCGTCGGCAGCGTCAGATGTGTATAAGAGACAGGCATTCAAGTCACAGAGTAGAACATTCCCATTCATAGAGCAGATTTGAAACATTCTTTTTGTAGNATCTGGA";
-        
-        // The fixed pattern to search for
-        let fixed_pattern = b"TATGCATGAC";
-        
-        // Barcode length and phase block info
-        let barcode_length = 7;
-        let phase_block_start = 0;
-        let phase_block_end = 4;
-        
-        println!("Test sequence: {}", String::from_utf8_lossy(sequence));
-        println!("Fixed pattern: {}", String::from_utf8_lossy(fixed_pattern));
-        println!("Barcode length: {}", barcode_length);
-        println!("Phase block: {}-{}", phase_block_start, phase_block_end);
-        
-        // Create a FASTQ record with this sequence (with dummy quality scores)
-        let quality = vec![b'I'; sequence.len()];
-        let record = fastq::Record::new(
-            fastq::record::Definition::new("test_read", ""),
-            sequence.to_vec(),
-            quality
-        );
-        
-        // Test 1: Find the pattern exactly
-        let pattern_pos = find_pattern(sequence, fixed_pattern);
-        println!("Exact pattern position: {:?}", pattern_pos);
-        
-        // After looking at the sequence, we can see the pattern "TATGCATGAC" starts at position 11 in the sequence
-        // (positions 0-10 are "NGGTACGAAGC")
-        assert_eq!(pattern_pos, Some(11), 
-            "Pattern '{}' should be found at position 11 in the sequence", 
-            String::from_utf8_lossy(fixed_pattern));
-        
-        // Test 4: Introduce one mismatch in the pattern and verify detection
-        let mut modified_pattern = fixed_pattern.to_vec();
-        modified_pattern[2] = b'A';  // Change 'T' to 'A' in the pattern
-        let modified_pattern_str = String::from_utf8_lossy(&modified_pattern);
-        
-        // Now search with this modified pattern
-        let modified_pattern_pos = find_pattern(sequence, &modified_pattern);
-        assert_eq!(modified_pattern_pos, None,
-            "Modified pattern '{}' should not be found with exact matching", 
-            modified_pattern_str);
-        // Test 5: Create a scenario for phase block adjustment
-        // Simulate a LibSpec with the necessary regions
-        let lib_spec = LibSpec::new(vec![
-            Region {
-                region_id: "test_modality".to_string(),
-                region_type: RegionType::Modality(Modality::RNA),
-                name: "Test Modality".to_string(),
-                sequence_type: SequenceType::Joined,
-                sequence: "".to_string(),
-                min_len: 0,
-                max_len: sequence.len() as u32,
-                onlist: None,
-                subregions: vec![
-                    Arc::new(RwLock::new(Region {
-                        region_id: "barcode_region".to_string(),
-                        region_type: RegionType::Barcode,
-                        name: "Barcode".to_string(),
-                        sequence_type: SequenceType::Random,
-                        sequence: "".to_string(),
-                        min_len: barcode_length as u32,
-                        max_len: barcode_length as u32,
-                        onlist: None,
-                        subregions: vec![],
-                    })),
-                    Arc::new(RwLock::new(Region {
-                        region_id: "phase_block_region".to_string(),
-                        region_type: RegionType::PhaseBlock,
-                        name: "Phase Block".to_string(),
-                        sequence_type: SequenceType::Random,
-                        sequence: "".to_string(),
-                        min_len: 1,
-                        max_len: 15,  // Increased max_len to ensure it can find the pattern
-                        onlist: None,
-                        subregions: vec![],
-                    })),
-                    Arc::new(RwLock::new(Region {
-                        region_id: "fixed_region".to_string(),
-                        region_type: RegionType::Named,
-                        name: "Fixed Region".to_string(),
-                        sequence_type: SequenceType::Fixed,
-                        sequence: String::from_utf8(fixed_pattern.to_vec()).unwrap(),
-                        min_len: fixed_pattern.len() as u32,
-                        max_len: fixed_pattern.len() as u32,
-                        onlist: None,
-                        subregions: vec![],
-                    })),
-                ],
-            }
-        ]).unwrap();
-        
-        // Create segments that represent the structure of the test sequence
-        let segments = vec![
-            SegmentInfoElem {
-                region_id: "barcode_region".to_string(),
-                region_type: SegmentType::R(RegionType::Barcode),
-                range: 0..barcode_length as u32,
-            },
-            SegmentInfoElem {
-                region_id: "phase_block_region".to_string(),
-                region_type: SegmentType::R(RegionType::PhaseBlock),
-                range: phase_block_start as u32..phase_block_end as u32,
-            },
-            SegmentInfoElem {
-                region_id: "fixed_region".to_string(),
-                region_type: SegmentType::R(RegionType::Named),
-                range: 11..21,  // Where the fixed pattern is actually found (position 11)
-            }
-        ];
-        
-        // Test the phase block adjustment function with this setup
-        let phase_block_adjustments = calculate_phase_block_adjustments(
-            &segments, 
-            &record,
-            &Arc::new(RwLock::new(lib_spec))
-        );
-        
-        println!("Phase block adjustments: {:?}", phase_block_adjustments);
-        
-        // Verify that the phase block (segment index 1) got adjusted
-        assert!(phase_block_adjustments.contains_key(&1), 
-               "Phase block should have an adjustment entry");
-        
-        if let Some(&adjusted_end) = phase_block_adjustments.get(&1) {
-            println!("Phase block adjusted to end at position: {}", adjusted_end);
-            // The phase block should end at position 11, where the fixed pattern starts
-            assert_eq!(adjusted_end, 11, 
-                     "Phase block should be adjusted to end at position 11, where the fixed pattern starts");
+    fn test_fq(input: &str, output: &str) {
+        let assay = Assay::from_path(input).unwrap();
+        let mut fq_proc = FastqProcessor::new(assay).with_modality(Modality::RNA);
+        let file = std::fs::File::open(output).unwrap();
+        let reader = std::io::BufReader::new(flate2::read::GzDecoder::new(file));
+        for (fq, line) in fq_proc
+            .gen_barcoded_fastq(false)
+            .flatten()
+            .zip(reader.lines())
+        {
+            assert_eq!(show_fq(&fq), line.unwrap());
         }
     }
 
     #[test]
-    fn test_find_pattern_with_mismatches_simple() {
-        // Test exact matching (0 mismatches)
-        let haystack = b"ACGTACGTACGT";
-        let needle = b"ACGT";
+    fn test_io() {
+        let seqspec = "data/test4.yaml";
+        let assay = Assay::from_path(seqspec).unwrap();
+        let mut fq_proc = FastqProcessor::new(assay).with_modality(Modality::RNA);
+        // open a file
+        let file = std::fs::File::create("test.out").unwrap();
+        let mut writer = std::io::BufWriter::new(file);
+        for fq in fq_proc.gen_barcoded_fastq(false).flatten() {
+            writeln!(writer, "{}", show_fq(&fq)).unwrap();
+        }
+    }
 
-        // Now test the new find_best_pattern_match function
-        // Test exact matches
-        let (pos, mismatches) = find_best_pattern_match(haystack, needle);
-        assert_eq!(pos, Some(0));
-        assert_eq!(mismatches, 0);
-        
-        // Test with mismatches
-        let (pos, mismatches) = find_best_pattern_match(haystack, b"ACXT");
-        assert_eq!(pos, Some(0));
-        assert_eq!(mismatches, 1);
-        
-        // Test with multiple possible positions - should return the one with minimal mismatches
-        let multi_pos_haystack = b"ACGTXXXTACGT";
-        let (pos, mismatches) = find_best_pattern_match(multi_pos_haystack, b"ACGT");
-        assert_eq!(pos, Some(0)); // Should match at position 0 with 0 mismatches
-        assert_eq!(mismatches, 0);
-        
-        // Test with a pattern that has mismatches everywhere, but lowest at some position
-        let varied_haystack = b"AXGTCCGTAAGTACCT";
-        let varied_needle = b"ACGT";
-        let (pos, mismatches) = find_best_pattern_match(varied_haystack, varied_needle);
-        assert_eq!(pos, Some(4)); // Position 4 has only 1 mismatch (C vs A)
-        assert_eq!(mismatches, 1);
+    #[test]
+    fn test_fastq() {
+        test_fq("data/test1.yaml", "data/test1.out.gz");
+        test_fq("data/test2.yaml", "data/test2.out.gz");
+        test_fq("data/test3.yaml", "data/test3.out.gz");
+        test_fq("data/test4.yaml", "data/test4.out.gz");
     }
 }
