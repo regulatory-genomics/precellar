@@ -1,6 +1,8 @@
 use super::aligners::{Aligner, MultiMap, MultiMapR};
 
-use crate::barcode::{BarcodeCorrector, OligoFrequncy, Whitelist, filter_cellular_barcodes_ordmag_advanced};
+use crate::barcode::{
+    filter_cellular_barcodes_ordmag_advanced, BarcodeCorrector, OligoFrequncy, Whitelist,
+};
 use crate::qc::{AlignQC, Metrics};
 use crate::utils::{rev_compl, rev_compl_fastq_record};
 use anyhow::{bail, Result};
@@ -13,15 +15,15 @@ use noodles::{bam, fastq};
 use rayon::iter::ParallelIterator;
 use rayon::slice::ParallelSlice;
 use seqspec::{Assay, FastqReader, Modality, Read, RegionId, SegmentInfo};
+use serde_json;
 use smallvec::SmallVec;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
-use serde_json;
 
 /// FastqProcessor manages the preprocessing of FASTQ files including barcode correction,
 /// alignment, and QC metrics.
 pub struct FastqProcessor {
-    assay: Assay, // Specification of sequencing assay.
+    assay: Assay,                         // Specification of sequencing assay.
     current_modality: Option<Modality>, // Current sequencing modality being processed (e.g., RNA, ATAC).
     mito_dna: HashSet<String>, // Set of mitochondrial DNA sequence identifiers for special handling.
     metrics: HashMap<Modality, Metrics>, // Quality control metrics for each modality.
@@ -46,7 +48,7 @@ impl FastqProcessor {
             align_qc: HashMap::new(),
             mito_dna: HashSet::new(),
             barcode_correct_prob: 0.975,
-            mismatch_in_barcode: 2,
+            mismatch_in_barcode: 1,
             expected_cells: None,
             barcode_filtering_quantile: 0.99,
             barcode_bootstrap_samples: 100,
@@ -63,12 +65,12 @@ impl FastqProcessor {
         self.expected_cells = Some(cells);
         self
     }
-    
+
     pub fn with_barcode_filtering_params(
-        mut self, 
-        quantile: f64, 
+        mut self,
+        quantile: f64,
         bootstrap_samples: usize,
-        metrics_path: Option<&std::path::Path>
+        metrics_path: Option<&std::path::Path>,
     ) -> Self {
         self.barcode_filtering_quantile = quantile;
         self.barcode_bootstrap_samples = bootstrap_samples;
@@ -121,7 +123,7 @@ impl FastqProcessor {
         chunk_size: usize,
     ) -> impl Iterator<Item = Vec<(Option<MultiMapR>, Option<MultiMapR>)>> + 'a {
         let fq_reader = self.gen_barcoded_fastq(true).with_chunk_size(chunk_size);
-        
+
         let header = aligner.header();
         let mut qc = AlignQC::default();
         self.mito_dna.iter().for_each(|mito| {
@@ -153,7 +155,7 @@ impl FastqProcessor {
                     debug!("No alignment found for read");
                 }
             });
-            
+
             progress_bar.update(results.len()).unwrap();
             results
         })
@@ -186,7 +188,8 @@ impl FastqProcessor {
             .assay
             .get_segments_by_modality(modality)
             .filter_map(|(read, segment_info)| {
-                let annotator = FastqAnnotator::new(read, segment_info, &whitelists, corrector.clone())?;
+                let annotator =
+                    FastqAnnotator::new(read, segment_info, &whitelists, corrector.clone())?;
                 let reader = read.open()?;
                 Some((annotator, reader))
             })
@@ -199,6 +202,45 @@ impl FastqProcessor {
     }
 
     fn count_barcodes(&mut self) -> Result<IndexMap<RegionId, Whitelist>> {
+        let modality = self.modality();
+        let mut whitelists = self.get_whitelists();
+
+        self.assay
+            .get_segments_by_modality(modality)
+            .for_each(|(read, segment_info)| {
+                let is_reverse = read.is_reverse();
+                if let Some(mut reader) = read.open() {
+                    for fq in reader.records() {
+                        let fq = fq.unwrap();
+                        segment_info.split(&fq).unwrap().iter().for_each(|segment| {
+                            if segment.is_barcode() {
+                                let wl = whitelists.get_mut(segment.region_id()).expect(&format!(
+                                    "whitelist not found for region {}",
+                                    segment.region_id()
+                                ));
+                                if is_reverse {
+                                    wl.count_barcode(
+                                        &rev_compl(segment.seq),
+                                        &segment.qual.iter().rev().copied().collect::<Vec<_>>(),
+                                    );
+                                } else {
+                                    wl.count_barcode(segment.seq, segment.qual);
+                                }
+                            }
+                        });
+                    }
+                }
+            });
+
+        self.metrics.entry(modality).or_default().insert(
+            "frac_q30_bases_barcode".to_string(),
+            whitelists.values().map(|x| x.frac_q30_bases()).sum::<f64>() / whitelists.len() as f64,
+        );
+        Ok(whitelists)
+    }
+
+    /*
+    fn count_barcodes(&mut self) -> Result<IndexMap<RegionId, Whitelist>> {
         let mut whitelists = self.get_whitelists();
         debug!("Number of whitelists found: {}", whitelists.len());
 
@@ -209,32 +251,35 @@ impl FastqProcessor {
         let modality = self.modality();
         let mut total_filtered_bcs = 0;
 
-        debug!("Starting barcode counting process. Metrics path is: {:?}", self.metrics_path);
-        
-        self
-            .assay.get_segments_by_modality(modality)
+        debug!(
+            "Starting barcode counting process. Metrics path is: {:?}",
+            self.metrics_path
+        );
+
+        self.assay
+            .get_segments_by_modality(modality)
             .filter(|(_, segments)| segments.iter().any(|x| x.region_type.is_barcode()))
             .for_each(|(read, segment_info)| {
-            let is_reverse = read.is_reverse();
-            if let Some(mut reader) = read.open() {
-                for fq in reader.records() {
-                    let fq = fq.unwrap();
-                    segment_info.split(&fq).unwrap().iter().for_each(|segment| {
-                        if segment.is_barcode() {
-                            if let Some(wl) = whitelists.get_mut(segment.region_id()) {
-                                if is_reverse {
-                                    wl.count_barcode(
-                                        &rev_compl(segment.seq),
-                                        &segment.qual.iter().rev().copied().collect::<Vec<_>>(),
-                                    );
-                                } else {
-                                    wl.count_barcode(segment.seq, segment.qual);
+                let is_reverse = read.is_reverse();
+                if let Some(mut reader) = read.open() {
+                    for fq in reader.records() {
+                        let fq = fq.unwrap();
+                        segment_info.split(&fq).unwrap().iter().for_each(|segment| {
+                            if segment.is_barcode() {
+                                if let Some(wl) = whitelists.get_mut(segment.region_id()) {
+                                    if is_reverse {
+                                        wl.count_barcode(
+                                            &rev_compl(segment.seq),
+                                            &segment.qual.iter().rev().copied().collect::<Vec<_>>(),
+                                        );
+                                    } else {
+                                        wl.count_barcode(segment.seq, segment.qual);
+                                    }
                                 }
                             }
-                        }
-                    });
+                        });
+                    }
                 }
-            }
             });
 
         // Apply advanced filtering to each whitelist if needed
@@ -242,21 +287,28 @@ impl FastqProcessor {
             // Check if this whitelist needs filtering (no predefined entries or has counts)
             let is_empty = whitelist.get_barcode_counts().is_empty();
             let has_predefined_whitelist = !is_empty;
-            
-            if !has_predefined_whitelist  {
-                info!("No predefined whitelist for '{}', applying order-of-magnitude filtering", id);
-                
+
+            if !has_predefined_whitelist {
+                info!(
+                    "No predefined whitelist for '{}', applying order-of-magnitude filtering",
+                    id
+                );
 
                 // Create metrics file path if metrics_path is provided
                 let metrics_file_path = self.metrics_path.as_ref().map(|path| {
                     let file_name = format!("barcode_metrics_{}.json", id);
                     let full_path = path.join(file_name);
-                    debug!("Creating metrics file path: {:?} for barcode region: {}", full_path, id);
+                    debug!(
+                        "Creating metrics file path: {:?} for barcode region: {}",
+                        full_path, id
+                    );
                     full_path
                 });
-                
-                debug!("Metrics path for barcode region {}: {:?}", id, metrics_file_path);
-                
+
+                debug!(
+                    "Metrics path for barcode region {}: {:?}",
+                    id, metrics_file_path
+                );
 
                 let results = filter_cellular_barcodes_ordmag_advanced(
                     whitelist,
@@ -266,137 +318,189 @@ impl FastqProcessor {
                     Some(self.barcode_filtering_quantile),
                     Some(self.barcode_bootstrap_samples),
                     metrics_file_path.as_deref(),
-
                 );
-                
+
                 info!(
                     "Found {} cellular barcodes (95% CI: {}-{}) for '{}' with counts >= {}",
-                    results.filtered_bcs, 
+                    results.filtered_bcs,
                     results.filtered_bcs_lb,
                     results.filtered_bcs_ub,
                     id,
                     results.filtered_bcs_cutoff
                 );
-                
+
                 total_filtered_bcs += results.filtered_bcs;
             } else {
                 info!("Using predefined whitelist for '{}'", id);
-                
+
                 // Create metrics file for predefined whitelists too
                 if let Some(metrics_path) = &self.metrics_path {
                     let file_name = format!("barcode_metrics_{}.json", id);
                     let full_path = metrics_path.join(file_name);
                     debug!("Creating metrics file path for predefined whitelist: {:?} for barcode region: {}", full_path, id);
-                    
+
                     // Create simple metrics structure
                     let mut metrics = serde_json::Map::new();
-                    metrics.insert("whitelist_id".to_string(), serde_json::Value::String(id.clone()));
+                    metrics.insert(
+                        "whitelist_id".to_string(),
+                        serde_json::Value::String(id.clone()),
+                    );
                     metrics.insert("is_predefined".to_string(), serde_json::Value::Bool(true));
-                    metrics.insert("total_barcodes".to_string(), serde_json::Value::Number(serde_json::Number::from(whitelist.get_barcode_counts().len())));
-                    
+                    metrics.insert(
+                        "total_barcodes".to_string(),
+                        serde_json::Value::Number(serde_json::Number::from(
+                            whitelist.get_barcode_counts().len(),
+                        )),
+                    );
+
                     // Add barcode-specific metrics
-                    metrics.insert("frac_valid_barcode".to_string(), serde_json::Value::Number(serde_json::Number::from_f64(whitelist.frac_exact_match()).unwrap_or(serde_json::Number::from(0))));
-                    metrics.insert("frac_q30_bases_barcode".to_string(), serde_json::Value::Number(serde_json::Number::from_f64(whitelist.frac_q30_bases()).unwrap_or(serde_json::Number::from(0))));
-                    
+                    metrics.insert(
+                        "frac_valid_barcode".to_string(),
+                        serde_json::Value::Number(
+                            serde_json::Number::from_f64(whitelist.frac_exact_match())
+                                .unwrap_or(serde_json::Number::from(0)),
+                        ),
+                    );
+                    metrics.insert(
+                        "frac_q30_bases_barcode".to_string(),
+                        serde_json::Value::Number(
+                            serde_json::Number::from_f64(whitelist.frac_q30_bases())
+                                .unwrap_or(serde_json::Number::from(0)),
+                        ),
+                    );
+
                     // Add general QC metrics from the processor's metrics if they exist
                     if let Some(modality_metrics) = self.metrics.get(&modality) {
                         // Add all existing metrics for this modality
                         for (metric_name, metric_value) in modality_metrics.iter() {
-                            metrics.insert(metric_name.clone(), serde_json::Value::Number(serde_json::Number::from_f64(*metric_value).unwrap_or(serde_json::Number::from(0))));
+                            metrics.insert(
+                                metric_name.clone(),
+                                serde_json::Value::Number(
+                                    serde_json::Number::from_f64(*metric_value)
+                                        .unwrap_or(serde_json::Number::from(0)),
+                                ),
+                            );
                         }
                     }
-                    
+
                     // Write metrics to file
                     if let Ok(file) = std::fs::File::create(&full_path) {
                         if let Err(e) = serde_json::to_writer_pretty(file, &metrics) {
-                            warn!("Failed to write metrics file for predefined whitelist '{}': {}", id, e);
+                            warn!(
+                                "Failed to write metrics file for predefined whitelist '{}': {}",
+                                id, e
+                            );
                         } else {
-                            debug!("Successfully wrote metrics for predefined whitelist '{}'", id);
+                            debug!(
+                                "Successfully wrote metrics for predefined whitelist '{}'",
+                                id
+                            );
                         }
                     } else {
-                        warn!("Failed to create metrics file for predefined whitelist '{}'", id);
+                        warn!(
+                            "Failed to create metrics file for predefined whitelist '{}'",
+                            id
+                        );
                     }
                 }
-                
+
                 // Count predefined barcodes toward the total
                 total_filtered_bcs += whitelist.get_barcode_counts().len();
             }
         }
-        
+
         // After processing all barcodes, write a consolidated metrics file
         if let Some(metrics_path) = &self.metrics_path {
             // Create a consolidated metrics file with all QC metrics
-            let consolidated_file_path = PathBuf::from(metrics_path).join("consolidated_qc_metrics.json");
-            debug!("Creating consolidated QC metrics file at: {:?}", consolidated_file_path);
-            
+            let consolidated_file_path =
+                PathBuf::from(metrics_path).join("consolidated_qc_metrics.json");
+            debug!(
+                "Creating consolidated QC metrics file at: {:?}",
+                consolidated_file_path
+            );
+
             if let Some(modality_metrics) = self.metrics.get(&modality) {
                 let mut consolidated_metrics = serde_json::Map::new();
-                
+
                 // Add all metrics for this modality
                 for (metric_name, metric_value) in modality_metrics.iter() {
                     consolidated_metrics.insert(
-                        metric_name.clone(), 
+                        metric_name.clone(),
                         serde_json::Value::Number(
-                            serde_json::Number::from_f64(*metric_value).unwrap_or(serde_json::Number::from(0))
-                        )
+                            serde_json::Number::from_f64(*metric_value)
+                                .unwrap_or(serde_json::Number::from(0)),
+                        ),
                     );
                 }
-                
+
                 // Add total filtered barcodes count
                 consolidated_metrics.insert(
                     "total_filtered_bcs".to_string(),
-                    serde_json::Value::Number(serde_json::Number::from(total_filtered_bcs))
+                    serde_json::Value::Number(serde_json::Number::from(total_filtered_bcs)),
                 );
-                
+
                 // Add average barcode quality metrics across all whitelists
                 consolidated_metrics.insert(
                     "frac_q30_bases_barcode".to_string(),
                     serde_json::Value::Number(
                         serde_json::Number::from_f64(
-                            whitelists.values().map(|x| x.frac_q30_bases()).sum::<f64>() / whitelists.len() as f64
-                        ).unwrap_or(serde_json::Number::from(0))
-                    )
+                            whitelists.values().map(|x| x.frac_q30_bases()).sum::<f64>()
+                                / whitelists.len() as f64,
+                        )
+                        .unwrap_or(serde_json::Number::from(0)),
+                    ),
                 );
-                
+
                 consolidated_metrics.insert(
                     "frac_valid_barcode".to_string(),
                     serde_json::Value::Number(
                         serde_json::Number::from_f64(
-                            whitelists.values().map(|x| x.frac_exact_match()).sum::<f64>() / whitelists.len() as f64
-                        ).unwrap_or(serde_json::Number::from(0))
-                    )
+                            whitelists
+                                .values()
+                                .map(|x| x.frac_exact_match())
+                                .sum::<f64>()
+                                / whitelists.len() as f64,
+                        )
+                        .unwrap_or(serde_json::Number::from(0)),
+                    ),
                 );
-                
+
                 // Write the consolidated metrics to file
                 if let Ok(file) = std::fs::File::create(&consolidated_file_path) {
                     if let Err(e) = serde_json::to_writer_pretty(file, &consolidated_metrics) {
                         warn!("Failed to write consolidated metrics file: {}", e);
                     } else {
-                        debug!("Successfully wrote consolidated QC metrics to {:?}", consolidated_file_path);
+                        debug!(
+                            "Successfully wrote consolidated QC metrics to {:?}",
+                            consolidated_file_path
+                        );
                     }
                 } else {
-                    warn!("Failed to create consolidated metrics file at {:?}", consolidated_file_path);
+                    warn!(
+                        "Failed to create consolidated metrics file at {:?}",
+                        consolidated_file_path
+                    );
                 }
             }
         }
-        
+
         if total_filtered_bcs > 0 {
-            self.metrics.entry(modality).or_default().insert(
-                "total_filtered_bcs".to_string(),
-                total_filtered_bcs as f64,
-            );
+            self.metrics
+                .entry(modality)
+                .or_default()
+                .insert("total_filtered_bcs".to_string(), total_filtered_bcs as f64);
         }
 
         self.metrics.entry(modality).or_default().insert(
             "frac_q30_bases_barcode".to_string(),
             whitelists.values().map(|x| x.frac_q30_bases()).sum::<f64>() / whitelists.len() as f64,
         );
-        
+
         Ok(whitelists)
     }
+    */
 
     fn get_whitelists(&self) -> IndexMap<RegionId, Whitelist> {
-        debug!("Getting whitelists for modality {:?}", self.modality());
         let regions = self
             .assay
             .library_spec
@@ -404,8 +508,7 @@ impl FastqProcessor {
             .unwrap()
             .read()
             .unwrap();
-        
-        let whitelists: IndexMap<RegionId, Whitelist> = regions
+        regions
             .subregions
             .iter()
             .filter_map(|r| {
@@ -413,10 +516,8 @@ impl FastqProcessor {
                 if r.region_type.is_barcode() {
                     let id = r.region_id.to_string();
                     let list = if let Some(onlist) = r.onlist.as_ref() {
-                        debug!("Found whitelist for barcode region {}", id);
                         Whitelist::new(onlist.read().unwrap())
                     } else {
-                        debug!("No whitelist found for barcode region {}, using empty list", id);
                         Whitelist::empty()
                     };
                     Some((id, list))
@@ -424,10 +525,7 @@ impl FastqProcessor {
                     None
                 }
             })
-            .collect();
-
-        debug!("Found {} whitelists", whitelists.len());
-        whitelists
+            .collect()
     }
 }
 
@@ -497,71 +595,43 @@ impl AnnotatedFastqReader {
 
     /// Read a chunk of records from the fastq files.
     fn read_chunk(&mut self) -> usize {
-        //info!("Starting to read chunk. Target chunk size: {}", self.chunk_size);
         self.chunk.clear();
 
         let mut accumulated_length = 0;
-        let mut _total_records = 0;
 
         while accumulated_length < self.chunk_size {
             let mut max_read = 0;
             let mut min_read = usize::MAX;
-            
-            // Track which readers failed/succeeded for this chunk
-            let mut successful_readers = 0;
-            let mut empty_readers = 0;
-            let mut error_readers = 0;
-            
             let records: SmallVec<[_; 4]> = self
                 .readers
                 .iter_mut()
-                .enumerate()
-                .flat_map(|(_i, reader)| {
-                    let result = reader.read_record(&mut self.buffer);
-                    
-                    if let Err(_e) = &result {
-                        error_readers += 1;
-                        return None;
-                    }
-                    
-                    let n = result.expect("error reading fastq record");
-                    
+                .flat_map(|reader| {
+                    let n = reader
+                        .read_record(&mut self.buffer)
+                        .expect("error reading fastq record");
+                    min_read = min_read.min(n);
+                    max_read = max_read.max(n);
                     if n > 0 {
-                        successful_readers += 1;
-                        min_read = min_read.min(n);
-                        max_read = max_read.max(n);
                         accumulated_length += self.buffer.sequence().len();
                         Some(self.buffer.clone())
                     } else {
-                        empty_readers += 1;
-                        min_read = 0;
                         None
                     }
                 })
                 .collect();
-            
-            
             if max_read == 0 {
-                debug!("No more records to read");
                 break;
-            } else if min_read == 0 && successful_readers > 0 {
-                // Existing commented code
+            } else if min_read == 0 {
+                panic!("Unequal number of reads in the chunk");
             } else {
-                _total_records += 1;
-                
-                // Check records for name consistency
-                if records.len() > 0 {
-                    assert!(
-                        records.iter().map(|r| r.name()).all_equal(),
-                        "read names mismatch"
-                    );
-                }
-                
+                assert!(
+                    records.iter().map(|r| r.name()).all_equal(),
+                    "read names mismatch"
+                );
                 self.chunk.push(records);
             }
         }
-        
-        debug!("Finished read_chunk, got {} chunk entries", self.chunk.len());
+
         self.chunk.len()
     }
 }
@@ -587,22 +657,11 @@ impl Iterator for AnnotatedFastqReader {
 
     fn next(&mut self) -> Option<Self::Item> {
         let n = self.read_chunk();
-        debug!("read_chunk returned {} entries", n);
-        
         if n == 0 {
-            debug!("No chunks read, returning None");
             None
         } else {
             let n = (n / 256).max(256);
             let annotators = &self.annotators;
-            
-            debug!("Processing chunk with {} annotators", annotators.len());
-            
-            if annotators.is_empty() {
-                debug!("ERROR: No annotators available!");
-                return None;
-            }
-            
             let result: Vec<AnnotatedFastq> = self
                 .chunk
                 .par_chunks(n)
@@ -611,9 +670,7 @@ impl Iterator for AnnotatedFastqReader {
                         records
                             .iter()
                             .enumerate()
-                            .map(|(i, record)|
-                                annotators[i].annotate(record).unwrap()
-                            )
+                            .map(|(i, record)| annotators[i].annotate(record).unwrap())
                             .reduce(|mut this, other| {
                                 this.join(other);
                                 this
@@ -624,7 +681,7 @@ impl Iterator for AnnotatedFastqReader {
                     })
                 })
                 .collect();
-            
+
             Some(result)
         }
     }
@@ -649,9 +706,9 @@ impl FastqAnnotator {
         whitelists: &IndexMap<String, Whitelist>,
         corrector: BarcodeCorrector,
     ) -> Option<Self> {
-        if !segment_info.iter().any(|x|
-                x.region_type.is_barcode() || x.region_type.is_umi() || x.region_type.is_target()
-        ) {
+        if !segment_info.iter().any(|x| {
+            x.region_type.is_barcode() || x.region_type.is_umi() || x.region_type.is_target()
+        }) {
             None
         } else {
             let whitelists = segment_info
@@ -683,7 +740,7 @@ impl FastqAnnotator {
                 self.max_len
             );
         }
-        
+
         let mut barcode: Option<Barcode> = None;
         let mut umi = None;
         let mut read1 = None;
@@ -707,7 +764,7 @@ impl FastqAnnotator {
                                     .map(|x| x.to_vec())
                             },
                         );
-                        
+
                         if let Some(bc) = &mut barcode {
                             bc.extend(&Barcode { raw: fq, corrected });
                         } else {
@@ -871,7 +928,6 @@ impl<'a, R: std::io::Read> Iterator for NameCollatedRecords<'a, R> {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -881,10 +937,18 @@ mod tests {
     fn show_fq(fq: &AnnotatedFastq) -> String {
         format!(
             "{}\t{}\t{}\t{}",
-            fq.barcode.as_ref().map_or("", |x| std::str::from_utf8(x.raw.sequence()).unwrap()),
-            fq.umi.as_ref().map_or("", |x| std::str::from_utf8(x.sequence()).unwrap()),
-            fq.read1.as_ref().map_or("", |x| std::str::from_utf8(x.sequence()).unwrap()),
-            fq.read2.as_ref().map_or("", |x| std::str::from_utf8(x.sequence()).unwrap())
+            fq.barcode
+                .as_ref()
+                .map_or("", |x| std::str::from_utf8(x.raw.sequence()).unwrap()),
+            fq.umi
+                .as_ref()
+                .map_or("", |x| std::str::from_utf8(x.sequence()).unwrap()),
+            fq.read1
+                .as_ref()
+                .map_or("", |x| std::str::from_utf8(x.sequence()).unwrap()),
+            fq.read2
+                .as_ref()
+                .map_or("", |x| std::str::from_utf8(x.sequence()).unwrap())
         )
     }
 
@@ -893,7 +957,11 @@ mod tests {
         let mut fq_proc = FastqProcessor::new(assay).with_modality(Modality::RNA);
         let file = std::fs::File::open(output).unwrap();
         let reader = std::io::BufReader::new(flate2::read::GzDecoder::new(file));
-        for (fq, line) in fq_proc.gen_barcoded_fastq(false).flatten().zip(reader.lines()) {
+        for (fq, line) in fq_proc
+            .gen_barcoded_fastq(false)
+            .flatten()
+            .zip(reader.lines())
+        {
             assert_eq!(show_fq(&fq), line.unwrap());
         }
     }

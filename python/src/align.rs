@@ -5,8 +5,8 @@ use anyhow::{bail, Result};
 use noodles::sam::{self, alignment::io::Write};
 use pyo3::prelude::*;
 use std::ops::DerefMut;
-use std::{collections::HashMap, path::PathBuf, str::FromStr, time::Instant};
-use log::{info, warn, debug};
+use std::{collections::HashMap, path::PathBuf, str::FromStr};
+use log::{info, debug};
 use serde_json;
 
 use precellar::{
@@ -157,9 +157,6 @@ pub fn align(
     barcode_bootstrap_samples: u32,
     qc_metrics_path: Option<PathBuf>,
 ) -> Result<HashMap<String, f64>> {
-    let start_time = Instant::now();
-    debug!("Starting alignment process");
-    
     let assay = match assay.extract::<PathBuf>() {
         Ok(p) => {
             debug!("Loading assay from path: {:?}", p);
@@ -175,11 +172,6 @@ pub fn align(
     debug!("Using modality: {:?}", modality);
     
     let mut aligner = AlignerRef::try_from(aligner)?;
-    debug!("Initialized aligner: {}", match &aligner {
-        AlignerRef::STAR(_) => "STAR",
-        AlignerRef::BWA(_) => "BWA-MEM2",
-    });
-    
     let header = aligner.header();
     let transcript_annotator = aligner.transcript_annotator();
 
@@ -192,7 +184,6 @@ pub fn align(
     if let Some(cells) = expected_cells {
         processor = processor.with_expected_cells(cells as usize);
     }
-    
 
     // Configure barcode filtering parameters and metrics path
     processor = processor
@@ -209,10 +200,8 @@ pub fn align(
         });
     }
 
-    info!("Generating alignments");
     let alignments: Box<dyn Iterator<Item = _>> = match &mut aligner {
         AlignerRef::STAR(ref mut aligner) => {
-            info!("Using STAR aligner");
             Box::new(processor.gen_barcoded_alignments(
                 aligner.deref_mut().deref_mut(),
                 num_threads,
@@ -220,7 +209,6 @@ pub fn align(
             ))
         },
         AlignerRef::BWA(ref mut aligner) => {
-            info!("Using BWA-MEM2 aligner");
             Box::new(processor.gen_barcoded_alignments(
                 aligner.deref_mut().deref_mut(),
                 num_threads,
@@ -232,7 +220,6 @@ pub fn align(
     debug!("Processing output type: {}", output_type);
     let result = match OutputType::try_from(output_type)? {
         OutputType::Alignment => {
-            debug!("Writing alignments to BAM file: {:?}", output);
             write_alignments(py, output, &header, alignments)?;
             let qc_map: HashMap<String, f64> = processor.get_report().into();
             
@@ -252,7 +239,6 @@ pub fn align(
             debug!("Using compression: {:?} with level: {:?}", compression, compression_level);
             
             let mut writer = create_file(output.clone(), compression, compression_level, num_threads as u32)?;
-            info!("Created output file: {:?}", output);
 
             let mut fragment_generator = FragmentGenerator::default();
             if let Some(dir) = temp_dir.clone() {
@@ -285,11 +271,9 @@ pub fn align(
             Ok(qc_map)
         }
         OutputType::GeneQuantification => {
-            info!("Starting gene quantification");
             let mut quantifier = Quantifier::new(transcript_annotator.unwrap());
             mito_dna.iter().for_each(|x| quantifier.add_mito_dna(x));
             let quant_qc = quantifier.quantify(&header, alignments, output.clone())?;
-            info!("Completed gene quantification, writing to: {:?}", output);
             let mut qc = processor.get_report();
             quant_qc.report(&mut qc);
             
@@ -306,8 +290,6 @@ pub fn align(
         }
     };
 
-    let elapsed = start_time.elapsed();
-    info!("Alignment process completed in {:.2?}", elapsed);
     result
 }
 
