@@ -44,6 +44,23 @@ fn txg_multiome(py: Python<'_>) -> Result<HashMap<&str, PathBuf>> {
 }
 
 #[pyfunction]
+fn sci_rna_seq3(py: Python<'_>) -> Result<HashMap<&str, PathBuf>> {
+    let rna_r1 = retrieve_file(
+        py,
+        "https://osf.io/download/wmhj5",
+        "md5:4fe3a8f5410f498138ae48498431577a",
+        "sci_rna_seq3_R1.fq.zst",
+    )?;
+    let rna_r2 = retrieve_file(
+        py,
+        "https://osf.io/download/nc3py",
+        "md5:7905d8bbcaf5834cebabfb262e896f83",
+        "sci_rna_seq3_R2.fq.zst",
+    )?;
+    Ok(HashMap::from([("R1", rna_r1), ("R2", rna_r2)]))
+}
+
+#[pyfunction]
 fn dsc_atac(py: Python<'_>) -> Result<HashMap<&str, PathBuf>> {
     let atac_r1 = retrieve_file(
         py,
@@ -75,6 +92,7 @@ pub(crate) fn register_examples(parent_module: &Bound<'_, PyModule>) -> PyResult
     let m = PyModule::new(parent_module.py(), "examples")?;
 
     m.add_function(wrap_pyfunction!(txg_multiome, &m)?)?;
+    m.add_function(wrap_pyfunction!(sci_rna_seq3, &m)?)?;
     m.add_function(wrap_pyfunction!(dsc_atac, &m)?)?;
 
     parent_module.add_submodule(&m)

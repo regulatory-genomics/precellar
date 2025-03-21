@@ -26,6 +26,9 @@ pip install 'git+https://github.com/regulatory-genomics/precellar.git#egg=precel
 
 ## Examples
 
+> [!NOTE]
+> You need to **change the paths to the reference genome** in the examples below.
+
 <details>
 <summary>10X scATAC-seq</summary>
 
@@ -77,9 +80,9 @@ print(qc)
 ```python
 import precellar
 
-data = precellar.examples.txg_multiome()
 assay = precellar.Assay('https://raw.githubusercontent.com/regulatory-genomics/precellar/refs/heads/main/seqspec_templates/10x_rna_atac.yaml')
 
+data = precellar.examples.txg_multiome()
 assay.add_illumina_reads('rna')
 assay.update_read('rna-R1', fastq=data['rna-R1'])
 assay.update_read('rna-R2', fastq=data['rna-R2'])
@@ -97,6 +100,8 @@ rna_qc = precellar.align(
     output_type="gene_quantification",
     num_threads=8,
 )
+print(rna_qc)
+
 atac_qc = precellar.align(
     assay,
     precellar.aligners.BWAMEM2("/data/Public/BWA_MEM2_index/GRCh38"),
@@ -105,9 +110,37 @@ atac_qc = precellar.align(
     output_type='fragment',
     num_threads=8,
 )
+print(atac_qc)
 ```
 
 </details>
+
+<details>
+<summary>sci-RNA-seq3</summary>
+
+```python
+import precellar
+
+assay = precellar.Assay('https://raw.githubusercontent.com/regulatory-genomics/precellar/refs/heads/main/seqspec_templates/sci_rna_seq3.yaml')
+
+data = precellar.examples.txg_multiome()
+assay.add_illumina_reads('rna')
+assay.update_read('R1', fastq=data['R1'])
+assay.update_read('R2', fastq=data['R2'])
+
+rna_qc = precellar.align(
+    assay,
+    precellar.aligners.STAR("STAR_reference/refdata-gex-GRCm39-2024-A"), 
+    modality="rna",
+    output="gene_matrix.h5ad",
+    output_type="gene_quantification",
+    num_threads=8,
+)
+print(rna_qc)
+```
+
+</details>
+
 
 <details>
 <summary>dscATAC-seq</summary>
@@ -115,9 +148,9 @@ atac_qc = precellar.align(
 ```python
 import precellar
 
-data = precellar.examples.dsc_atac()
 assay = precellar.Assay('https://raw.githubusercontent.com/regulatory-genomics/precellar/refs/heads/main/seqspec_templates/dscATAC.yaml')
 
+data = precellar.examples.dsc_atac()
 assay.update_read('R1', fastq=data['R1'])
 assay.update_read('R2', fastq=data['R2'])
 
@@ -129,6 +162,7 @@ atac_qc = precellar.align(
     output_type='fragment',
     num_threads=8,
 )
+print(atac_qc)
 ```
 
 </details>
