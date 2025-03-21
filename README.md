@@ -123,8 +123,7 @@ import precellar
 
 assay = precellar.Assay('https://raw.githubusercontent.com/regulatory-genomics/precellar/refs/heads/main/seqspec_templates/sci_rna_seq3.yaml')
 
-data = precellar.examples.txg_multiome()
-assay.add_illumina_reads('rna')
+data = precellar.examples.sci_rna_seq3()
 assay.update_read('R1', fastq=data['R1'])
 assay.update_read('R2', fastq=data['R2'])
 
