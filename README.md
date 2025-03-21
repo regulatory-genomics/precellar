@@ -26,7 +26,8 @@ pip install 'git+https://github.com/regulatory-genomics/precellar.git#egg=precel
 
 ## Examples
 
-### 10X scATAC-seq
+<details>
+<summary>10X scATAC-seq</summary>
 
 ```python
 import precellar
@@ -46,7 +47,10 @@ qc = precellar.align(
 print(qc)
 ```
 
-### 10X scRNA-seq
+</details>
+
+<details>
+<summary>10X scRNA-seq</summary>
 
 ```python
 import precellar
@@ -65,21 +69,25 @@ qc = precellar.align(
 print(qc)
 ```
 
-### 10X single-cell multiome (Gene expression + ATAC)
+</details>
+
+<details>
+<summary>10X single-cell multiome (Gene expression + ATAC)</summary>
 
 ```python
 import precellar
 
+data = precellar.examples.txg_multiome()
 assay = precellar.Assay('https://raw.githubusercontent.com/regulatory-genomics/precellar/refs/heads/main/seqspec_templates/10x_rna_atac.yaml')
 
 assay.add_illumina_reads('rna')
-assay.update_read('rna-R1', fastq='gex_R1.fastq.gz')
-assay.update_read('rna-R2', fastq='gex_R2.fastq.gz')
+assay.update_read('rna-R1', fastq=data['rna-R1'])
+assay.update_read('rna-R2', fastq=data['rna-R2'])
 
-assay.add_illumina_reads('atac')
-assay.update_read('atac-R1', fastq='atac_R1.fastq.gz')
-assay.update_read('atac-I2', fastq='atac_R2.fastq.gz')
-assay.update_read('atac-R2', fastq='atac_R3.fastq.gz')
+assay.add_illumina_reads('atac', forward_strand_workflow=True)
+assay.update_read('atac-I2', fastq=data['atac-I2'])
+assay.update_read('atac-R1', fastq=data['atac-R1'])
+assay.update_read('atac-R2', fastq=data['atac-R2'])
 
 rna_qc = precellar.align(
     assay,
@@ -87,7 +95,7 @@ rna_qc = precellar.align(
     modality="rna",
     output="gene_matrix.h5ad",
     output_type="gene_quantification",
-    num_threads=32,
+    num_threads=8,
 )
 atac_qc = precellar.align(
     assay,
@@ -95,8 +103,34 @@ atac_qc = precellar.align(
     modality="atac",
     output='fragments.tsv.zst',
     output_type='fragment',
-    num_threads=32,
+    num_threads=8,
 )
 ```
+
+</details>
+
+<details>
+<summary>dscATAC-seq</summary>
+
+```python
+import precellar
+
+data = precellar.examples.dsc_atac()
+assay = precellar.Assay('https://raw.githubusercontent.com/regulatory-genomics/precellar/refs/heads/main/seqspec_templates/dscATAC.yaml')
+
+assay.update_read('R1', fastq=data['R1'])
+assay.update_read('R2', fastq=data['R2'])
+
+atac_qc = precellar.align(
+    assay,
+    precellar.aligners.BWAMEM2("/data/Public/BWA_MEM2_index/GRCm39"),
+    modality="atac",
+    output='fragments.tsv.zst',
+    output_type='fragment',
+    num_threads=8,
+)
+```
+
+</details>
 
 For more information, please refer to the documentation: https://lab.kaizhang.org/precellar/.

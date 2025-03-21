@@ -1,19 +1,16 @@
 mod segment;
-pub use segment::{Segment, SegmentInfo, SegmentInfoElem};
-use crate::region::{Region, SequenceType};
+use crate::region::Region;
 use crate::Modality;
+pub use segment::{Segment, SegmentInfo, SegmentInfoElem, SplitError};
 
 use anyhow::Result;
 use cached_path::Cache;
-use indexmap::{IndexMap, IndexSet};
+use indexmap::IndexMap;
 use noodles::fastq;
 use serde::{Deserialize, Serialize, Serializer};
+use std::io::{BufRead, BufReader};
 use std::ops::{Deref, DerefMut};
 use std::path::Path;
-use std::{
-    io::{BufRead, BufReader},
-    ops::Range,
-};
 
 /// Specification of a sequencing library.
 #[derive(Debug, Clone, PartialEq)]
@@ -185,8 +182,8 @@ impl Read {
         let segment_info: SegmentInfo = subregions
             .skip_while(|region| {
                 let region = region.read().unwrap();
-                let found = region.region_type.is_sequencing_primer()
-                    && region.region_id == self.primer_id;
+                let found =
+                    region.region_type.is_sequencing_primer() && region.region_id == self.primer_id;
                 !found
             })
             .skip(1)
@@ -282,142 +279,4 @@ pub enum UrlType {
     Ftp,
     Http,
     Https,
-}
-
-pub(crate) struct ReadValidator<'a> {
-    region: &'a Region,
-    range: Option<Range<usize>>,
-    n_total: usize,
-    n_matched: usize,
-    onlist: Option<IndexSet<Vec<u8>>>,
-    strand: Strand,
-    tolerance: f64,
-}
-
-impl<'a> ReadValidator<'a> {
-    pub fn id(&self) -> &str {
-        &self.region.region_id
-    }
-
-    pub fn sequence_type(&self) -> SequenceType {
-        self.region.sequence_type
-    }
-
-    pub fn new(region: &'a Region) -> Result<Self> {
-        let onlist = if let Some(onlist) = &region.onlist {
-            Some(onlist.read()?)
-        } else {
-            None
-        };
-        Ok(Self {
-            region,
-            range: None,
-            n_total: 0,
-            n_matched: 0,
-            onlist,
-            strand: Strand::Pos,
-            tolerance: 0.2,
-        })
-    }
-
-    pub fn with_range(mut self, range: Range<usize>) -> Self {
-        self.range = Some(range);
-        self
-    }
-
-    pub fn with_strand(mut self, strand: Strand) -> Self {
-        self.strand = strand;
-        self
-    }
-
-    pub fn with_tolerance(mut self, tolerance: f64) -> Self {
-        if !(0.0..=1.0).contains(&tolerance) {
-            panic!("Tolerance must be between 0 and 1");
-        }
-        self.tolerance = tolerance;
-        self
-    }
-
-    pub fn frac_matched(&self) -> f64 {
-        self.n_matched as f64 / self.n_total as f64
-    }
-
-    /// Validate a sequence. Return true if the sequence is valid.
-    /// For fixed sequences, the sequence is checked against the fixed sequence with
-    /// certain tolerance (default is 1 mismatches).
-    /// Note that for onlist, we check for the exact match.
-    pub fn validate(&mut self, seq: &[u8]) -> ValidateResult {
-        self.n_total += 1;
-        let seq = if let Some(range) = &self.range {
-            if range.end > seq.len() {
-                // If range end is out of bounds, use the full sequence
-                eprintln!("Warning: Range end {} exceeds sequence length {}", range.end, seq.len());
-                seq
-            } else {
-                &seq[range.clone()]
-            }
-        } else {
-            seq
-        };
-        let seq = if self.strand == Strand::Neg {
-            crate::utils::rev_compl(seq)
-        } else {
-            seq.to_vec()
-        };
-        let len = seq.len();
-        if len < self.region.min_len as usize {
-            ValidateResult::TooShort((seq.len(), self.region.min_len as usize))
-        } else if seq.len() > self.region.max_len as usize {
-            ValidateResult::TooLong((seq.len(), self.region.max_len as usize))
-        } else if self.sequence_type() == SequenceType::Fixed {
-            let d = hamming::distance(&seq, self.region.sequence.as_bytes()) as f64;
-            if d <= self.tolerance * len as f64 {
-                self.n_matched += 1;
-                ValidateResult::Valid
-            } else {
-                ValidateResult::MisMatch(d as usize)
-            }
-        } else if let Some(onlist) = &self.onlist {
-            if onlist.contains(&seq) {
-                self.n_matched += 1;
-                ValidateResult::Valid
-            } else {
-                ValidateResult::OnlistFail
-            }
-        } else {
-            self.n_matched += 1;
-            ValidateResult::Valid
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
-pub(crate) enum ValidateResult {
-    TooShort((usize, usize)),
-    TooLong((usize, usize)),
-    OnlistFail,
-    MisMatch(usize),
-    Valid,
-}
-
-impl std::fmt::Display for ValidateResult {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            ValidateResult::TooShort((n, min_len)) => {
-                write!(f, "Sequence too short: {} < {}", n, min_len)
-            }
-            ValidateResult::TooLong((n, max_len)) => {
-                write!(f, "Sequence too long: {} > {}", n, max_len)
-            }
-            ValidateResult::OnlistFail => {
-                write!(f, "Not on the onlist")
-            }
-            ValidateResult::MisMatch(n) => {
-                write!(f, "Mismatch: {}", n)
-            }
-            ValidateResult::Valid => {
-                write!(f, "Valid")
-            }
-        }
-    }
 }

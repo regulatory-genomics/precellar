@@ -1,6 +1,7 @@
 mod align;
 mod aligners;
 mod pyseqspec;
+mod examples;
 mod utils;
 
 use anyhow::Result;
@@ -208,6 +209,7 @@ fn precellar(m: &Bound<'_, PyModule>) -> PyResult<()> {
 
     utils::register_utils(m)?;
     aligners::register_aligners(m)?;
+    examples::register_examples(m)?;
 
     Ok(())
 }

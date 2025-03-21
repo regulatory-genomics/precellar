@@ -48,7 +48,7 @@ library_spec:
       filename: 737K-cratac-v1.txt.gz
       filetype: txt
       filesize: 0
-      url: https://teichlab.github.io/scg_lib_structs/data/10X-Genomics/737K-cratac-v1.txt.gz
+      url: https://osf.io/download/dy8uj
       urltype: https
       md5: null
       location: remote

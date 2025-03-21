@@ -207,8 +207,12 @@ impl Assay {
             if f.is_instance_of::<pyo3::types::PyList>() {
                 f.extract::<Vec<PathBuf>>().unwrap()
             } else {
-                let path = f.extract::<&str>().unwrap();
-                glob(path).expect("Failed to read glob pattern").map(Result::unwrap).collect::<Vec<_>>()
+                if let Ok(path) = f.extract::<&str>() {
+                    glob(path).expect("Failed to read glob pattern").map(Result::unwrap).collect::<Vec<_>>()
+                } else {
+                    let path = f.extract::<PathBuf>().unwrap();
+                    vec![path]
+                }
             }
         });
         let modality = modality.map(|x| Modality::from_str(x)).transpose()?;
@@ -229,15 +233,6 @@ impl Assay {
     #[pyo3(signature = (read_id), text_signature = "($self, read_id)")]
     fn delete_read(&mut self, read_id: &str) {
         self.0.delete_read(read_id);
-    }
-
-    #[pyo3(
-        signature = (modality, out_dir, *, tolerance=0.2),
-        text_signature = "($self, modality, out_dir, *, tolerance=None)",
-    )]
-    fn validate(&self, modality: &str, out_dir: PathBuf, tolerance: f64) -> Result<()> {
-        let modality = Modality::from_str(modality)?;
-        self.0.validate(modality, out_dir, tolerance)
     }
 
     /// Return the whitelist of cell barcodes.

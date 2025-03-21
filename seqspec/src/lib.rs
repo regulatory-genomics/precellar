@@ -3,16 +3,16 @@ pub mod region;
 pub mod utils;
 
 use log::warn;
-use noodles::fastq;
-use read::ReadValidator;
-pub use read::{FastqReader, File, Read, SegmentInfo, SegmentInfoElem, Strand, UrlType};
-use read::ValidateResult;
+pub use read::{
+    FastqReader, File, Read, SegmentInfo, SegmentInfoElem, SplitError, Strand, UrlType,
+};
 pub use region::LibSpec;
 pub use region::{Onlist, Region, RegionId, RegionType, SequenceType};
 
 use anyhow::{anyhow, bail, Context, Result};
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_yaml::{self, Value};
+use std::collections::HashMap;
 use std::path::Path;
 use std::{
     fs,
@@ -20,7 +20,6 @@ use std::{
     str::FromStr,
     sync::{Arc, RwLock},
 };
-use utils::{create_file, Compression};
 
 #[derive(Deserialize, Serialize, Debug, Clone, PartialEq)]
 pub struct Assay {
@@ -405,110 +404,6 @@ impl Assay {
             .filter(move |read| read.modality == modality)
     }
 
-    /// Validate reads in the sequence spec based on the fixed sequences and
-    /// save the valid and invalid reads to different files.
-    pub fn validate<P: AsRef<Path>>(
-        &self,
-        modality: Modality,
-        dir: P,
-        tolerance: f64,
-    ) -> Result<()> {
-        fs::create_dir_all(&dir)?;
-        let (mut readers, reads): (Vec<_>, Vec<_>) = self
-            .iter_reads(modality)
-            .flat_map(|read| {
-                let reader = read.open()?;
-                let region = self
-                    .library_spec
-                    .get_parent(&read.primer_id)
-                    .ok_or_else(|| anyhow!("Primer not found: {}", read.primer_id))
-                    .unwrap();
-                let index = read.get_segments(&region.read().unwrap())?;
-                let regions: Vec<_> = index
-                    .iter()
-                    .map(|elem_info| {
-                        let region = self.library_spec.get(&elem_info.region_id).unwrap();
-                        (region.read().unwrap(), elem_info.len.clone())
-                    })
-                    .collect();
-                Some((reader, (read, regions)))
-            })
-            .collect();
-
-        let mut validators = reads
-            .iter()
-            .map(|(read, regions)| {
-                regions
-                    .iter()
-                    .map(|(region, range)| {
-                        Ok(ReadValidator::new(region)?
-                            .with_range(range.start as usize..range.end as usize)
-                            .with_strand(read.strand)
-                            .with_tolerance(tolerance))
-                    })
-                    .collect::<Result<Vec<_>>>()
-            })
-            .collect::<Result<Vec<_>>>()?;
-
-        let mut outputs: Vec<_> = reads
-            .iter()
-            .map(|(read, _)| {
-                let output_valid = dir.as_ref().join(format!("{}.fq.zst", read.read_id));
-                let output_valid = create_file(output_valid, Some(Compression::Zstd), Some(9), 8)?;
-                let output_valid = fastq::io::Writer::new(output_valid);
-                let output_other = dir
-                    .as_ref()
-                    .join(format!("Invalid_{}.fq.zst", read.read_id));
-                let output_other = create_file(output_other, Some(Compression::Zstd), Some(9), 8)?;
-                let output_other = fastq::io::Writer::new(output_other);
-
-                anyhow::Ok((output_valid, output_other))
-            })
-            .collect::<Result<_>>()?;
-
-        loop {
-            let records: Vec<_> = readers
-                .iter_mut()
-                .flat_map(|reader| {
-                    let mut record = fastq::Record::default();
-                    if reader.read_record(&mut record).unwrap() == 0 {
-                        None
-                    } else {
-                        Some(record)
-                    }
-                })
-                .collect();
-
-            if records.len() != readers.len() {
-                break;
-            }
-
-            let valid = records
-                .iter()
-                .zip(validators.iter_mut())
-                .all(|(record, validators)| {
-                    validators.iter_mut().all(|validator| {
-                        matches!(
-                            validator.validate(record.sequence()),
-                            ValidateResult::OnlistFail | ValidateResult::Valid
-                        )
-                    })
-                });
-
-            records.iter().zip(outputs.iter_mut()).try_for_each(
-                |(record, (output_valid, output_other))| {
-                    if valid {
-                        output_valid.write_record(record)?;
-                    } else {
-                        output_other.write_record(record)?;
-                    }
-                    anyhow::Ok(())
-                },
-            )?;
-        }
-        Ok(())
-    }
-
     /// Verify reads in the sequence spec.
     fn verify(&self, read: &Read) -> Result<()> {
         let region = self
@@ -516,52 +411,59 @@ impl Assay {
             .get_parent(&read.primer_id)
             .ok_or_else(|| anyhow!("Primer not found: {}", read.primer_id))?;
         // Check if the primer exists
-        if let Some(index) = read.get_segments(&region.read().unwrap()) {
+        if let Some(segment_info) = read.get_segments(&region.read().unwrap()) {
             if let Some(mut reader) = read.open() {
-                let regions = index
-                    .iter()
-                    .map(|info| {
-                        let region = self.library_spec.get(&info.region_id).unwrap();
-                        (region.read().unwrap(), &info.len)
-                    })
-                    .collect::<Vec<_>>();
-                let mut validators = regions
-                    .iter()
-                    .map(|(region, range)| {
-                        Ok(ReadValidator::new(region)?
-                            .with_range(range.start as usize..range.end as usize)
-                            .with_strand(read.strand))
-                    })
-                    .collect::<Result<Vec<_>>>()?;
-
-                reader.records().take(1000).try_for_each(|record| {
-                    let record = record?;
-                    for validator in &mut validators {
-                        let result = validator.validate(record.sequence());
-                        match result {
-                            ValidateResult::TooLong(_) | ValidateResult::TooShort(_) => {
-                                bail!("{}: {}", read.read_id, result);
+                let mut onlists = HashMap::new();
+                let total_reads = 1000;
+                let mut invalid = 0;
+                reader.records().take(total_reads).try_for_each(|record| {
+                    if let Ok(segments) = segment_info.split_with_tolerance(&record?, 0.2) {
+                        segments.iter().for_each(|segment| {
+                            if segment.is_barcode() {
+                                let id = segment.region_id();
+                                if let Some((onlist, n_matched)) =
+                                    onlists.entry(id.to_string()).or_insert_with(|| {
+                                        let region = self.library_spec.get(id)?;
+                                        Some((
+                                            region.read().unwrap().onlist.as_ref()?.read().unwrap(),
+                                            0,
+                                        ))
+                                    })
+                                {
+                                    if onlist.contains(segment.seq) {
+                                        *n_matched += 1;
+                                    }
+                                }
                             }
-                            _ => {}
-                        }
+                        });
+                    } else {
+                        invalid += 1;
                     }
                     anyhow::Ok(())
                 })?;
 
-                for validator in validators {
-                    let percent_matched = validator.frac_matched() * 100.0;
-                    if percent_matched < 50.0 {
-                        warn!(
-                            "Read '{}' has low percentage of matched records for region '{}'. \
-                        Percentage of matched records: {:.2}%",
-                            read.read_id,
-                            validator.id(),
-                            percent_matched
-                        );
+                onlists.drain().for_each(|(region_id, x)| {
+                    if let Some((_, n_matched)) = x {
+                        let percent_matched = n_matched as f64 / total_reads as f64 * 100.0;
+                        if percent_matched < 50.0 {
+                            warn!(
+                                "Read '{}' has low percentage of matched records for region '{}'. \
+                            Percentage of matched records: {:.2}%",
+                                read.read_id, region_id, percent_matched
+                            );
+                        }
+
+                        let percent_valid = (total_reads - invalid) as f64 / total_reads as f64 * 100.0;
+                        if percent_valid < 50.0 {
+                            warn!(
+                                "Read '{}' has low percentage of valid records. \
+                            Percentage of valid records: {:.2}%",
+                                read.read_id, percent_valid
+                            );
+                        }
                     }
-                }
+                });
             }
-            
         }
         Ok(())
     }
@@ -894,33 +796,43 @@ mod tests {
         let mut assay: Assay = serde_yaml::from_str(&yaml_str).expect("Failed to parse YAML");
 
         // Update read with first FASTQ file
-        assay.update_read::<PathBuf>(
-            "test_read1",
-            Some(Modality::RNA),
-            Some("rna-truseq_read1"),
-            Some(false),
-            Some(&[fastq_path1.clone()]),
-            None,  // Let it determine length from FASTQ
-            Some(16),
-            false,
-        ).expect("Failed to update read with test_1.fastq");
+        assay
+            .update_read::<PathBuf>(
+                "test_read1",
+                Some(Modality::RNA),
+                Some("rna-truseq_read1"),
+                Some(false),
+                Some(&[fastq_path1.clone()]),
+                None, // Let it determine length from FASTQ
+                Some(16),
+                false,
+            )
+            .expect("Failed to update read with test_1.fastq");
 
         // Update read with second FASTQ file
-        assay.update_read::<PathBuf>(
-            "test_read2",
-            Some(Modality::RNA),
-            Some("rna-truseq_read2"),
-            Some(true),
-            Some(&[fastq_path2.clone()]),
-            None,
-            None,
-            false,
-        ).expect("Failed to update read with test_2.fastq");
+        assay
+            .update_read::<PathBuf>(
+                "test_read2",
+                Some(Modality::RNA),
+                Some("rna-truseq_read2"),
+                Some(true),
+                Some(&[fastq_path2.clone()]),
+                None,
+                None,
+                false,
+            )
+            .expect("Failed to update read with test_2.fastq");
 
         // Verify reads
-        let read1 = assay.sequence_spec.get("test_read1").expect("Read1 not found");
-        let read2 = assay.sequence_spec.get("test_read2").expect("Read2 not found");
-        
+        let read1 = assay
+            .sequence_spec
+            .get("test_read1")
+            .expect("Read1 not found");
+        let read2 = assay
+            .sequence_spec
+            .get("test_read2")
+            .expect("Read2 not found");
+
         // Print read information
         println!("Read1:");
         println!("  Length: {}", read1.min_len);
@@ -971,17 +883,14 @@ regions: []
         let assay: Assay = serde_yaml::from_str(&yaml_str).expect("Failed to parse YAML");
 
         // Test RNA modality segments
-        let rna_segments: Vec<_> = assay.get_segments_by_modality(Modality::RNA)
+        let rna_segments: Vec<_> = assay
+            .get_segments_by_modality(Modality::RNA)
             .map(|(read, info)| {
                 (
                     read.read_id.clone(),
-                    info.iter().map(|seg| {
-                        (
-                            seg.region_id.clone(),
-                            seg.region_type,
-                            seg.len.clone(),
-                        )
-                    }).collect::<Vec<_>>()
+                    info.iter()
+                        .map(|seg| (seg.region_id.clone(), seg.region_type, seg.len.clone()))
+                        .collect::<Vec<_>>(),
                 )
             })
             .collect();
@@ -991,23 +900,22 @@ regions: []
         for (read_id, segments) in &rna_segments {
             println!("Read {}", read_id);
             for (region_id, region_type, range) in segments {
-                println!("  - Region: {}, Type: {:?}, Range: {:?}", 
-                    region_id, region_type, range);
+                println!(
+                    "  - Region: {}, Type: {:?}, Range: {:?}",
+                    region_id, region_type, range
+                );
             }
         }
 
         // Test ATAC modality segments
-        let atac_segments: Vec<_> = assay.get_segments_by_modality(Modality::ATAC)
+        let atac_segments: Vec<_> = assay
+            .get_segments_by_modality(Modality::ATAC)
             .map(|(read, info)| {
                 (
                     read.read_id.clone(),
-                    info.iter().map(|seg| {
-                        (
-                            seg.region_id.clone(),
-                            seg.region_type,
-                            seg.len.clone(),
-                        )
-                    }).collect::<Vec<_>>()
+                    info.iter()
+                        .map(|seg| (seg.region_id.clone(), seg.region_type, seg.len.clone()))
+                        .collect::<Vec<_>>(),
                 )
             })
             .collect();
@@ -1016,8 +924,10 @@ regions: []
         for (read_id, segments) in &atac_segments {
             println!("Read {}", read_id);
             for (region_id, region_type, range) in segments {
-                println!("  - Region: {}, Type: {:?}, Range: {:?}", 
-                    region_id, region_type, range);
+                println!(
+                    "  - Region: {}, Type: {:?}, Range: {:?}",
+                    region_id, region_type, range
+                );
             }
         }
 
@@ -1032,8 +942,6 @@ regions: []
             assert!(!segments.is_empty(), "RNA-R1 should have segments");
             // Add more specific assertions about the segments
         }
-
-
     }
 
     #[test]
@@ -1041,7 +949,10 @@ regions: []
         // Helper function to print region structure
         fn print_region_structure(region: &Region, indent: usize) {
             let indent_str = " ".repeat(indent);
-            println!("{}Region: {} (Type: {:?})", indent_str, region.region_id, region.region_type);
+            println!(
+                "{}Region: {} (Type: {:?})",
+                indent_str, region.region_id, region.region_type
+            );
             for subregion in &region.subregions {
                 print_region_structure(&subregion.read().unwrap(), indent + 2);
             }
@@ -1067,7 +978,10 @@ regions: []
                 assay.validate_structure()?;
                 Ok(assay)
             });
-        assert!(result.is_ok(), "YAML_FILE should have valid nesting depth (2 levels)");
+        assert!(
+            result.is_ok(),
+            "YAML_FILE should have valid nesting depth (2 levels)"
+        );
 
         println!("\nTesting YAML_FILE_3 (expected invalid):");
         let yaml_str3 = fs::read_to_string(YAML_FILE_3).expect("Failed to read file");
@@ -1089,9 +1003,15 @@ regions: []
                 assay.validate_structure()?;
                 Ok(assay)
             });
-        assert!(result.is_err(), "YAML_FILE_3 should be rejected (more than 2 levels)");
         assert!(
-            result.unwrap_err().to_string().contains("nesting depth must be exactly 2 levels"),
+            result.is_err(),
+            "YAML_FILE_3 should be rejected (more than 2 levels)"
+        );
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("nesting depth must be exactly 2 levels"),
             "Error message should mention the required nesting depth"
         );
     }
@@ -1101,7 +1021,10 @@ regions: []
         // Helper function to print region structure
         fn print_region_structure(region: &Region, indent: usize) {
             let indent_str = " ".repeat(indent);
-            println!("{}Region: {} (Type: {:?})", indent_str, region.region_id, region.region_type);
+            println!(
+                "{}Region: {} (Type: {:?})",
+                indent_str, region.region_id, region.region_type
+            );
             for subregion in &region.subregions {
                 print_region_structure(&subregion.read().unwrap(), indent + 2);
             }
@@ -1127,7 +1050,10 @@ regions: []
                 assay.validate_structure()?;
                 Ok(assay)
             });
-        assert!(result.is_ok(), "YAML_FILE should have valid nesting depth (2 levels)");
+        assert!(
+            result.is_ok(),
+            "YAML_FILE should have valid nesting depth (2 levels)"
+        );
 
         println!("\nTesting YAML_FILE_3 (expected invalid):");
         let yaml_str3 = fs::read_to_string(YAML_FILE_3).expect("Failed to read file");
@@ -1149,9 +1075,15 @@ regions: []
                 assay.validate_structure()?;
                 Ok(assay)
             });
-        assert!(result.is_err(), "YAML_FILE_3 should be rejected (more than 2 levels)");
         assert!(
-            result.unwrap_err().to_string().contains("nesting depth must be exactly 2 levels"),
+            result.is_err(),
+            "YAML_FILE_3 should be rejected (more than 2 levels)"
+        );
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("nesting depth must be exactly 2 levels"),
             "Error message should mention the required nesting depth"
         );
     }

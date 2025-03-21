@@ -16,6 +16,7 @@ classifiers = [
     "Programming Language :: Python :: Implementation :: PyPy",
 ]
 requires-python = ">=3.9, <3.14"
+dependencies = ["pooch==1.8"]
 dynamic = ["version"]
 
 [tool.maturin]

@@ -112,13 +112,39 @@ impl FromIterator<Region> for SegmentInfo {
     }
 }
 
+#[derive(Debug, Copy, Clone)]
+pub enum SplitError {
+    AnchorNotFound,
+    PatternMismatch(usize),
+}
+
+impl std::fmt::Display for SplitError {
+    fn fmt(&self, f: &mut core::fmt::Formatter) -> core::fmt::Result {
+        match self {
+            SplitError::AnchorNotFound => write!(f, "Anchor not found"),
+            SplitError::PatternMismatch(d) => write!(f, "Pattern mismatch ({} mismatches)", d),
+        }
+    }
+}
+
+impl std::error::Error for SplitError {}
+
 impl SegmentInfo {
     pub fn len(&self) -> usize {
         self.0.len()
     }
 
     /// Split a read into segments according to the segment information.
-    pub fn split<'a>(&'a self, read: &'a fastq::Record) -> Option<Vec<Segment<'a>>> {
+    pub fn split<'a>(&'a self, read: &'a fastq::Record) -> Result<Vec<Segment<'a>>, SplitError> {
+        self.split_with_tolerance(read, 1.0)
+    }
+
+    /// Split a read into segments according to the segment information.
+    pub fn split_with_tolerance<'a>(
+        &'a self,
+        read: &'a fastq::Record,
+        tolerance: f64,
+    ) -> Result<Vec<Segment<'a>>, SplitError> {
         fn consume_buf<'a>(
             buf: &mut Vec<&'a SegmentInfoElem>,
             mut seq: &'a [u8],
@@ -231,7 +257,7 @@ impl SegmentInfo {
                                 qual,
                             ))
                         } else {
-                            return None;
+                            return Err(SplitError::AnchorNotFound);
                         }
                     } else {
                         buffer.push(segment);
@@ -245,6 +271,14 @@ impl SegmentInfo {
                         .quality_scores()
                         .get(max_offset..max_offset + max_len)
                         .unwrap();
+
+                    if tolerance < 1.0 && segment.sequence_type.is_fixed() {
+                        let d = hamming::distance(&seq, segment.sequence.as_bytes());
+                        if d as f64 > tolerance * seq.len() as f64 {
+                            return Err(SplitError::PatternMismatch(d as usize));
+                        }
+                    }
+
                     result.push(Segment::new(
                         SegmentType::Single {
                             region_id: segment.region_id.as_str(),
@@ -276,7 +310,7 @@ impl SegmentInfo {
             );
         }
 
-        Some(result)
+        Ok(result)
     }
 }
 
@@ -521,6 +555,11 @@ mod tests {
     #[test]
     fn test_fixed() {
         assert_eq!(
+            split_seq_by("AAAAAA", [cdna(1, 5), linker("ATGT")]),
+            "[T]AAAAA",
+        );
+
+        assert_eq!(
             split_seq_by("AAAA TT CCC", [bc(4), umi(2), cdna(2, 4), poly(2, 4)]),
             "[B]AAAA,[U]TT,[T]CCC",
         );
@@ -541,7 +580,10 @@ mod tests {
         );
 
         assert_eq!(
-            split_seq_by("AAAA TT CCCCCCC GGGGGGG AAAA TT", [bc(4), umi(2), cdna(2, 10), poly(2, 10), bc(4), umi(2)]),
+            split_seq_by(
+                "AAAA TT CCCCCCC GGGGGGG AAAA TT",
+                [bc(4), umi(2), cdna(2, 10), poly(2, 10), bc(4), umi(2)]
+            ),
             "[B]AAAA,[U]TT,[TO]CCCCCCCGGGGGGGAAAATT",
         );
     }
@@ -575,7 +617,7 @@ mod tests {
         assert_eq!(
             split_seq_by(
                 "AAAA A TT ACCG CCCACTG",
-                [bc(4), var(1,3), umi(2), linker("ACTG"), cdna(1, 100)]
+                [bc(4), var(1, 3), umi(2), linker("ACTG"), cdna(1, 100)]
             ),
             "[B]AAAA,[O]A,[U]TT,[O]ACCG,[T]CCCACTG",
         );

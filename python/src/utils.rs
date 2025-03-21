@@ -674,7 +674,7 @@ fn generate_random_barcode() -> String {
 
 #[pymodule]
 pub(crate) fn register_utils(parent_module: &Bound<'_, PyModule>) -> PyResult<()> {
-    let utils = PyModule::new_bound(parent_module.py(), "utils")?;
+    let utils = PyModule::new(parent_module.py(), "utils")?;
 
     utils.add_function(wrap_pyfunction!(strip_barcode_from_fastq, &utils)?)?;
     utils.add_function(wrap_pyfunction!(bam_to_fastq, &utils)?)?;

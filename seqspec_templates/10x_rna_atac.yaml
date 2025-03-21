@@ -62,7 +62,7 @@ library_spec:
       filename: gex_737K-arc-v1.txt.gz
       filetype: txt
       filesize: 0
-      url: https://teichlab.github.io/scg_lib_structs/data/10X-Genomics/gex_737K-arc-v1.txt.gz
+      url: https://osf.io/download/4sme6
       urltype: https
       md5: 0
       location: remote
@@ -169,7 +169,7 @@ library_spec:
       filename: atac_737K-arc-v1.txt.gz
       filetype: txt
       filesize: 0
-      url: https://teichlab.github.io/scg_lib_structs/data/10X-Genomics/atac_737K-arc-v1.txt.gz
+      url: https://osf.io/download/mazrh
       urltype: https
       md5: 0
       location: remote

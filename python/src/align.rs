@@ -158,14 +158,8 @@ pub fn align(
     qc_metrics_path: Option<PathBuf>,
 ) -> Result<HashMap<String, f64>> {
     let assay = match assay.extract::<PathBuf>() {
-        Ok(p) => {
-            debug!("Loading assay from path: {:?}", p);
-            seqspec::Assay::from_path(&p).unwrap()
-        },
-        _ => {
-            debug!("Using provided Assay object");
-            assay.extract::<PyRef<Assay>>()?.0.clone()
-        },
+        Ok(p) => seqspec::Assay::from_path(&p).unwrap(),
+        _ => assay.extract::<PyRef<Assay>>()?.0.clone(),
     };
     
     let modality = modality.map(Modality::from_str).unwrap_or(assay.modality())?;
@@ -175,7 +169,6 @@ pub fn align(
     let header = aligner.header();
     let transcript_annotator = aligner.transcript_annotator();
 
-    info!("Initializing FastqProcessor with {} threads and chunk size {}", num_threads, chunk_size);
     let mut processor = FastqProcessor::new(assay)
         .with_modality(modality)
         .with_barcode_correct_prob(0.9);

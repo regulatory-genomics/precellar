@@ -170,7 +170,7 @@ impl BWAMEM2 {
 
 #[pymodule]
 pub(crate) fn register_aligners(parent_module: &Bound<'_, PyModule>) -> PyResult<()> {
-    let m = PyModule::new_bound(parent_module.py(), "aligners")?;
+    let m = PyModule::new(parent_module.py(), "aligners")?;
 
     m.add_class::<STAR>()?;
     m.add_class::<BWAMEM2>()?;

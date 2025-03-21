@@ -746,7 +746,7 @@ impl FastqAnnotator {
         let mut read1 = None;
         let mut read2 = None;
 
-        if let Some(segments) = self.segment_info.split(record) {
+        if let Ok(segments) = self.segment_info.split(record) {
             segments.into_iter().for_each(|segment| {
                 if segment.is_barcode() || segment.is_umi() {
                     let mut fq = segment.into_fq(record.definition());
