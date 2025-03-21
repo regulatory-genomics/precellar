@@ -61,8 +61,8 @@ library_spec:
       filename: 3M-february-2018.txt.gz
       filetype: txt
       filesize: 115512960
-      url: https://github.com/pachterlab/qcbc/raw/main/tests/10xRNAv3/3M-february-2018.txt.gz
-      urltype: http
+      url: https://osf.io/download/ksv9x
+      urltype: https
       md5: 3d36d0a4021fd292b265e2b5e72aaaf3
       location: remote
     regions: null

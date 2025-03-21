@@ -1,9 +1,7 @@
-use std::collections::{BTreeMap, HashMap, HashSet};
-use log::warn;
-
+use super::quantification::GeneAlignment;
 use crate::transcript::annotate::AnnotationRegion;
 
-use super::quantification::GeneAlignment;
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 type Gene = usize;
 
@@ -19,6 +17,7 @@ pub(crate) struct DeDupResult {
 }
 
 impl DeDupResult {
+    /// Merge the intron and exon counts into a single count for each gene
     pub fn into_counts(mut self) -> impl Iterator<Item = (Gene, u64)> {
         self.exon_uniq_umi
             .iter()
@@ -37,24 +36,11 @@ where
     let mut result = DeDupResult::default();
     let mut umigene_counts_exon = HashMap::new();
     let mut umigene_counts_intron = HashMap::new();
-    let mut gene_counter = HashMap::new();
-    let mut warned = false;
 
     alignments.into_iter().for_each(|alignment| {
         let gene = alignment.idx;
-        let umi = match alignment.umi {
-            Some(umi) => umi.into_bytes(),
-            None => {
-                if !warned {
-                    warn!("Encountered alignment(s) without UMI information. Using generated UMIs.");
-                    warned = true;
-                }
-                // Create a unique UMI for each gene using a counter
-                let counter = gene_counter.entry(gene).or_insert(0u32);
-                *counter += 1;
-                format!("NOUMI{:010}", counter).into_bytes()
-            }
-        };
+        // We use empty vector to represent empty UMI
+        let umi = alignment.umi.map(|x| x.into_bytes()).unwrap_or(Vec::new());
         
         match alignment.align_type {
             AnnotationRegion::Exonic => {
@@ -71,8 +57,18 @@ where
     let mut uniq_counts: HashMap<Gene, HashSet<&[u8]>> = HashMap::new();
     umigene_counts_exon.iter().for_each(|((umi, gene), c)| {
         result.total_umi += c;
-        let corrected_umi = umi_correction.get(&(umi, *gene)).unwrap_or(umi);
-        uniq_counts.entry(*gene).or_insert(HashSet::new()).insert(corrected_umi);
+
+        // Empty UMI
+        if umi.is_empty() {
+            result.unique_umi += c;
+            if mito_genes.contains(&gene) {
+                result.uniq_mito += c;
+            }
+            result.exon_uniq_umi.insert(*gene, *c as usize);
+        } else {
+            let corrected_umi = umi_correction.get(&(umi, *gene)).unwrap_or(umi);
+            uniq_counts.entry(*gene).or_insert(HashSet::new()).insert(corrected_umi);
+        }
     });
     uniq_counts.into_iter().for_each(|(gene, umis)| {
         let c = umis.len();
@@ -81,15 +77,25 @@ where
         if mito_genes.contains(&gene) {
             result.uniq_mito += c as u64;
         }
-        result.exon_uniq_umi.insert(gene, c);
+        result.exon_uniq_umi.entry(gene).and_modify(|x| *x += c).or_insert(c);
     });
 
     let umi_correction= correct_umis(&umigene_counts_intron);
     let mut uniq_counts: HashMap<Gene, HashSet<&[u8]>> = HashMap::new();
     umigene_counts_intron.iter().for_each(|((umi, gene), c)| {
         result.total_umi += c;
-        let corrected_umi = umi_correction.get(&(umi, *gene)).unwrap_or(umi);
-        uniq_counts.entry(*gene).or_insert(HashSet::new()).insert(corrected_umi);
+
+        // Empty UMI
+        if umi.is_empty() {
+            result.unique_umi += c;
+            if mito_genes.contains(&gene) {
+                result.uniq_mito += c;
+            }
+            result.intron_uniq_umi.insert(*gene, *c as usize);
+        } else {
+            let corrected_umi = umi_correction.get(&(umi, *gene)).unwrap_or(umi);
+            uniq_counts.entry(*gene).or_insert(HashSet::new()).insert(corrected_umi);
+        }
     });
     uniq_counts.into_iter().for_each(|(gene, umis)| {
         let c = umis.len();
@@ -98,7 +104,7 @@ where
         if mito_genes.contains(&gene) {
             result.uniq_mito += c as u64;
         }
-        result.intron_uniq_umi.insert(gene, c);
+        result.intron_uniq_umi.entry(gene).and_modify(|x| *x += c).or_insert(c);
     });
 
     result
