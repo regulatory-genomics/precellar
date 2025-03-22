@@ -32,6 +32,32 @@ pip install 'git+https://github.com/regulatory-genomics/precellar.git#egg=precel
 ### Gene Expression
 
 <details>
+<summary>10x scRNA-seq v3</summary>
+
+```python
+import precellar
+
+assay = precellar.Assay('https://raw.githubusercontent.com/regulatory-genomics/precellar/refs/heads/main/seqspec_templates/10x_rna_v3.yaml')
+
+data = precellar.examples.txg_rna_v3()
+assay.add_illumina_reads('rna')
+assay.update_read('rna-R1', fastq=data['R1'])
+assay.update_read('rna-R2', fastq=data['R2'])
+
+rna_qc = precellar.align(
+    assay,
+    precellar.aligners.STAR("STAR_reference/refdata-gex-GRCm39-2024-A"), 
+    output="gene_matrix.h5ad",
+    output_type="gene_quantification",
+    num_threads=8,
+)
+print(rna_qc)
+```
+
+</details>
+
+
+<details>
 <summary>sci-RNA-seq3</summary>
 
 ```python
@@ -57,51 +83,29 @@ print(rna_qc)
 </details>
 
 
-<details>
-<summary>10X scRNA-seq V3</summary>
-
-```python
-import precellar
-
-assay = precellar.Assay('https://raw.githubusercontent.com/regulatory-genomics/precellar/refs/heads/main/seqspec_templates/10x_rna_v3.yaml')
-
-data = precellar.examples.txg_rna_v3()
-assay.add_illumina_reads('rna')
-assay.update_read('rna-R1', fastq=data['R1'])
-assay.update_read('rna-R2', fastq=data['R2'])
-qc = precellar.align(
-    assay,
-    precellar.aligners.STAR("STAR_reference/refdata-gex-GRCm39-2024-A"), 
-    output="gene_matrix.h5ad",
-    output_type="gene_quantification",
-    num_threads=32,
-)
-print(qc)
-```
-
-</details>
-
 ### Chromatin accessibility and protein-DNA interactions
 
 <details>
-<summary>10X scATAC-seq</summary>
+<summary>10x scATAC-seq</summary>
 
 ```python
 import precellar
 
 assay = precellar.Assay('https://raw.githubusercontent.com/regulatory-genomics/precellar/refs/heads/main/seqspec_templates/10x_atac.yaml')
-assay.add_illumina_reads('atac')
-assay.update_read('atac-R1', fastq='R1.fastq.gz')
-assay.update_read('atac-I2', fastq='R2.fastq.gz')
-assay.update_read('atac-R2', fastq='R3.fastq.gz')
-qc = precellar.align(
+
+data = precellar.examples.txg_atac()
+assay.add_illumina_reads('atac', forward_strand_workflow=True)
+assay.update_read('atac-I2', fastq=data['I2'])
+assay.update_read('atac-R1', fastq=data['R1'])
+assay.update_read('atac-R2', fastq=data['R2'])
+atac_qc = precellar.align(
     assay,
     precellar.aligners.BWAMEM2("/data/Public/BWA_MEM2_index/GRCh38"),
     output='fragments.tsv.zst',
     output_type='fragment',
-    num_threads=32,
+    num_threads=8,
 )
-print(qc)
+print(atac_qc)
 ```
 
 </details>
@@ -135,7 +139,7 @@ print(atac_qc)
 ### Multi-Omics
 
 <details>
-<summary>10X single-cell multiome (Gene expression + ATAC)</summary>
+<summary>10x single-cell multiome (Gene expression + ATAC)</summary>
 
 ```python
 import precellar
@@ -206,6 +210,46 @@ print(rna_qc)
 atac_qc = precellar.align(
     assay,
     precellar.aligners.BWAMEM2("/data/Public/BWA_MEM2_index/GRCh38"),
+    modality="atac",
+    output='fragments.tsv.zst',
+    output_type='fragment',
+    num_threads=8,
+)
+print(atac_qc)
+```
+
+</details>
+
+
+<details>
+<summary>SNARE-seq</summary>
+
+```python
+import precellar
+
+assay = precellar.Assay('https://raw.githubusercontent.com/regulatory-genomics/precellar/refs/heads/main/seqspec_templates/snare_seq.yaml')
+
+data = precellar.examples.snare_seq()
+assay.update_read('rna-R1', fastq=data['rna-R1'])
+assay.update_read('rna-R2', fastq=data['rna-R2'])
+
+assay.update_read('atac-I1', fastq=data['atac-I1'])
+assay.update_read('atac-R1', fastq=data['atac-R1'])
+assay.update_read('atac-R2', fastq=data['atac-R2'])
+
+rna_qc = precellar.align(
+    assay,
+    precellar.aligners.STAR("/data/Public/STAR_reference/GRCm39/"), 
+    modality="rna",
+    output="gene_matrix.h5ad",
+    output_type="gene_quantification",
+    num_threads=8,
+)
+print(rna_qc)
+
+atac_qc = precellar.align(
+    assay,
+    precellar.aligners.BWAMEM2("/data/Public/BWA_MEM2_index/GRCm39"),
     modality="atac",
     output='fragments.tsv.zst',
     output_type='fragment',

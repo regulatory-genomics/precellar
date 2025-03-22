@@ -1,0 +1,354 @@
+!Assay
+seqspec_version: 0.3.0
+assay_id: SNARE-seq
+name: SNARE-seq
+doi: https://doi.org/10.1038/s41587-019-0290-0
+date: 17 October 2019
+description: Simultaneous profiling of chromatin accessibility and gene expression from the same single cell
+modalities:
+- rna
+- atac
+lib_struct: https://teichlab.github.io/scg_lib_structs/methods_html/SNARE-seq.html
+library_protocol: Custom
+library_kit: Custom
+sequence_protocol: Illumina
+sequence_kit: Custom
+sequence_spec:
+- !Read
+  read_id: rna-R1
+  name: Read 1
+  modality: rna
+  primer_id: read1_custom_primer
+  min_len: 30
+  max_len: 30
+  strand: pos
+- !Read
+  read_id: rna-R2
+  name: RNA R2
+  modality: rna
+  primer_id: me_rna
+  min_len: 75
+  max_len: 75
+  strand: neg
+- !Read
+  read_id: atac-R1
+  name: ATAC Read1
+  modality: atac
+  primer_id: nextera_r1
+  min_len: 75
+  max_len: 75
+  strand: pos
+- !Read
+  read_id: atac-I1
+  name: i5 Index
+  modality: atac
+  primer_id: i5_index_primer
+  min_len: 30
+  max_len: 30
+  strand: pos
+- !Read
+  read_id: atac-R2
+  name: ATAC Read2
+  modality: atac
+  primer_id: nextera_r2
+  min_len: 75
+  max_len: 75
+  strand: neg
+library_spec:
+- !Region
+  region_id: rna
+  region_type: rna
+  name: RNA Library
+  sequence_type: joined
+  sequence: AATGATACGGCGACCACCGAGATCTACACNNNNNNNNNNNNNNNNNNNNNNNGCCTGTCCGCGGAAGCAGTGGTATCAACGCAGAGTACNNNNNNNNNNNNNNNNNNNNTTTTTTTTTTTTTTTTTTTTTTXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXCTGTCTCTTATACACATCTCCGAGCCCACGAGACNNNNNNNNATCTCGTATGCCGTCTTCTGCTTG
+  min_len: 200
+  max_len: 500
+  onlist: null
+  regions:
+  - !Region
+    region_id: illumina_p5_rna
+    region_type: illumina_p5
+    name: Illumina P5
+    sequence_type: fixed
+    sequence: AATGATACGGCGACCACCGAGATCTACAC
+    min_len: 29
+    max_len: 29
+    onlist: null
+    regions: null
+    parent_id: rna
+  - !Region
+    region_id: i5_index_rna
+    region_type: index5
+    name: i5 Index
+    sequence_type: onlist
+    sequence: NNNNNNNN
+    min_len: 8
+    max_len: 8
+    onlist: null
+    regions: null
+    parent_id: rna
+  - !Region
+    region_id: read1_custom_primer
+    region_type: custom_primer
+    name: Read1CustomSeqB
+    sequence_type: fixed
+    sequence: GCCTGTCCGCGGAAGCAGTGGTATCAACGCAGAGTAC
+    min_len: 37
+    max_len: 37
+    onlist: null
+    regions: null
+    parent_id: rna
+  - !Region
+    region_id: cell_barcode_rna
+    region_type: barcode
+    name: Cell Barcode
+    sequence_type: onlist
+    sequence: NNNNNNNNNNNN
+    min_len: 12
+    max_len: 12
+    onlist: null
+    regions: null
+    parent_id: rna
+  - !Region
+    region_id: umi_rna
+    region_type: umi
+    name: UMI
+    sequence_type: random
+    sequence: NNNNNNNN
+    min_len: 8
+    max_len: 8
+    onlist: null
+    regions: null
+    parent_id: rna
+  - !Region
+    region_id: poly_t_rna
+    region_type: poly_t
+    name: Poly T
+    sequence_type: fixed
+    sequence: TTTTTTTTTTTTTTTTTTTT
+    min_len: 10
+    max_len: 50
+    onlist: null
+    regions: null
+    parent_id: rna
+  - !Region
+    region_id: cdna
+    region_type: cdna
+    name: cDNA
+    sequence_type: random
+    sequence: XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
+    min_len: 1
+    max_len: 1000
+    onlist: null
+    regions: null
+    parent_id: rna
+  - !Region
+    region_id: me_rna
+    region_type: custom_primer
+    name: Mosaic End
+    sequence_type: fixed
+    sequence: CTGTCTCTTATACACATCT
+    min_len: 19
+    max_len: 19
+    onlist: null
+    regions: null
+    parent_id: rna
+  - !Region
+    region_id: s7_rna
+    region_type: s7
+    name: Nextera N7 Primer Entry Point
+    sequence_type: fixed
+    sequence: CCGAGCCCACGAGAC
+    min_len: 15
+    max_len: 15
+    onlist: null
+    regions: null
+    parent_id: rna
+  - !Region
+    region_id: i7_index_rna
+    region_type: index7
+    name: i7 Index
+    sequence_type: onlist
+    sequence: NNNNNNNN
+    min_len: 8
+    max_len: 8
+    onlist: null
+    regions: null
+    parent_id: rna
+  - !Region
+    region_id: illumina_p7_rna
+    region_type: illumina_p7
+    name: Illumina P7
+    sequence_type: fixed
+    sequence: ATCTCGTATGCCGTCTTCTGCTTG
+    min_len: 24
+    max_len: 24
+    onlist: null
+    regions: null
+    parent_id: rna
+  parent_id: null
+- !Region
+  region_id: atac
+  region_type: atac
+  name: ATAC Library
+  sequence_type: joined
+  sequence: AATGATACGGCGACCACCGAGATCTACACNNNNNNNNNNNNNNNNNNNNNNNGCCTGTCCGCGGAAGCAGTGGTATCAACGCAGAGTACNNNNNNNNNNNNNNNNNNNNTTTTTTTTTTTTTTTTTTTTTTTCGTCGGCAGCGTCAGATGTGTATAAGAGACAGXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXCTGTCTCTTATACACATCTCCGAGCCCACGAGACNNNNNNNNATCTCGTATGCCGTCTTCTGCTTG
+  min_len: 200
+  max_len: 500
+  onlist: null
+  regions:
+  - !Region
+    region_id: illumina_p5_atac
+    region_type: illumina_p5
+    name: Illumina P5
+    sequence_type: fixed
+    sequence: AATGATACGGCGACCACCGAGATCTACAC
+    min_len: 29
+    max_len: 29
+    onlist: null
+    regions: null
+    parent_id: atac
+  - !Region
+    region_id: i5_index_atac
+    region_type: index5
+    name: i5 Index
+    sequence_type: onlist
+    sequence: NNNNNNNN
+    min_len: 8
+    max_len: 8
+    onlist: null
+    regions: null
+    parent_id: atac
+  - !Region
+    region_id: i5_index_primer
+    region_type: custom_primer
+    name: i5 Index Sequencing Primer
+    sequence_type: fixed
+    sequence: GCCTGTCCGCGGAAGCAGTGGTATCAACGCAGAGTAC
+    min_len: 37
+    max_len: 37
+    onlist: null
+    regions: null
+    parent_id: atac
+  - !Region
+    region_id: cell_barcode_atac
+    region_type: barcode
+    name: Cell Barcode
+    sequence_type: onlist
+    sequence: NNNNNNNNNNNN
+    min_len: 12
+    max_len: 12
+    onlist: null
+    regions: null
+    parent_id: atac
+  - !Region
+    region_id: umi_atac
+    region_type: umi
+    name: UMI
+    sequence_type: random
+    sequence: NNNNNNNN
+    min_len: 8
+    max_len: 8
+    onlist: null
+    regions: null
+    parent_id: atac
+  - !Region
+    region_id: poly_t_atac
+    region_type: poly_t
+    name: Poly T
+    sequence_type: fixed
+    sequence: NTTTTTTTTT
+    min_len: 10
+    max_len: 10
+    onlist: null
+    regions: null
+    parent_id: atac
+  - !Region
+    region_id: s5_atac
+    region_type: s5
+    name: Nextera N/S5 Primer Entry Point
+    sequence_type: fixed
+    sequence: TCGTCGGCAG
+    min_len: 10
+    max_len: 10
+    onlist: null
+    regions: null
+    parent_id: atac
+  - !Region
+    region_id: nextera_r1
+    region_type: nextera_read1
+    name: Nextera R1
+    sequence_type: fixed
+    sequence: AGATGTGTATAAGAGACAG
+    min_len: 19
+    max_len: 19
+    onlist: null
+    regions: null
+    parent_id: atac
+  - !Region
+    region_id: gdna
+    region_type: gdna
+    name: Genomic DNA
+    sequence_type: random
+    sequence: XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
+    min_len: 1
+    max_len: 1000
+    onlist: null
+    regions: null
+    parent_id: atac
+  - !Region
+    region_id: nextera_r2
+    region_type: nextera_read2
+    name: Nextera R2
+    sequence_type: fixed
+    sequence: CTGTCTCTTATACACATCT
+    min_len: 19
+    max_len: 19
+    onlist: null
+    regions: null
+    parent_id: atac
+  - !Region
+    region_id: rna_i7_primer
+    region_type: custom_primer
+    name: RNA i7 Index Sequencing Primer
+    sequence_type: fixed
+    sequence: CTGTCTCTTATACACATCTCCGAGCCCACGAGAC
+    min_len: 34
+    max_len: 34
+    onlist: null
+    regions: null
+    parent_id: atac
+  - !Region
+    region_id: s7_atac
+    region_type: s7
+    name: Nextera N7 Primer Entry Point
+    sequence_type: fixed
+    sequence: CCGAGCCCACGAGAC
+    min_len: 15
+    max_len: 15
+    onlist: null
+    regions: null
+    parent_id: atac
+  - !Region
+    region_id: i7_index_atac
+    region_type: index7
+    name: i7 Index
+    sequence_type: onlist
+    sequence: NNNNNNNN
+    min_len: 8
+    max_len: 8
+    onlist: null
+    regions: null
+    parent_id: atac
+  - !Region
+    region_id: illumina_p7_atac
+    region_type: illumina_p7
+    name: Illumina P7
+    sequence_type: fixed
+    sequence: ATCTCGTATGCCGTCTTCTGCTTG
+    min_len: 24
+    max_len: 24
+    onlist: null
+    regions: null
+    parent_id: atac
+  parent_id: null

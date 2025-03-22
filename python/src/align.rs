@@ -6,8 +6,7 @@ use noodles::sam::{self, alignment::io::Write};
 use pyo3::prelude::*;
 use std::ops::DerefMut;
 use std::{collections::HashMap, path::PathBuf, str::FromStr};
-use log::{info, debug};
-use serde_json;
+use log::debug;
 
 use precellar::{
     align::{FastqProcessor, MultiMapR},
@@ -93,17 +92,6 @@ pub fn make_bwa_index(fasta: PathBuf, genome_prefix: PathBuf) -> Result<()> {
 /// chunk_size: int
 ///     This parameter is used to control the number of bases processed in each chunk per thread.
 ///     The total number of bases in each chunk is determined by: chunk_size * num_threads.
-/// expected_cells: int | None
-///     The expected number of cells in the sample. If None, the number of cells will be inferred.
-/// barcode_filtering_quantile: float
-///     The quantile to use for barcode filtering. Default is 0.99.
-/// barcode_bootstrap_samples: int
-///     The number of bootstrap samples to use for barcode filtering. Default is 100.
-/// qc_metrics_path: Path | None
-///     The path to the directory where barcode QC metrics will be saved.
-///     For each barcode region, a JSON file with metrics and a TSV summary will be created.
-///     The metrics include the estimated number of cells, knee point, confidence intervals,
-///     and various quality metrics like barcode Q30 rate.
 ///
 /// Returns
 /// -------
@@ -123,19 +111,13 @@ pub fn make_bwa_index(fasta: PathBuf, genome_prefix: PathBuf) -> Result<()> {
         shift_left=4, shift_right=-5,
         compression=None, compression_level=None,
         temp_dir=None, num_threads=8, chunk_size=10000000,
-        expected_cells=None, 
-        barcode_filtering_quantile=0.99, barcode_bootstrap_samples=100,
-        qc_metrics_path=None,
     ),
     text_signature = "(assay, aligner, *,
         output, modality=None, output_type='alignment',
         mito_dna=['chrM', 'M'],
         shift_left=4, shift_right=-5,
         compression=None, compression_level=None,
-        temp_dir=None, num_threads=8, chunk_size=10000000,
-        expected_cells=None, 
-        barcode_filtering_quantile=0.99, barcode_bootstrap_samples=100,
-        qc_metrics_path=None)",
+        temp_dir=None, num_threads=8, chunk_size=10000000)"
 )]
 pub fn align(
     py: Python<'_>,
@@ -152,10 +134,6 @@ pub fn align(
     temp_dir: Option<PathBuf>,
     num_threads: u16,
     chunk_size: usize,
-    expected_cells: Option<u32>,
-    barcode_filtering_quantile: f64,
-    barcode_bootstrap_samples: u32,
-    qc_metrics_path: Option<PathBuf>,
 ) -> Result<HashMap<String, f64>> {
     let assay = match assay.extract::<PathBuf>() {
         Ok(p) => seqspec::Assay::from_path(&p).unwrap(),
@@ -172,19 +150,6 @@ pub fn align(
     let mut processor = FastqProcessor::new(assay)
         .with_modality(modality)
         .with_barcode_correct_prob(0.9);
-    
-    // Add expected cells if provided
-    if let Some(cells) = expected_cells {
-        processor = processor.with_expected_cells(cells as usize);
-    }
-
-    // Configure barcode filtering parameters and metrics path
-    processor = processor
-        .with_barcode_filtering_params(
-            barcode_filtering_quantile, 
-            barcode_bootstrap_samples as usize,
-            qc_metrics_path.as_deref()
-        );
     
     if !mito_dna.is_empty() {
         debug!("Adding mitochondrial DNA references: {:?}", mito_dna);
@@ -214,15 +179,7 @@ pub fn align(
     let result = match OutputType::try_from(output_type)? {
         OutputType::Alignment => {
             write_alignments(py, output, &header, alignments)?;
-            let qc_map: HashMap<String, f64> = processor.get_report().into();
-            
-            // Write QC metrics to JSON file if metrics_path is provided
-            if let Some(metrics_path) = &qc_metrics_path {
-                write_qc_metrics_to_json(metrics_path, &qc_map, "all_qc_metrics.json")?;
-                write_qc_metrics_to_json(metrics_path, &qc_map, "consolidated_qc_metrics.json")?;
-            }
-            
-            Ok(qc_map)
+            Ok(processor.get_report().into())
         }
         OutputType::Fragment => {
             debug!("Generating fragments");
@@ -234,11 +191,11 @@ pub fn align(
             let mut writer = create_file(output.clone(), compression, compression_level, num_threads as u32)?;
 
             let mut fragment_generator = FragmentGenerator::default();
-            if let Some(dir) = temp_dir.clone() {
+            fragment_generator.set_shift_left(shift_left);
+            fragment_generator.set_shift_right(shift_right);
+            if let Some(dir) = temp_dir.as_ref() {
                 debug!("Using temporary directory: {:?}", dir);
                 fragment_generator.set_temp_dir(dir);
-                fragment_generator.set_shift_left(shift_left);
-                fragment_generator.set_shift_right(shift_right);
             }
             
             let frag_qc = write_fragments(
@@ -252,16 +209,7 @@ pub fn align(
             let mut qc = processor.get_report();
             frag_qc.report(&mut qc);
             
-            // Convert QC metrics to a HashMap
-            let qc_map: HashMap<String, f64> = qc.clone().into();
-            
-            // Write QC metrics to JSON file if metrics_path is provided
-            if let Some(metrics_path) = &qc_metrics_path {
-                write_qc_metrics_to_json(metrics_path, &qc_map, "all_qc_metrics.json")?;
-                write_qc_metrics_to_json(metrics_path, &qc_map, "consolidated_qc_metrics.json")?;
-            }
-            
-            Ok(qc_map)
+            Ok(qc.clone().into())
         }
         OutputType::GeneQuantification => {
             let mut quantifier = Quantifier::new(transcript_annotator.unwrap());
@@ -270,16 +218,7 @@ pub fn align(
             let mut qc = processor.get_report();
             quant_qc.report(&mut qc);
             
-            // Convert QC metrics to a HashMap
-            let qc_map: HashMap<String, f64> = qc.clone().into();
-            
-            // Write QC metrics to JSON file if metrics_path is provided
-            if let Some(metrics_path) = &qc_metrics_path {
-                write_qc_metrics_to_json(metrics_path, &qc_map, "all_qc_metrics.json")?;
-                write_qc_metrics_to_json(metrics_path, &qc_map, "consolidated_qc_metrics.json")?;
-            }
-            
-            Ok(qc_map)
+            Ok(qc.clone().into())
         }
     };
 
@@ -337,31 +276,4 @@ fn write_fragments<'a>(
             })
         });
     Ok(fragment_qc)
-}
-
-/// Write QC metrics to a JSON file
-fn write_qc_metrics_to_json(
-    metrics_path: &PathBuf,
-    qc: &HashMap<String, f64>,
-    file_name: &str,
-) -> Result<()> {
-    let metrics_file_path = metrics_path.join(file_name);
-    info!("Writing QC metrics to: {:?}", metrics_file_path);
-    
-    // Create a JSON-compatible structure
-    let json_metrics = serde_json::to_value(qc)?;
-    
-    // Ensure the directory exists
-    if let Some(parent) = metrics_file_path.parent() {
-        if !parent.exists() {
-            std::fs::create_dir_all(parent)?;
-        }
-    }
-    
-    // Write the metrics to file
-    let file = std::fs::File::create(&metrics_file_path)?;
-    serde_json::to_writer_pretty(file, &json_metrics)?;
-    info!("Successfully wrote QC metrics to {:?}", metrics_file_path);
-    
-    Ok(())
 }

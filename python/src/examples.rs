@@ -20,6 +20,29 @@ fn txg_rna_v3(py: Python<'_>) -> Result<HashMap<&str, PathBuf>> {
 }
 
 #[pyfunction]
+fn txg_atac(py: Python<'_>) -> Result<HashMap<&str, PathBuf>> {
+    let atac_i2 = retrieve_file(
+        py,
+        "https://osf.io/download/nv34x",
+        "md5:6b2a6e536b8c351ae08f574f74c43e83",
+        "10x_atac_I2.fq.zst",
+    )?;
+    let atac_r1 = retrieve_file(
+        py,
+        "https://osf.io/download/7dm48",
+        "md5:0ee922b6f5a4774eb3cc425e93f7c532",
+        "10x_atac_R1.fq.zst",
+    )?;
+    let atac_r2 = retrieve_file(
+        py,
+        "https://osf.io/download/vf5ya",
+        "md5:c9257abf04f5f9af7d0e2bd21de761c0",
+        "10x_atac_R2.fq.zst",
+    )?;
+    Ok(HashMap::from([("I2", atac_i2), ("R1", atac_r1), ("R2", atac_r2)]))
+}
+
+#[pyfunction]
 fn txg_multiome(py: Python<'_>) -> Result<HashMap<&str, PathBuf>> {
     let rna_r1 = retrieve_file(
         py,
@@ -142,6 +165,47 @@ fn share_seq(py: Python<'_>) -> Result<HashMap<&str, PathBuf>> {
     ]))
 }
 
+#[pyfunction]
+fn snare_seq(py: Python<'_>) -> Result<HashMap<&str, PathBuf>> {
+    let rna_r1 = retrieve_file(
+        py,
+        "https://osf.io/download/f4jat",
+        "md5:816d88d618fa51be87e149074932346c",
+        "snare_seq_rna-R1.fq.zst",
+    )?;
+    let rna_r2 = retrieve_file(
+        py,
+        "https://osf.io/download/pa4dm",
+        "md5:6261446f297b44cc196816a09911750e",
+        "snare_seq_rna-R2.fq.zst",
+    )?;
+    let atac_i1 = retrieve_file(
+        py,
+        "https://osf.io/download/b2stp",
+        "md5:1264525b00e6598ba72389b90b114b57",
+        "snare_seq_atac-I1.fq.zst",
+    )?;
+    let atac_r1 = retrieve_file(
+        py,
+        "https://osf.io/download/r7hjx",
+        "md5:c35ef90ddc110d32d7bcb6f14db3fad4",
+        "snare_seq_atac-R1.fq.zst",
+    )?;
+    let atac_r2 = retrieve_file(
+        py,
+        "https://osf.io/download/rqbkw/",
+        "md5:73c6b2ccef40a0109c762104f12068dd",
+        "snare_seq_atac-R2.fq.zst",
+    )?;
+    Ok(HashMap::from([
+        ("rna-R1", rna_r1),
+        ("rna-R2", rna_r2),
+        ("atac-I1", atac_i1),
+        ("atac-R1", atac_r1),
+        ("atac-R2", atac_r2),
+    ]))
+}
+
 fn retrieve_file(py: Python<'_>, url: &str, known_hash: &str, fname: &str) -> Result<PathBuf> {
     let pooch = PyModule::import(py, "pooch")?;
     let kwargs = pyo3::types::PyDict::new(py);
@@ -157,10 +221,12 @@ pub(crate) fn register_examples(parent_module: &Bound<'_, PyModule>) -> PyResult
     let m = PyModule::new(parent_module.py(), "examples")?;
 
     m.add_function(wrap_pyfunction!(txg_rna_v3, &m)?)?;
+    m.add_function(wrap_pyfunction!(txg_atac, &m)?)?;
     m.add_function(wrap_pyfunction!(sci_rna_seq3, &m)?)?;
     m.add_function(wrap_pyfunction!(dsc_atac, &m)?)?;
     m.add_function(wrap_pyfunction!(txg_multiome, &m)?)?;
     m.add_function(wrap_pyfunction!(share_seq, &m)?)?;
+    m.add_function(wrap_pyfunction!(snare_seq, &m)?)?;
 
     parent_module.add_submodule(&m)
 }
