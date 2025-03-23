@@ -20,6 +20,23 @@ fn txg_rna_v3(py: Python<'_>) -> Result<HashMap<&str, PathBuf>> {
 }
 
 #[pyfunction]
+fn mars_seq(py: Python<'_>) -> Result<HashMap<&str, PathBuf>> {
+    let rna_r1 = retrieve_file(
+        py,
+        "https://osf.io/download/s45kg",
+        "md5:3daa417056e31aa8fe2f3de504c50ec4",
+        "mars_seq_rna_R1.fq.zst",
+    )?;
+    let rna_r2 = retrieve_file(
+        py,
+        "https://osf.io/download/r3vdu",
+        "md5:933a6136018f59d44bacc31570d56c26",
+        "mars_seq_rna_R2.fq.zst",
+    )?;
+    Ok(HashMap::from([("R1", rna_r1), ("R2", rna_r2)]))
+}
+
+#[pyfunction]
 fn txg_atac(py: Python<'_>) -> Result<HashMap<&str, PathBuf>> {
     let atac_i2 = retrieve_file(
         py,
@@ -206,6 +223,47 @@ fn snare_seq(py: Python<'_>) -> Result<HashMap<&str, PathBuf>> {
     ]))
 }
 
+#[pyfunction]
+fn droplet_paired_tag(py: Python<'_>) -> Result<HashMap<&str, PathBuf>> {
+    let rna_r1 = retrieve_file(
+        py,
+        "https://osf.io/download/zat7v",
+        "md5:d69f4d0e04f8257868f63d904cf3ca83",
+        "droplet_paired_tag_rna_R1.fq.zst",
+    )?;
+    let rna_r2 = retrieve_file(
+        py,
+        "https://osf.io/download/3r9tg",
+        "md5:08ff0fe213600c9ce73e3d507125a964",
+        "droplet_paired_tag_rna_R2.fq.zst",
+    )?;
+    let atac_r1 = retrieve_file(
+        py,
+        "https://osf.io/download/mxquz",
+        "md5:8d02974f25f0ab28bfc92f6cc8e8bcbf",
+        "droplet_paired_tag_atac_R1.fq.zst",
+    )?;
+    let atac_r2 = retrieve_file(
+        py,
+        "https://osf.io/download/e6pyq/",
+        "md5:c0859bceb4ddc9b12f6c25874edd6903",
+        "droplet_paired_tag_atac_R2.fq.zst",
+    )?;
+    let atac_i2 = retrieve_file(
+        py,
+        "https://osf.io/download/m63pw/",
+        "md5:44efed45d305c60e0b92631b0e44cc73",
+        "droplet_paired_tag_atac_I2.fq.zst",
+    )?;
+    Ok(HashMap::from([
+        ("rna-R1", rna_r1),
+        ("rna-R2", rna_r2),
+        ("atac-R1", atac_r1),
+        ("atac-R2", atac_r2),
+        ("atac-I2", atac_i2),
+    ]))
+}
+
 fn retrieve_file(py: Python<'_>, url: &str, known_hash: &str, fname: &str) -> Result<PathBuf> {
     let pooch = PyModule::import(py, "pooch")?;
     let kwargs = pyo3::types::PyDict::new(py);
@@ -227,6 +285,8 @@ pub(crate) fn register_examples(parent_module: &Bound<'_, PyModule>) -> PyResult
     m.add_function(wrap_pyfunction!(txg_multiome, &m)?)?;
     m.add_function(wrap_pyfunction!(share_seq, &m)?)?;
     m.add_function(wrap_pyfunction!(snare_seq, &m)?)?;
+    m.add_function(wrap_pyfunction!(droplet_paired_tag, &m)?)?;
+    m.add_function(wrap_pyfunction!(mars_seq, &m)?)?;
 
     parent_module.add_submodule(&m)
 }

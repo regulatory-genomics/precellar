@@ -83,6 +83,33 @@ print(rna_qc)
 </details>
 
 
+<details>
+<summary>MARS-seq</summary>
+
+```python
+import precellar
+
+assay = precellar.Assay('https://raw.githubusercontent.com/regulatory-genomics/precellar/refs/heads/main/seqspec_templates/mars_seq.yaml')
+
+data = precellar.examples.mars_seq()
+assay.add_illumina_reads(modality='rna')
+assay.update_read('rna-R1', fastq=data['R1'])
+assay.update_read('rna-R2', fastq=data['R2'])
+
+rna_qc = precellar.align(
+    assay,
+    precellar.aligners.STAR("STAR_reference/refdata-gex-GRCm39-2024-A"), 
+    modality="rna",
+    output="gene_matrix.h5ad",
+    output_type="gene_quantification",
+    num_threads=8,
+)
+print(rna_qc)
+```
+
+</details>
+
+
 ### Chromatin accessibility and protein-DNA interactions
 
 <details>
@@ -168,7 +195,7 @@ print(rna_qc)
 
 atac_qc = precellar.align(
     assay,
-    precellar.aligners.BWAMEM2("/data/Public/BWA_MEM2_index/GRCh38"),
+    precellar.aligners.BWAMEM2("/data/Public/BWA_MEM2_index/GRCm39"),
     modality="atac",
     output='fragments.tsv.zst',
     output_type='fragment',
@@ -259,5 +286,48 @@ print(atac_qc)
 ```
 
 </details>
+
+
+<details>
+<summary>Droplet Paired-Tag</summary>
+
+```python
+import precellar
+
+assay = precellar.Assay('https://raw.githubusercontent.com/regulatory-genomics/precellar/refs/heads/main/seqspec_templates/droplet_paired_tag.yaml')
+
+data = precellar.examples.droplet_paired_tag()
+assay.add_illumina_reads('rna')
+assay.update_read('rna-R1', fastq=data['rna-R1'])
+assay.update_read('rna-R2', fastq=data['rna-R2'])
+
+assay.add_illumina_reads('atac')
+assay.update_read('atac-I2', fastq=data['atac-I2'])
+assay.update_read('atac-R1', fastq=data['atac-R1'])
+assay.update_read('atac-R2', fastq=data['atac-R2'])
+
+rna_qc = precellar.align(
+    assay,
+    precellar.aligners.STAR("STAR_reference/refdata-gex-GRCm39-2024-A"), 
+    modality="rna",
+    output="gene_matrix.h5ad",
+    output_type="gene_quantification",
+    num_threads=8,
+)
+print(rna_qc)
+
+atac_qc = precellar.align(
+    assay,
+    precellar.aligners.BWAMEM2("/data/Public/BWA_MEM2_index/GRCm39"),
+    modality="atac",
+    output='fragments.tsv.zst',
+    output_type='fragment',
+    num_threads=8,
+)
+print(atac_qc)
+```
+
+</details>
+
 
 For more information, please refer to the documentation: https://lab.kaizhang.org/precellar/.

@@ -12,7 +12,7 @@ use log::{debug, info, warn};
 use noodles::{bam, fastq};
 use rayon::iter::ParallelIterator;
 use rayon::slice::ParallelSlice;
-use seqspec::{Assay, FastqReader, Modality, Read, RegionId, SegmentInfo};
+use seqspec::{Assay, FastqReader, Modality, Read, RegionId, SegmentInfo, SequenceType};
 use smallvec::SmallVec;
 use std::collections::{HashMap, HashSet};
 
@@ -146,7 +146,16 @@ impl FastqProcessor {
                         id,
                         whitelist.num_seen_barcodes(),
                     );
-                } else {
+                } else if self
+                    .assay
+                    .library_spec
+                    .get("id")
+                    .unwrap()
+                    .read()
+                    .unwrap()
+                    .sequence_type
+                    == SequenceType::Onlist
+                {
                     whitelist.predict_whitelist();
                 }
             }
