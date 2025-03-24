@@ -149,7 +149,7 @@ impl FastqProcessor {
                 } else if self
                     .assay
                     .library_spec
-                    .get("id")
+                    .get(id)
                     .unwrap()
                     .read()
                     .unwrap()
@@ -241,7 +241,9 @@ impl FastqProcessor {
                     let list = if let Some(onlist) = r.onlist.as_ref() {
                         Whitelist::new(onlist.read().unwrap())
                     } else {
-                        warn!("Barcode region '{}' does not have a whitelist", id);
+                        if r.sequence_type == SequenceType::Onlist {
+                            warn!("Barcode region '{}' does not have a whitelist", id);
+                        }
                         Whitelist::empty()
                     };
                     Some((id, list))

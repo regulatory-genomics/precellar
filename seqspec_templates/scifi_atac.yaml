@@ -4,7 +4,7 @@ assay_id: scifi_atac
 name: scifi-ATAC-seq
 doi: https://doi.org/10.1186/s13059-024-03235-5
 date: 08 April 2024
-description: scifi-ATAC-seq: massive-scale single-cell chromatin accessibility sequencing using combinatorial fluidic indexing
+description: massive-scale single-cell chromatin accessibility sequencing using combinatorial fluidic indexing
 modalities:
 - atac
 lib_struct: https://teichlab.github.io/scg_lib_structs/methods_html/scifi-ATAC-seq.html
@@ -41,10 +41,10 @@ sequence_spec:
   read_id: I2
   name: GEM Barcode Index
   modality: atac
-  primer_id: illumina_p5
+  primer_id: custom_read1
   min_len: 16
   max_len: 16
-  strand: pos
+  strand: neg
 library_spec:
 - !Region
   parent_id: null
@@ -73,11 +73,19 @@ library_spec:
     region_id: gem_barcode
     region_type: barcode
     name: GEM Barcode
-    sequence_type: random
+    sequence_type: onlist
     sequence: NNNNNNNNNNNNNNNN
     min_len: 16
     max_len: 16
-    onlist: null
+    onlist: !Onlist
+      file_id: 737K-cratac-v1.txt.gz
+      filename: 737K-cratac-v1.txt.gz
+      filetype: txt
+      filesize: 0
+      url: https://osf.io/download/dy8uj
+      urltype: https
+      md5: null
+      location: remote
     regions: null
   - !Region
     parent_id: atac
@@ -99,7 +107,15 @@ library_spec:
     sequence: NNNNN
     min_len: 5
     max_len: 5
-    onlist: null
+    onlist: !Onlist
+      file_id: tn5_index_A.txt.gz
+      filename: tn5_index_A.txt.gz
+      filetype: txt
+      filesize: 0
+      url: https://osf.io/download/q8cpm
+      urltype: https
+      md5: null
+      location: remote
     regions: null
   - !Region
     parent_id: atac
@@ -120,7 +136,7 @@ library_spec:
     sequence_type: random
     sequence: XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
     min_len: 1
-    max_len: 1800
+    max_len: 1000
     onlist: null
     regions: null
   - !Region
@@ -139,11 +155,19 @@ library_spec:
     region_id: tn5_index_B
     region_type: barcode
     name: Tn5 Index B
-    sequence_type: random
+    sequence_type: onlist
     sequence: NNNNN
     min_len: 5
     max_len: 5
-    onlist: null
+    onlist: !Onlist
+      file_id: tn5_index_B.txt.gz
+      filename: tn5_index_B.txt.gz
+      filetype: txt
+      filesize: 0
+      url: https://osf.io/download/vf9tq
+      urltype: https
+      md5: null
+      location: remote
     regions: null
   - !Region
     parent_id: atac

@@ -255,7 +255,7 @@ impl Whitelist {
     }
 
     pub fn predict_whitelist(&mut self) {
-        if !self.whitelist_exists {
+        if !self.whitelist_exists && !self.barcode_counts.is_empty() {
             info!("Predicting whitelist from {} barcode ...", self.barcode_counts.len());
             let counts = self
                 .barcode_counts

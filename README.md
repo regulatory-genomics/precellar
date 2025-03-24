@@ -163,6 +163,34 @@ print(atac_qc)
 
 </details>
 
+
+<details>
+<summary>scifi-ATAC-seq</summary>
+
+```python
+import precellar
+
+assay = precellar.Assay('https://raw.githubusercontent.com/regulatory-genomics/precellar/refs/heads/main/seqspec_templates/scifi_atac.yaml')
+
+data = precellar.examples.scifi_atac()
+assay.update_read('I2', fastq=data['I2'])
+assay.update_read('R1', fastq=data['R1'])
+assay.update_read('R2', fastq=data['R2'])
+
+atac_qc = precellar.align(
+    assay,
+    precellar.aligners.BWAMEM2("BWA_MEM2_index/Zea_mays"),
+    modality="atac",
+    output='fragments.tsv.zst',
+    output_type='fragment',
+    num_threads=8,
+)
+print(atac_qc)
+```
+
+</details>
+
+
 ### Multi-Omics
 
 <details>

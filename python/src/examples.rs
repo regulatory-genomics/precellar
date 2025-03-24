@@ -60,6 +60,29 @@ fn txg_atac(py: Python<'_>) -> Result<HashMap<&str, PathBuf>> {
 }
 
 #[pyfunction]
+fn scifi_atac(py: Python<'_>) -> Result<HashMap<&str, PathBuf>> {
+    let atac_i2 = retrieve_file(
+        py,
+        "https://osf.io/download/3qymw",
+        "md5:eef3995922093eb8db2f554e555a638b",
+        "scifi_atac_I2.fq.zst",
+    )?;
+    let atac_r1 = retrieve_file(
+        py,
+        "https://osf.io/download/huxev",
+        "md5:bb08eecd5c9bbc33fba61c14f0689ed7",
+        "scifi_atac_I2.fq.zst",
+    )?;
+    let atac_r2 = retrieve_file(
+        py,
+        "https://osf.io/download/27kvw",
+        "md5:ed78ba24348a6f2ae949acba9c013e1b",
+        "10x_atac_R2.fq.zst",
+    )?;
+    Ok(HashMap::from([("I2", atac_i2), ("R1", atac_r1), ("R2", atac_r2)]))
+}
+
+#[pyfunction]
 fn txg_multiome(py: Python<'_>) -> Result<HashMap<&str, PathBuf>> {
     let rna_r1 = retrieve_file(
         py,
@@ -282,6 +305,7 @@ pub(crate) fn register_examples(parent_module: &Bound<'_, PyModule>) -> PyResult
     m.add_function(wrap_pyfunction!(txg_atac, &m)?)?;
     m.add_function(wrap_pyfunction!(sci_rna_seq3, &m)?)?;
     m.add_function(wrap_pyfunction!(dsc_atac, &m)?)?;
+    m.add_function(wrap_pyfunction!(scifi_atac, &m)?)?;
     m.add_function(wrap_pyfunction!(txg_multiome, &m)?)?;
     m.add_function(wrap_pyfunction!(share_seq, &m)?)?;
     m.add_function(wrap_pyfunction!(snare_seq, &m)?)?;
