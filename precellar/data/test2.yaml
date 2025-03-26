@@ -8,6 +8,7 @@ description: Simultaneous high-throughput atac and rna expression in the same si
   cell
 lib_struct: https://teichlab.github.io/scg_lib_structs/methods_html/SHARE-seq.html
 modalities:
+- atac
 - rna
 library_protocol: Custom
 library_kit: Custom
@@ -15,54 +16,244 @@ sequence_protocol: Illumina
 sequence_kit: Custom
 sequence_spec:
 - !Read
-  read_id: RNA-R1
+  read_id: atac-R1
+  name: Read 3
+  modality: atac
+  primer_id: ME1
+  min_len: 50
+  max_len: 50
+  strand: pos
+  files: []
+- !Read
+  read_id: atac-R2
+  name: Read 4
+  modality: atac
+  primer_id: ME2
+  min_len: 50
+  max_len: 50
+  strand: neg
+  files: []
+- !Read
+  read_id: atac-I1
+  name: barcode
+  modality: atac
+  primer_id: s7
+  min_len: 99
+  max_len: 99
+  strand: pos
+  files: []
+- !Read
+  read_id: rna-R1
   name: Read 1
   modality: rna
   primer_id: ME3
   min_len: 1
   max_len: 50
   strand: pos
-  files:
-  - file_id: test2_R1.fq.zst
-    filename: test2_R1.fq.zst
-    filetype: fastq
-    filesize: 0
-    url: test2_R1.fq.zst
-    urltype: local
-    md5: 0
+  files: []
 - !Read
-  read_id: RNA-R2
+  read_id: rna-R2
   name: Read 2
   modality: rna
   primer_id: ME4
   min_len: 1
   max_len: 50
   strand: neg
-  files:
-  - file_id: test2_R2.fq.zst
-    filename: test2_R2.fq.zst
-    filetype: fastq
-    filesize: 0
-    url: test2_R2.fq.zst
-    urltype: local
-    md5: 0
+  files: []
 - !Read
-  read_id: rna-barcode
+  read_id: rna-I1
   name: barcode
   modality: rna
   primer_id: s7_2
   min_len: 99
   max_len: 99
   strand: pos
-  files:
-  - file_id: test2_I1.fq.zst
-    filename: test2_I1.fq.zst
-    filetype: fastq
-    filesize: 0
-    url: test2_I1.fq.zst
-    urltype: local
-    md5: 0
+  files: []
 library_spec:
+- !Region
+  region_id: atac
+  region_type: atac
+  name: atac
+  sequence_type: joined
+  sequence: AATGATACGGCGACCACCGAGATCTACACNNNNNNNNTCGTCGGCAGCGTCAGATGTGTATAAGAGACAGNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNTCGGACGATCATGGGNNNNNNNNCAAGTATGCAGCGCGCTCAAGCACGTGGATNNNNNNNNAGTCGTACGCCGATGCGAAACATCGGCCACNNNNNNNN
+  min_len: 199
+  max_len: 199
+  onlist: null
+  regions:
+  - !Region
+    region_id: illumina_p5
+    region_type: illumina_p5
+    name: illumina_p5
+    sequence_type: fixed
+    sequence: AATGATACGGCGACCACCGAGATCTACAC
+    min_len: 29
+    max_len: 29
+    onlist: null
+    regions: null
+    parent_id: atac
+  - !Region
+    region_id: index5
+    region_type: index5
+    name: index5
+    sequence_type: onlist
+    sequence: NNNNNNNN
+    min_len: 8
+    max_len: 8
+    onlist: !Onlist
+      file_id: index5_onlist.txt
+      filename: index5_onlist.txt
+      filetype: ''
+      filesize: 0
+      url: ''
+      urltype: 'https'
+      md5: null
+      location: local
+    regions: null
+    parent_id: atac
+  - !Region
+    region_id: s5
+    region_type: s5
+    name: s5
+    sequence_type: fixed
+    sequence: TCGTCGGCAGCGTC
+    min_len: 14
+    max_len: 14
+    onlist: null
+    regions: null
+    parent_id: atac
+  - !Region
+    region_id: ME1
+    region_type: custom_primer
+    name: ME1
+    sequence_type: fixed
+    sequence: AGATGTGTATAAGAGACAG
+    min_len: 19
+    max_len: 19
+    onlist: null
+    regions: null
+    parent_id: atac
+  - !Region
+    region_id: ATAC-R1
+    region_type: gdna
+    name: atac Read 1 FASTQ
+    sequence_type: random
+    sequence: NNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNN
+    min_len: 1
+    max_len: 1000
+    onlist: null
+    regions: null
+  - !Region
+    region_id: ME2
+    region_type: custom_primer
+    name: ME2
+    sequence_type: fixed
+    sequence: CTGTCTCTTATACACATCT
+    min_len: 19
+    max_len: 19
+    onlist: null
+    regions: null
+    parent_id: atac
+  - !Region
+    region_id: s7
+    region_type: custom_primer
+    name: s7
+    sequence_type: fixed
+    sequence: CCGAGCCCACGAGAC
+    min_len: 15
+    max_len: 15
+    onlist: null
+    regions: null
+    parent_id: atac
+  - !Region
+    region_id: atac-linker1
+    region_type: linker
+    name: atac linker1
+    sequence_type: fixed
+    sequence: TCGGACGATCATGGG
+    min_len: 15
+    max_len: 15
+    onlist: null
+    regions: null
+    parent_id: atac
+  - !Region
+    region_id: atac-cell-barcode1
+    region_type: barcode
+    name: atac Cell Barcode 1
+    sequence_type: onlist
+    sequence: NNNNNNNN
+    min_len: 8
+    max_len: 8
+    onlist: !Onlist
+      file_id: share_seq-round_1_bc.txt.gz
+      filename: share_seq-round_1_bc.txt.gz
+      filetype: txt
+      filesize: 0
+      url: 'https://osf.io/download/ac7mq'
+      urltype: https
+      md5: null
+      location: remote
+    regions: null
+    parent_id: atac
+  - !Region
+    region_id: atac-linker2
+    region_type: linker
+    name: linker2
+    sequence_type: fixed
+    sequence: CAAGTATGCAGCGCGCTCAAGCACGTGGAT
+    min_len: 30
+    max_len: 30
+    onlist: null
+    regions: null
+    parent_id: atac
+  - !Region
+    region_id: atac-cell-barcode2
+    region_type: barcode
+    name: atac Cell Barcode 2
+    sequence_type: onlist
+    sequence: NNNNNNNN
+    min_len: 8
+    max_len: 8
+    onlist: !Onlist
+      file_id: share_seq-round_2_bc.txt.gz
+      filename: share_seq-round_2_bc.txt.gz
+      filetype: txt
+      filesize: 0
+      url: https://osf.io/download/5rf3q
+      urltype: https
+      md5: null
+      location: remote
+    regions: null
+    parent_id: atac
+  - !Region
+    region_id: atac-linker3
+    region_type: linker
+    name: linker3
+    sequence_type: fixed
+    sequence: AGTCGTACGCCGATGCGAAACATCGGCCAC
+    min_len: 30
+    max_len: 30
+    onlist: null
+    regions: null
+    parent_id: atac-raw-cell-barcode
+  - !Region
+    region_id: atac-cell-barcode3
+    region_type: barcode
+    name: atac Cell Barcode 3
+    sequence_type: onlist
+    sequence: NNNNNNNN
+    min_len: 8
+    max_len: 8
+    onlist: !Onlist
+      file_id: share_seq-round_3_bc.txt.gz
+      filename: share_seq-round_3_bc.txt.gz
+      filetype: txt
+      filesize: 0
+      url: https://osf.io/download/kau8f
+      urltype: https
+      md5: null
+      location: remote
+    regions: null
+    parent_id: atac
 - !Region
   region_id: rna
   region_type: rna
@@ -133,9 +324,20 @@ library_spec:
     sequence: NNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNN
     onlist: null
     min_len: 0
-    max_len: 100
-    parent_id: RNA-R1
+    max_len: 1000
+    parent_id: rna
     regions: null
+  - !Region
+    region_id: umi
+    region_type: umi
+    name: umi
+    sequence_type: random
+    sequence: XXXXXXXXXX
+    min_len: 10
+    max_len: 10
+    onlist: null
+    regions: null
+    parent_id: rna
   - !Region
     region_id: ME4
     region_type: custom_primer
@@ -178,12 +380,12 @@ library_spec:
     min_len: 8
     max_len: 8
     onlist: !Onlist
-      file_id: R1_human_barcodes.txt
-      filename: R1_human_barcodes.txt
-      filetype: ''
+      file_id: share_seq-round_1_bc.txt.gz
+      filename: share_seq-round_1_bc.txt.gz
+      filetype: txt
       filesize: 0
-      url: '../../data/barcode/share-seq-R1.txt'
-      urltype: 'local'
+      url: share_seq-round_1_bc.txt.gz
+      urltype: local
       md5: null
       location: local
     regions: null
@@ -208,12 +410,12 @@ library_spec:
     min_len: 8
     max_len: 8
     onlist: !Onlist
-      file_id: R2_human_barcodes.txt
-      filename: R2_human_barcodes.txt
-      filetype: ''
+      file_id: share_seq-round_2_bc.txt.gz
+      filename: share_seq-round_2_bc.txt.gz
+      filetype: txt
       filesize: 0
-      url: '../../data/barcode/share-seq-R2.txt'
-      urltype: 'local'
+      url: share_seq-round_2_bc.txt.gz
+      urltype: local
       md5: null
       location: local
     regions: null
@@ -238,12 +440,12 @@ library_spec:
     min_len: 8
     max_len: 8
     onlist: !Onlist
-      file_id: R3_human_barcodes.txt
-      filename: R3_human_barcodes.txt
-      filetype: ''
+      file_id: share_seq-round_3_bc.txt.gz
+      filename: share_seq-round_3_bc.txt.gz
+      filetype: txt
       filesize: 0
-      url: '../../data/barcode/share-seq-R3.txt'
-      urltype: 'local'
+      url: share_seq-round_3_bc.txt.gz
+      urltype: local
       md5: null
       location: local
     regions: null

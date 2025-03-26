@@ -30,14 +30,6 @@ sequence_spec:
   max_len: 100
   strand: neg
 - !Read
-  read_id: I1
-  name: Sample Index
-  modality: atac
-  primer_id: illumina_p7
-  min_len: 8
-  max_len: 8
-  strand: neg
-- !Read
   read_id: I2
   name: GEM Barcode Index
   modality: atac

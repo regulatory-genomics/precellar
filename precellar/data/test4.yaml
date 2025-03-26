@@ -21,14 +21,6 @@ sequence_spec:
   min_len: 36
   max_len: 36
   strand: pos
-  files:
-  - file_id: test4_R1.fq.zst
-    filename: test4_R1.fq.zst
-    filetype: fastq
-    filesize: 0
-    url: test4_R1.fq.zst
-    urltype: local
-    md5: 0
 - !Read
   read_id: R2
   name: Read 2
@@ -37,14 +29,6 @@ sequence_spec:
   min_len: 50
   max_len: 150
   strand: neg
-  files:
-  - file_id: test4_R2.fq.zst
-    filename: test4_R2.fq.zst
-    filetype: fastq
-    filesize: 0
-    url: test4_R2.fq.zst
-    urltype: local
-    md5: 0
 library_spec:
 - !Region
   region_id: rna
@@ -98,11 +82,11 @@ library_spec:
     min_len: 9
     max_len: 10
     onlist: !Onlist
-      file_id: sciRNAseq3_9bp_barcodes.txt
-      filename: sciRNAseq3_9bp_barcodes.txt
+      file_id: sci_RNA_seq3-hp.txt.gz
+      filename: sci_RNA_seq3-hp.txt.gz
       filetype: txt
       filesize: 0
-      url: ../../data/barcode/sci-RNA-seq3_9bp_barcodes.txt
+      url: sci_RNA_seq3-hp.txt.gz
       urltype: local
       md5: 0
       location: local
@@ -139,11 +123,11 @@ library_spec:
     min_len: 10
     max_len: 10
     onlist: !Onlist
-      file_id: sciRNAseq3_RT_384_bc.txt
-      filename: sciRNAseq3_RT_384_bc.txt
+      file_id: sci_RNA_seq3-rt.txt.gz
+      filename: sci_RNA_seq3-rt.txt.gz
       filetype: txt
       filesize: 0
-      url: ../../data/barcode/sci-RNA-seq3_RT_384_bc.txt
+      url: sci_RNA_seq3-rt.txt.gz
       urltype: local
       md5: 0
       location: local
@@ -155,8 +139,8 @@ library_spec:
     name: Poly T
     sequence_type: fixed
     sequence: TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTVN
-    min_len: 1
-    max_len: 100
+    min_len: 30
+    max_len: 32
     onlist: null
     regions: null
     parent_id: rna

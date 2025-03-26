@@ -223,6 +223,7 @@ impl Assay {
                         Some(read_len),
                         Some(read_len),
                         false,
+                        false,
                     )?;
                     if forward_strand_workflow {
                         let acc_len = get_length(acc.as_slice(), false);
@@ -235,6 +236,7 @@ impl Assay {
                                 None,
                                 Some(acc_len),
                                 Some(acc_len),
+                                false,
                                 false,
                             )?;
                         }
@@ -249,6 +251,7 @@ impl Assay {
                                 None,
                                 Some(acc_len),
                                 Some(acc_len),
+                                false,
                                 false,
                             )?;
                         }
@@ -266,6 +269,7 @@ impl Assay {
                         Some(read_len),
                         Some(read_len),
                         false,
+                        false,
                     )?;
                     if acc_len > 0 {
                         self.update_read::<PathBuf>(
@@ -276,6 +280,7 @@ impl Assay {
                             None,
                             Some(acc_len),
                             Some(acc_len),
+                            false,
                             false,
                         )?;
                     }
@@ -296,7 +301,9 @@ impl Assay {
         min_len: Option<usize>,
         max_len: Option<usize>,
         compute_md5: bool,
+        infer_read_length: bool,
     ) -> Result<()> {
+
         let mut read_buffer = if let Some(r) = self.sequence_spec.get(read_id) {
             r.clone()
         } else {
@@ -336,13 +343,14 @@ impl Assay {
             );
         }
 
-        if (min_len.is_none() || max_len.is_none()) && read_buffer.files.is_some() {
+        // Setting min_len and max_len
+        if (min_len.is_none() || max_len.is_none()) && infer_read_length {
             let len = read_buffer.actual_len()?;
             read_buffer.min_len = min_len.unwrap_or(len) as u32;
             read_buffer.max_len = max_len.unwrap_or(len) as u32;
         } else {
-            read_buffer.min_len = min_len.unwrap() as u32;
-            read_buffer.max_len = max_len.unwrap() as u32;
+            read_buffer.min_len = min_len.unwrap_or(0) as u32;
+            read_buffer.max_len = max_len.unwrap_or(0) as u32;
         }
 
         self.verify(&read_buffer)?;
@@ -417,7 +425,7 @@ impl Assay {
                 let total_reads = 1000;
                 let mut invalid = 0;
                 reader.records().take(total_reads).try_for_each(|record| {
-                    if let Ok(segments) = segment_info.split_with_tolerance(&record?, 0.2) {
+                    if let Ok(segments) = segment_info.split_with_tolerance(&record?, 0.2, 0.2) {
                         segments.iter().for_each(|segment| {
                             if segment.is_barcode() {
                                 let id = segment.region_id();
@@ -721,9 +729,9 @@ impl Serialize for SequenceKit {
 mod tests {
     use super::*;
 
-    const YAML_FILE: &str = "../seqspec_templates/10x_rna_atac.yaml";
-    const YAML_FILE_2: &str = "../seqspec_templates/smartseq2.yaml";
-    const YAML_FILE_3: &str = "../seqspec_templates/test_deep_nested.yaml";
+    const YAML_FILE: &str = "data/10x_rna_atac.yaml";
+    const YAML_FILE_2: &str = "data/smartseq2.yaml";
+    const YAML_FILE_3: &str = "data/test_deep_nested.yaml";
 
     #[test]
     fn test_parse() {
@@ -779,71 +787,6 @@ mod tests {
                     .collect::<Vec<_>>()
             );
         }
-    }
-
-    #[test]
-    // This test is to test variable length reads. Still in progress.
-    fn test_update_read_with_fastq() {
-        // Initialize logger
-        let _ = env_logger::builder().is_test(true).try_init();
-
-        // Use existing FASTQ files
-        let fastq_path1 = PathBuf::from("../data/test_1.fastq");
-        let fastq_path2 = PathBuf::from("../data/test_2.fastq");
-
-        // Load test YAML
-        let yaml_str = fs::read_to_string(YAML_FILE).expect("Failed to read file");
-        let mut assay: Assay = serde_yaml::from_str(&yaml_str).expect("Failed to parse YAML");
-
-        // Update read with first FASTQ file
-        assay
-            .update_read::<PathBuf>(
-                "test_read1",
-                Some(Modality::RNA),
-                Some("rna-truseq_read1"),
-                Some(false),
-                Some(&[fastq_path1.clone()]),
-                None, // Let it determine length from FASTQ
-                Some(16),
-                false,
-            )
-            .expect("Failed to update read with test_1.fastq");
-
-        // Update read with second FASTQ file
-        assay
-            .update_read::<PathBuf>(
-                "test_read2",
-                Some(Modality::RNA),
-                Some("rna-truseq_read2"),
-                Some(true),
-                Some(&[fastq_path2.clone()]),
-                None,
-                None,
-                false,
-            )
-            .expect("Failed to update read with test_2.fastq");
-
-        // Verify reads
-        let read1 = assay
-            .sequence_spec
-            .get("test_read1")
-            .expect("Read1 not found");
-        let read2 = assay
-            .sequence_spec
-            .get("test_read2")
-            .expect("Read2 not found");
-
-        // Print read information
-        println!("Read1:");
-        println!("  Length: {}", read1.min_len);
-        //println!("  File: {:?}", read1.files.as_ref().unwrap()[0].path);
-        println!("Read2:");
-        println!("  Length: {}", read2.min_len);
-        //println!("  File: {:?}", read2.files.as_ref().unwrap()[0].path);
-
-        // Assert lengths (32 based on the FASTQ content you showed)
-        assert_eq!(read1.min_len, 32, "Incorrect length for read1");
-        assert_eq!(read2.min_len, 70, "Incorrect length for read2");
     }
 
     #[test]

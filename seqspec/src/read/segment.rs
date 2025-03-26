@@ -135,15 +135,24 @@ impl SegmentInfo {
     }
 
     /// Split a read into segments according to the segment information.
+    /// This function uses a default tolerance of 1.0 for the linker sequence and 0.2 for the anchor sequence,
+    /// which means that we do not check the sequence of the linker and allow up to 20% mismatches for the anchor sequence.
     pub fn split<'a>(&'a self, read: &'a fastq::Record) -> Result<Vec<Segment<'a>>, SplitError> {
-        self.split_with_tolerance(read, 1.0)
+        self.split_with_tolerance(read, 1.0, 0.2)
     }
 
     /// Split a read into segments according to the segment information.
+    /// 
+    /// # Arguments
+    /// 
+    /// * `read` - The read to split
+    /// * `linker_tolerance` - The fraction of mismatches allowed for the linker sequence
+    /// * `anchor_tolerance` - The fraction of mismatches allowed for the anchor sequence
     pub fn split_with_tolerance<'a>(
         &'a self,
         read: &'a fastq::Record,
-        tolerance: f64,
+        linker_tolerance: f64,
+        anchor_tolerance: f64,
     ) -> Result<Vec<Segment<'a>>, SplitError> {
         fn consume_buf<'a>(
             buf: &mut Vec<&'a SegmentInfoElem>,
@@ -205,6 +214,7 @@ impl SegmentInfo {
 
             // Check if the segment is within the read bounds
             if max_offset >= len || min_offset + min_len > len {
+            //if max_offset + min_len > len {
                 break;
             }
 
@@ -218,44 +228,50 @@ impl SegmentInfo {
                             .sequence()
                             .get(min_offset..len.min(max_offset + max_len))
                             .unwrap();
-                        if let (Some(pos), _) =
+                        if let (Some(pos), mis) =
                             find_best_pattern_match(seq, segment.sequence.as_bytes())
                         {
-                            // [offset_left, offset_right] is the region of the read that
-                            // contains segments prior to the matched pattern
-                            let offset_left =
-                                min_offset - buffer.iter().map(|s| s.min_len()).sum::<usize>();
-                            let offset_right = min_offset + pos;
-                            consume_buf(
-                                &mut buffer,
-                                read.sequence().get(offset_left..offset_right).unwrap(),
-                                read.quality_scores()
-                                    .get(offset_left..offset_right)
-                                    .unwrap(),
-                                &mut result,
-                            );
+                            if mis as f64 <= anchor_tolerance * segment.sequence.len() as f64 {
+                                // [offset_left, offset_right] is the region of the read that
+                                // contains segments prior to the matched pattern
+                                let offset_left =
+                                    min_offset - buffer.iter().map(|s| s.min_len()).sum::<usize>();
+                                let offset_right = min_offset + pos;
+                                consume_buf(
+                                    &mut buffer,
+                                    read.sequence().get(offset_left..offset_right).unwrap(),
+                                    read.quality_scores()
+                                        .get(offset_left..offset_right)
+                                        .unwrap(),
+                                    &mut result,
+                                );
 
-                            // as the lengths of the previous segments are identified, we can now
-                            // update the min_offset and max_offset
-                            min_offset = offset_right;
-                            max_offset = offset_right;
+                                // as the lengths of the previous segments are identified, we can now
+                                // update the min_offset and max_offset
+                                min_offset = offset_right;
+                                max_offset = offset_right;
 
-                            let seq = read
-                                .sequence()
-                                .get(offset_right..offset_right + max_len)
-                                .unwrap();
-                            let qual = read
-                                .quality_scores()
-                                .get(offset_right..offset_right + max_len)
-                                .unwrap();
-                            result.push(Segment::new(
-                                SegmentType::Single {
-                                    region_id: segment.region_id.as_str(),
-                                    region_type: segment.region_type,
-                                },
-                                seq,
-                                qual,
-                            ))
+                                let seq = read
+                                    .sequence()
+                                    .get(offset_right..offset_right + max_len)
+                                    .unwrap();
+                                let qual = read
+                                    .quality_scores()
+                                    .get(offset_right..offset_right + max_len)
+                                    .unwrap();
+                                result.push(Segment::new(
+                                    SegmentType::Single {
+                                        region_id: segment.region_id.as_str(),
+                                        region_type: segment.region_type,
+                                    },
+                                    seq,
+                                    qual,
+                                ))
+                            } else if max_offset + max_len > len { // if the pattern is not found and we are at the end of the read
+                                break;
+                            } else {
+                                return Err(SplitError::PatternMismatch(mis))
+                            }
                         } else {
                             return Err(SplitError::AnchorNotFound);
                         }
@@ -272,9 +288,9 @@ impl SegmentInfo {
                         .get(max_offset..max_offset + max_len)
                         .unwrap();
 
-                    if tolerance < 1.0 && segment.sequence_type.is_fixed() {
+                    if linker_tolerance < 1.0 && segment.sequence_type.is_fixed() {
                         let d = hamming::distance(&seq, segment.sequence.as_bytes());
-                        if d as f64 > tolerance * seq.len() as f64 {
+                        if d as f64 > linker_tolerance * seq.len() as f64 {
                             return Err(SplitError::PatternMismatch(d as usize));
                         }
                     }
@@ -600,36 +616,36 @@ mod tests {
 
         assert_eq!(
             split_seq_by(
-                "AAAA A TT ACCG CCCACTG",
-                [bc(4), var(1, 3), umi(2), linker("ACTG")]
+                "AAAA A TT ACCGG CCCACTGG",
+                [bc(4), var(1, 3), umi(2), linker("ACTGG")]
             ),
-            "[B]AAAA,[O]A,[U]TT,[O]ACCG",
+            "[B]AAAA,[O]A,[U]TT,[O]ACCGG",
         );
 
         assert_eq!(
             split_seq_by(
-                "AAAA A TT ACCG CCCACTG",
-                [bc(4), var(1, 3), umi(2), linker("ACTG"), cdna(10, 100)]
+                "AAAA A TT ACCGG CCCACTG",
+                [bc(4), var(1, 3), umi(2), linker("ACTGG"), cdna(10, 100)]
             ),
-            "[B]AAAA,[O]A,[U]TT,[O]ACCG",
+            "[B]AAAA,[O]A,[U]TT,[O]ACCGG",
         );
 
         assert_eq!(
             split_seq_by(
-                "AAAA A TT ACCG CCCACTG",
-                [bc(4), var(1, 3), umi(2), linker("ACTG"), cdna(1, 100)]
+                "AAAA A TT ACCGG CCCACTG",
+                [bc(4), var(1, 3), umi(2), linker("ACTGG"), cdna(1, 100)]
             ),
-            "[B]AAAA,[O]A,[U]TT,[O]ACCG,[T]CCCACTG",
+            "[B]AAAA,[O]A,[U]TT,[O]ACCGG,[T]CCCACTG",
         );
 
         assert_eq!(
             split_seq_by(
-                "AAAA A TT ACCG CC CA GGGG TTTT AT GGGG ACTGGGGGACTG",
+                "AAAA A TT ACCGG CC CA GGGG TTTT AT GGGG ACTGGGGGACTG",
                 [
                     bc(4),
                     var(1, 3),
                     umi(2),
-                    linker("ACTG"),
+                    linker("ACTGG"),
                     var(2, 4),
                     bc(2),
                     linker("GGGG"),
@@ -639,7 +655,7 @@ mod tests {
                     cdna(1, 100),
                 ]
             ),
-            "[B]AAAA,[O]A,[U]TT,[O]ACCG,[O]CC,[B]CA,[O]GGGG,[O]TTTT,[B]AT,[O]GGGG,[T]ACTGGGGGACTG",
+            "[B]AAAA,[O]A,[U]TT,[O]ACCGG,[O]CC,[B]CA,[O]GGGG,[O]TTTT,[B]AT,[O]GGGG,[T]ACTGGGGGACTG",
         );
     }
 }

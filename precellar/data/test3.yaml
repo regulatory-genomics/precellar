@@ -21,14 +21,6 @@ sequence_spec:
   min_len: 0
   max_len: 150
   strand: pos
-  files:
-  - file_id: test3_R1.fq.zst
-    filename: test3_R1.fq.zst
-    filetype: fastq
-    filesize: 0
-    url: test3_R1.fq.zst
-    urltype: local
-    md5: 0
 - !Read
   read_id: R2
   name: Read 2
@@ -37,14 +29,14 @@ sequence_spec:
   min_len: 0
   max_len: 150
   strand: neg
-  files:
-  - file_id: test3_R2.fq.zst
-    filename: test3_R2.fq.zst
-    filetype: fastq
-    filesize: 0
-    url: test3_R2.fq.zst
-    urltype: local
-    md5: 0
+- !Read
+  read_id: I1
+  name: Sample Index
+  modality: atac
+  primer_id: sample_index_primer
+  min_len: 8
+  max_len: 8
+  strand: neg
 library_spec:
 - !Region
   parent_id: null
@@ -89,11 +81,11 @@ library_spec:
     min_len: 7
     max_len: 7
     onlist: !Onlist
-      file_id: dsc_v2_R1.txt
-      filename: dsc_v2_R1.txt
+      file_id: bc1.txt.gz
+      filename: bc1.txt.gz
       filetype: txt
       filesize: 0
-      url: ../../data/barcode/dsc_v2_R1.txt
+      url: bc1.txt.gz
       urltype: local
       md5: 0
       location: local
@@ -130,11 +122,11 @@ library_spec:
     min_len: 7
     max_len: 7
     onlist: !Onlist
-      file_id: dsc_v2_R2.txt
-      filename: dsc_v2_R2.txt
+      file_id: bc2.txt.gz
+      filename: bc2.txt.gz
       filetype: txt
       filesize: 0
-      url: ../../data/barcode/dsc_v2_R2.txt
+      url: bc2.txt.gz
       urltype: local
       md5: 0
       location: local
@@ -160,11 +152,11 @@ library_spec:
     min_len: 7
     max_len: 7
     onlist: !Onlist
-      file_id: dsc_v2_R3.txt
-      filename: dsc_v2_R3.txt
+      file_id: bc3.txt.gz
+      filename: bc3.txt.gz
       filetype: txt
       filesize: 0
-      url: ../../data/barcode/dsc_v2_R3.txt
+      url: bc3.txt.gz
       urltype: local
       location: local
       md5: 0

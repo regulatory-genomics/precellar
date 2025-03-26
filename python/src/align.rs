@@ -3,15 +3,18 @@ use crate::pyseqspec::Assay;
 
 use anyhow::{bail, Result};
 use noodles::sam::{self, alignment::io::Write};
-use pyo3::prelude::*;
+use precellar::qc::{QcAlign, QcFastq};
+use pyo3::{prelude::*, BoundObject};
+use pyo3::types::PyDict;
+use serde_json::Value;
 use std::ops::DerefMut;
-use std::{collections::HashMap, path::PathBuf, str::FromStr};
+use std::{path::PathBuf, str::FromStr};
 use log::debug;
 
 use precellar::{
     align::{FastqProcessor, MultiMapR},
     fragment::FragmentGenerator,
-    qc::FragmentQC,
+    qc::QcFragment,
     transcript::Quantifier,
 };
 use seqspec::{
@@ -119,10 +122,10 @@ pub fn make_bwa_index(fasta: PathBuf, genome_prefix: PathBuf) -> Result<()> {
         compression=None, compression_level=None,
         temp_dir=None, num_threads=8, chunk_size=10000000)"
 )]
-pub fn align(
-    py: Python<'_>,
-    assay: Bound<'_, PyAny>,
-    aligner: Bound<'_, PyAny>,
+pub fn align<'py>(
+    py: Python<'py>,
+    assay: Bound<'py, PyAny>,
+    aligner: Bound<'py, PyAny>,
     output: PathBuf,
     modality: Option<&str>,
     output_type: &str,
@@ -134,14 +137,13 @@ pub fn align(
     temp_dir: Option<PathBuf>,
     num_threads: u16,
     chunk_size: usize,
-) -> Result<HashMap<String, f64>> {
+) -> Result<Bound<'py, PyAny>> {
     let assay = match assay.extract::<PathBuf>() {
         Ok(p) => seqspec::Assay::from_path(&p).unwrap(),
         _ => assay.extract::<PyRef<Assay>>()?.0.clone(),
     };
     
     let modality = modality.map(Modality::from_str).unwrap_or(assay.modality())?;
-    debug!("Using modality: {:?}", modality);
     
     let mut aligner = AlignerRef::try_from(aligner)?;
     let header = aligner.header();
@@ -152,16 +154,21 @@ pub fn align(
         .with_barcode_correct_prob(0.9);
     
     if !mito_dna.is_empty() {
-        debug!("Adding mitochondrial DNA references: {:?}", mito_dna);
         mito_dna.iter().for_each(|x| {
             processor.add_mito_dna(x);
         });
     }
 
+    let mut qc_metrics = serde_json::Map::new();
+
+    let mut qc_fq = QcFastq::default();
+    let mut qc_align = QcAlign::default();
     let alignments: Box<dyn Iterator<Item = _>> = match &mut aligner {
         AlignerRef::STAR(ref mut aligner) => {
             Box::new(processor.gen_barcoded_alignments(
                 aligner.deref_mut().deref_mut(),
+                &mut qc_align,
+                &mut qc_fq,
                 num_threads,
                 num_threads as usize * chunk_size,
             ))
@@ -169,6 +176,8 @@ pub fn align(
         AlignerRef::BWA(ref mut aligner) => {
             Box::new(processor.gen_barcoded_alignments(
                 aligner.deref_mut().deref_mut(),
+                &mut qc_align,
+                &mut qc_fq,
                 num_threads,
                 num_threads as usize * chunk_size,
             ))
@@ -176,10 +185,9 @@ pub fn align(
     };
 
     debug!("Processing output type: {}", output_type);
-    let result = match OutputType::try_from(output_type)? {
+    match OutputType::try_from(output_type)? {
         OutputType::Alignment => {
             write_alignments(py, output, &header, alignments)?;
-            Ok(processor.get_report().into())
         }
         OutputType::Fragment => {
             debug!("Generating fragments");
@@ -206,23 +214,53 @@ pub fn align(
                 fragment_generator,
                 alignments,
             )?;
-            let mut qc = processor.get_report();
-            frag_qc.report(&mut qc);
-            
-            Ok(qc.clone().into())
+            qc_metrics.insert("fragment".to_owned(), frag_qc.into());
         }
         OutputType::GeneQuantification => {
             let mut quantifier = Quantifier::new(transcript_annotator.unwrap());
             mito_dna.iter().for_each(|x| quantifier.add_mito_dna(x));
             let quant_qc = quantifier.quantify(&header, alignments, output.clone())?;
-            let mut qc = processor.get_report();
-            quant_qc.report(&mut qc);
-            
-            Ok(qc.clone().into())
+            qc_metrics.insert("gene_quantification".to_owned(), quant_qc.into());
         }
     };
 
-    result
+    qc_metrics.insert("fastq".to_owned(), qc_fq.into());
+    qc_metrics.insert("alignment".to_owned(), qc_align.into());
+
+    Ok(value_into_pyobject(qc_metrics.into(), py))
+}
+
+fn value_into_pyobject<'py>(val: Value, py: Python<'py>) -> Bound<'py, PyAny> {
+    match val {
+        Value::Null => py.None().into_bound(py),
+        Value::Bool(b) => pyo3::types::PyBool::new(py, b).into_pyobject(py).unwrap().into_bound().into_any(),
+        Value::Number(num) => {
+            if let Some(n) = num.as_i64() {
+                n.into_pyobject(py).unwrap().into_any()
+            } else if let Some(n) = num.as_u64() {
+                n.into_pyobject(py).unwrap().into_any()
+            } else if let Some(n) = num.as_f64() {
+                pyo3::types::PyFloat::new(py, n).into_pyobject(py).unwrap().into_any()
+            } else {
+                panic!("invalid number type")
+            }
+        }
+        Value::String(s) => pyo3::types::PyString::new(py, &s).into_pyobject(py).unwrap().into_any(),
+        Value::Array(vec) => {
+            let list = pyo3::types::PyList::empty(py);
+            for v in vec {
+                list.append(value_into_pyobject(v, py)).unwrap();
+            }
+            list.into_pyobject(py).unwrap().into_any()
+        }
+        Value::Object(map) => {
+            let dict = PyDict::new(py);
+            for (key, value) in map {
+                dict.set_item(key, value_into_pyobject(value, py)).unwrap();
+            }
+            dict.into_pyobject(py).unwrap().into_any()
+        }
+    }
 }
 
 #[inline]
@@ -260,8 +298,8 @@ fn write_fragments<'a>(
     mito_dna: &Vec<String>,
     fragment_generator: FragmentGenerator,
     alignments: impl Iterator<Item = Vec<(Option<MultiMapR>, Option<MultiMapR>)>> + 'a,
-) -> Result<FragmentQC> {
-    let mut fragment_qc = FragmentQC::default();
+) -> Result<QcFragment> {
+    let mut fragment_qc = QcFragment::default();
     mito_dna.iter().for_each(|x| {
         fragment_qc.add_mito_dna(x);
     });

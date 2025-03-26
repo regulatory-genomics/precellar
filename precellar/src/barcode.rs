@@ -720,7 +720,7 @@ mod tests {
 
     #[test]
     fn test_find_within_ordmag() {
-        let counts = &[1000, 900, 800, 700, 100, 90, 80, 70, 60, 50];
+        let counts = &[50, 60, 70, 80, 90, 100, 700, 800, 900, 1000];
 
         // With baseline_idx 0 (using max value as baseline)
         // baseline = 1000, cutoff = 100

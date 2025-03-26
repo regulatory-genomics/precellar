@@ -3,7 +3,7 @@ use crate::region::Region;
 use crate::Modality;
 pub use segment::{Segment, SegmentInfo, SegmentInfoElem, SplitError};
 
-use anyhow::Result;
+use anyhow::{bail, Result};
 use cached_path::Cache;
 use indexmap::IndexMap;
 use noodles::fastq;
@@ -100,6 +100,9 @@ impl FastqReader {
         if self.max_len > 0 {
             record.quality_scores_mut().truncate(self.max_len as usize);
             record.sequence_mut().truncate(self.max_len as usize);
+        }
+        if n != 0 && n < self.min_len as usize {
+            bail!("Record is too short: {} < {}", n, self.min_len);
         }
         Ok(n)
     }

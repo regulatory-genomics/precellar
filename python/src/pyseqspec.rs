@@ -2,7 +2,11 @@ use anyhow::Result;
 use glob::glob;
 use pyo3::prelude::*;
 use seqspec::{Modality, Read, Region, SequenceKit, SequenceProtocol};
-use std::{collections::HashMap, path::{Path, PathBuf}, str::FromStr};
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+    str::FromStr,
+};
 use termtree::Tree;
 
 /** A Assay object.
@@ -188,9 +192,11 @@ impl Assay {
     ///     The maximum length of the read. If not provided, the maximum length is inferred from the fastq file.
     /// compute_md5: bool
     ///     Whether to compute the md5 hash of the fastq file.
+    /// infer_read_length: bool
+    ///     Whether to infer the read length from the fastq file.
     #[pyo3(
-        signature = (read_id, *, modality=None, primer_id=None, is_reverse=None, fastq=None, min_len=None, max_len=None, compute_md5=false),
-        text_signature = "($self, read_id, *, modality=None, primer_id=None, is_reverse=None, fastq=None, min_len=None, max_len=None, compute_md5=False)",
+        signature = (read_id, *, modality=None, primer_id=None, is_reverse=None, fastq=None, min_len=None, max_len=None, compute_md5=false, infer_read_length=false),
+        text_signature = "($self, read_id, *, modality=None, primer_id=None, is_reverse=None, fastq=None, min_len=None, max_len=None, compute_md5=False, infer_read_length=False)",
     )]
     fn update_read(
         &mut self,
@@ -202,13 +208,17 @@ impl Assay {
         min_len: Option<usize>,
         max_len: Option<usize>,
         compute_md5: bool,
+        infer_read_length: bool,
     ) -> Result<()> {
         let fastqs = fastq.map(|f| {
             if f.is_instance_of::<pyo3::types::PyList>() {
                 f.extract::<Vec<PathBuf>>().unwrap()
             } else {
                 if let Ok(path) = f.extract::<&str>() {
-                    glob(path).expect("Failed to read glob pattern").map(Result::unwrap).collect::<Vec<_>>()
+                    glob(path)
+                        .expect("Failed to read glob pattern")
+                        .map(Result::unwrap)
+                        .collect::<Vec<_>>()
                 } else {
                     let path = f.extract::<PathBuf>().unwrap();
                     vec![path]
@@ -226,6 +236,7 @@ impl Assay {
             min_len,
             max_len,
             compute_md5,
+            infer_read_length,
         )
     }
 
@@ -242,9 +253,13 @@ impl Assay {
     )]
     fn whitelist(&self, modality: &str) -> Option<Vec<String>> {
         let modality = Modality::from_str(modality).unwrap();
-        let barcodes = self.0.library_spec.cat_barcodes(&modality)?.into_iter().map(|bc| 
-            std::str::from_utf8(&bc).unwrap().to_string()
-        ).collect();
+        let barcodes = self
+            .0
+            .library_spec
+            .cat_barcodes(&modality)?
+            .into_iter()
+            .map(|bc| std::str::from_utf8(&bc).unwrap().to_string())
+            .collect();
         Some(barcodes)
     }
 

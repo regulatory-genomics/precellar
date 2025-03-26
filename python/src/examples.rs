@@ -71,7 +71,7 @@ fn scifi_atac(py: Python<'_>) -> Result<HashMap<&str, PathBuf>> {
         py,
         "https://osf.io/download/huxev",
         "md5:bb08eecd5c9bbc33fba61c14f0689ed7",
-        "scifi_atac_I2.fq.zst",
+        "scifi_atac_R1.fq.zst",
     )?;
     let atac_r2 = retrieve_file(
         py,

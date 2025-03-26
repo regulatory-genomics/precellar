@@ -13,7 +13,7 @@ use rayon::iter::{IntoParallelIterator, ParallelIterator};
 use serde::{Deserialize, Serialize};
 use std::{collections::HashSet, path::PathBuf};
 
-use crate::{align::MultiMapR, qc::GeneQuantQC, transcript::Gene};
+use crate::{align::MultiMapR, qc::QcGeneQuant, transcript::Gene};
 
 use super::{
     annotate::AnnotationRegion, de_dups::count_unique_umi, AlignmentAnnotator, AnnotatedAlignment,
@@ -70,12 +70,12 @@ impl Quantifier {
         header: &'a Header,
         records: I,
         output: P,
-    ) -> Result<GeneQuantQC>
+    ) -> Result<QcGeneQuant>
     where
         I: Iterator<Item = Vec<(Option<MultiMapR>, Option<MultiMapR>)>> + 'a,
         P: AsRef<std::path::Path>,
     {
-        let mut qc = GeneQuantQC::default();
+        let mut qc = QcGeneQuant::default();
 
         let adata: AnnData<H5> = AnnData::new(output)?;
         let num_cols = self.genes.len();

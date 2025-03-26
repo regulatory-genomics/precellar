@@ -1,9 +1,10 @@
 mod align;
 mod aligners;
-mod pyseqspec;
 mod examples;
+mod pyseqspec;
 mod utils;
 
+use ::precellar::qc::QcFastq;
 use anyhow::Result;
 use itertools::Itertools;
 use log::info;
@@ -134,8 +135,10 @@ fn make_fastq(
         _ => assay.extract::<PyRef<Assay>>()?.0.clone(),
     };
 
-    let mut processor = FastqProcessor::new(spec).with_modality(modality);
-    let fq_reader = processor.gen_barcoded_fastq(correct_barcode);
+    let mut qc = QcFastq::default();
+    let fq_reader = FastqProcessor::new(spec)
+        .with_modality(modality)
+        .gen_barcoded_fastq(correct_barcode, &mut qc);
 
     info!(
         "Adding these to the start of Read 1: {}",
@@ -184,7 +187,6 @@ fn make_fastq(
     Ok(())
 }
 
-
 /// A Python module implemented in Rust.
 #[pymodule]
 fn precellar(m: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -192,7 +194,12 @@ fn precellar(m: &Bound<'_, PyModule>) -> PyResult<()> {
         .format(|buf, record| {
             let timestamp = buf.timestamp();
             let style = buf.default_level_style(record.level());
-            writeln!(buf, "[{timestamp} {style}{}{style:#}] {}", record.level(), record.args())
+            writeln!(
+                buf,
+                "[{timestamp} {style}{}{style:#}] {}",
+                record.level(),
+                record.args()
+            )
         })
         .filter_level(log::LevelFilter::Info)
         .try_init()

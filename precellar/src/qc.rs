@@ -1,59 +1,54 @@
-use bed_utils::bed::BEDLike;
-use noodles::sam;
-use noodles::sam::alignment::{record::data::field::tag::Tag, Record};
-use std::collections::{HashMap, HashSet};
-use std::fmt::Display;
-use std::ops::{Deref, DerefMut};
-use anyhow::Result;
-
 use crate::align::MultiMap;
 use crate::fragment::Fragment;
 
-#[derive(Debug, Default, Clone)]
-pub struct Metrics(HashMap<String, f64>);
+use anyhow::Result;
+use bed_utils::bed::BEDLike;
+use noodles::sam;
+use noodles::sam::alignment::{record::data::field::tag::Tag, Record};
+use serde_json::{json, Value};
+use std::collections::{HashMap, HashSet};
 
-impl From<HashMap<String, f64>> for Metrics {
-    fn from(map: HashMap<String, f64>) -> Self {
-        Metrics(map)
-    }
+#[derive(Debug, Default)]
+pub struct QcFastq {
+    pub(crate) num_reads: HashMap<String, u64>,
+    pub(crate) num_defect: HashMap<String, u64>, // Number of reads with defects, e.g., misformed structure.
+    pub(crate) frac_q30_bases_barcode: HashMap<String, f64>,
 }
 
-impl From<Metrics> for HashMap<String, f64> {
-    fn from(val: Metrics) -> Self {
-        val.0
-    }
-}
-
-impl Deref for Metrics {
-    type Target = HashMap<String, f64>;
-
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
-
-impl DerefMut for Metrics {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.0
-    }
-}
-
-impl Display for Metrics {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        for (key, value) in &self.0 {
-            writeln!(f, "{}\t{}", key, value)?;
+impl From<QcFastq> for Value {
+    fn from(qc: QcFastq) -> Self {
+        let mut map = serde_json::Map::new();
+        let defect = qc
+            .num_defect
+            .into_iter()
+            .filter(|x| x.1 > 0)
+            .map(|(k, v)| (k.clone(), (v as f64 / qc.num_reads[&k] as f64).into()))
+            .collect::<serde_json::Map<String, Value>>();
+        if !defect.is_empty() {
+            map.insert(
+                "frac_reads_with_misformed_structure".to_string(),
+                defect.into(),
+            );
         }
-        Ok(())
+        map.insert(
+            "frac_q30_bases_barcode".to_string(),
+            qc.frac_q30_bases_barcode
+                .into_iter()
+                .map(|(k, v)| (k, v.into()))
+                .collect::<serde_json::Map<String, Value>>()
+                .into(),
+        );
+        map.into()
     }
 }
 
 #[derive(Debug, Default)]
 struct AlignStat {
-    total: u64, // Total number of reads
-    mapped: u64, // Number of mapped reads
+    total: u64,        // Total number of reads
+    mapped: u64,       // Number of mapped reads
     high_quality: u64, // Number of high-quality mapped reads: unique, non-duplicate, and mapping quality >= 30
-    multimapped: u64, // Number of reads with multiple alignments
-    duplicate: u64, // Number of duplicate reads
+    multimapped: u64,  // Number of reads with multiple alignments
+    duplicate: u64,    // Number of duplicate reads
 }
 
 impl AlignStat {
@@ -68,7 +63,12 @@ impl AlignStat {
             if record.others.is_some() {
                 self.multimapped += 1;
             } else {
-                let q = record.primary.mapping_quality().transpose()?.map(|x| x.get()).unwrap_or(60);
+                let q = record
+                    .primary
+                    .mapping_quality()
+                    .transpose()?
+                    .map(|x| x.get())
+                    .unwrap_or(60);
                 if q >= 30 {
                     self.high_quality += 1;
                 }
@@ -135,7 +135,7 @@ impl PairAlignStat {
 }
 
 #[derive(Debug, Default)]
-pub struct AlignQC {
+pub struct QcAlign {
     pub(crate) mito_dna: HashSet<usize>, // Mitochondrial DNA reference sequence IDs
     stat_all: PairAlignStat,
     stat_barcoded: PairAlignStat,
@@ -146,23 +146,81 @@ pub struct AlignQC {
     pub(crate) num_read2_q30_bases: u64,
 }
 
-impl AlignQC {
+impl From<QcAlign> for Value {
+    fn from(qc: QcAlign) -> Self {
+        let mut map = serde_json::Map::new();
+
+        let stat_all = &qc.stat_all;
+        let stat_barcoded = &qc.stat_barcoded;
+
+        let fraction_confidently_mapped =
+            stat_barcoded.total_high_quality() as f64 / stat_barcoded.total_reads() as f64;
+
+        map.insert("sequenced_reads".to_string(), stat_all.total_reads().into());
+        map.insert(
+            "sequenced_read_pairs".to_string(),
+            stat_all.total_pairs().into(),
+        );
+        if stat_all.total_pairs() > 0 {
+            map.insert(
+                "frac_properly_paired".to_string(),
+                (stat_all.proper_pairs as f64 / stat_all.total_pairs() as f64).into(),
+            );
+        }
+        if qc.num_read1_bases > 0 {
+            map.insert(
+                "frac_q30_bases_read1".to_string(),
+                (qc.num_read1_q30_bases as f64 / qc.num_read1_bases as f64).into(),
+            );
+        }
+        if qc.num_read2_bases > 0 {
+            map.insert(
+                "frac_q30_bases_read2".to_string(),
+                (qc.num_read2_q30_bases as f64 / qc.num_read2_bases as f64).into(),
+            );
+        }
+        map.insert(
+            "frac_confidently_mapped".to_string(),
+            fraction_confidently_mapped.into(),
+        );
+        map.insert("frac_unmapped".to_string(), qc.frac_unmapped().into());
+        map.insert(
+            "frac_valid_barcode".to_string(),
+            qc.frac_valid_barcode().into(),
+        );
+        map.insert(
+            "frac_mitochondrial".to_string(),
+            qc.frac_mitochondrial().into(),
+        );
+
+        map.into()
+    }
+}
+
+impl QcAlign {
     pub fn add_mito_dna(&mut self, mito_dna: usize) {
         self.mito_dna.insert(mito_dna);
     }
 
-    pub fn add_pair<R: Record>(&mut self, header: &sam::Header, record1: &MultiMap<R>, record2: &MultiMap<R>) -> Result<()> {
+    pub fn add_pair<R: Record>(
+        &mut self,
+        header: &sam::Header,
+        record1: &MultiMap<R>,
+        record2: &MultiMap<R>,
+    ) -> Result<()> {
         let mut stat = PairAlignStat::default();
 
         self.num_read1_bases += record1.primary.sequence().len() as u64;
         self.num_read2_bases += record2.primary.sequence().len() as u64;
 
-        self.num_read1_q30_bases += record1.primary
+        self.num_read1_q30_bases += record1
+            .primary
             .quality_scores()
             .iter()
             .filter(|s| s.as_ref().map(|x| *x >= 30).unwrap_or(false))
             .count() as u64;
-        self.num_read2_q30_bases += record2.primary
+        self.num_read2_q30_bases += record2
+            .primary
             .quality_scores()
             .iter()
             .filter(|s| s.as_ref().map(|x| *x >= 30).unwrap_or(false))
@@ -171,8 +229,9 @@ impl AlignQC {
         stat.add_pair(record1, record2)?;
 
         self.stat_all.combine(&stat);
- 
-        if record1.primary
+
+        if record1
+            .primary
             .data()
             .get(&Tag::CELL_BARCODE_ID)
             .transpose()
@@ -189,11 +248,16 @@ impl AlignQC {
         Ok(())
     }
 
-    pub fn add_read1<R: Record>(&mut self, header: &sam::Header, record: &MultiMap<R>) -> Result<()> {
-        let mut stat= PairAlignStat::default();
+    pub fn add_read1<R: Record>(
+        &mut self,
+        header: &sam::Header,
+        record: &MultiMap<R>,
+    ) -> Result<()> {
+        let mut stat = PairAlignStat::default();
 
         self.num_read1_bases += record.primary.sequence().len() as u64;
-        self.num_read1_q30_bases += record.primary
+        self.num_read1_q30_bases += record
+            .primary
             .quality_scores()
             .iter()
             .filter(|s| s.as_ref().map(|x| *x >= 30).unwrap_or(false))
@@ -201,8 +265,9 @@ impl AlignQC {
         stat.add_read1(record)?;
 
         self.stat_all.combine(&stat);
- 
-        if record.primary
+
+        if record
+            .primary
             .data()
             .get(&Tag::CELL_BARCODE_ID)
             .transpose()
@@ -219,11 +284,16 @@ impl AlignQC {
         Ok(())
     }
 
-    pub fn add_read2<R: Record>(&mut self, header: &sam::Header, record: &MultiMap<R>) -> Result<()> {
-        let mut stat= PairAlignStat::default();
+    pub fn add_read2<R: Record>(
+        &mut self,
+        header: &sam::Header,
+        record: &MultiMap<R>,
+    ) -> Result<()> {
+        let mut stat = PairAlignStat::default();
 
         self.num_read2_bases += record.primary.sequence().len() as u64;
-        self.num_read2_q30_bases += record.primary
+        self.num_read2_q30_bases += record
+            .primary
             .quality_scores()
             .iter()
             .filter(|s| s.as_ref().map(|x| *x >= 30).unwrap_or(false))
@@ -231,8 +301,9 @@ impl AlignQC {
         stat.add_read2(record)?;
 
         self.stat_all.combine(&stat);
- 
-        if record.primary
+
+        if record
+            .primary
             .data()
             .get(&Tag::CELL_BARCODE_ID)
             .transpose()
@@ -266,45 +337,10 @@ impl AlignQC {
     pub fn frac_mitochondrial(&self) -> f64 {
         self.stat_mito.total_reads() as f64 / self.stat_barcoded.total_mapped() as f64
     }
-
-    pub fn report(&self, metric: &mut Metrics) {
-        let stat_all = &self.stat_all;
-        let stat_barcoded = &self.stat_barcoded;
-
-        let fraction_confidently_mapped = stat_barcoded.total_high_quality() as f64 / stat_barcoded.total_reads() as f64;
-
-        metric.insert("sequenced_reads".to_string(), stat_all.total_reads() as f64);
-        metric.insert("sequenced_read_pairs".to_string(), stat_all.total_pairs() as f64);
-        if stat_all.total_pairs() > 0 {
-            metric.insert(
-                "frac_properly_paired".to_string(),
-                stat_all.proper_pairs as f64 / stat_all.total_pairs() as f64,
-            );
-        }
-        if self.num_read1_bases > 0 {
-            metric.insert(
-                "frac_q30_bases_read1".to_string(),
-                self.num_read1_q30_bases as f64 / self.num_read1_bases as f64,
-            );
-        }
-        if self.num_read2_bases > 0 {
-            metric.insert(
-                "frac_q30_bases_read2".to_string(),
-                self.num_read2_q30_bases as f64 / self.num_read2_bases as f64,
-            );
-        }
-        metric.insert(
-            "frac_confidently_mapped".to_string(),
-            fraction_confidently_mapped,
-        );
-        metric.insert("frac_unmapped".to_string(), self.frac_unmapped());
-        metric.insert("frac_valid_barcode".to_string(), self.frac_valid_barcode());
-        metric.insert("frac_mitochondrial".to_string(), self.frac_mitochondrial());
-    }
 }
 
 #[derive(Debug, Clone, Default)]
-pub struct FragmentQC {
+pub struct QcFragment {
     mito_dna: HashSet<String>,
     num_pcr_duplicates: u64,
     num_unique_fragments: u64,
@@ -312,7 +348,33 @@ pub struct FragmentQC {
     num_frag_single: u64,
 }
 
-impl FragmentQC {
+impl From<QcFragment> for Value {
+    fn from(qc: QcFragment) -> Self {
+        let mut map = serde_json::Map::new();
+        map.insert(
+            "num_unique_fragments".to_string(),
+            qc.num_unique_fragments.into(),
+        );
+        map.insert(
+            "frac_duplicates".to_string(),
+            (qc.num_pcr_duplicates as f64
+                / (qc.num_unique_fragments + qc.num_pcr_duplicates) as f64)
+                .into(),
+        );
+        map.insert(
+            "frac_fragment_in_nucleosome_free_region".to_string(),
+            (qc.num_frag_nfr as f64 / qc.num_unique_fragments as f64).into(),
+        );
+        map.insert(
+            "frac_fragment_flanking_single_nucleosome".to_string(),
+            (qc.num_frag_single as f64 / qc.num_unique_fragments as f64).into(),
+        );
+
+        map.into()
+    }
+}
+
+impl QcFragment {
     pub fn add_mito_dna<S: Into<String>>(&mut self, mito_dna: S) {
         self.mito_dna.insert(mito_dna.into());
     }
@@ -329,38 +391,20 @@ impl FragmentQC {
             }
         }
     }
-
-    pub fn report(&self, metric: &mut Metrics) {
-        metric.insert(
-            "num_unique_fragments".to_string(),
-            self.num_unique_fragments as f64,
-        );
-        metric.insert(
-            "frac_duplicates".to_string(),
-            self.num_pcr_duplicates as f64
-                / (self.num_unique_fragments + self.num_pcr_duplicates) as f64,
-        );
-        metric.insert(
-            "frac_fragment_in_nucleosome_free_region".to_string(),
-            self.num_frag_nfr as f64 / self.num_unique_fragments as f64,
-        );
-        metric.insert(
-            "frac_fragment_flanking_single_nucleosome".to_string(),
-            self.num_frag_single as f64 / self.num_unique_fragments as f64,
-        );
-    }
 }
 
 #[derive(Debug, Default)]
-pub struct GeneQuantQC {
+pub struct QcGeneQuant {
     pub(crate) total_reads: u64,
     pub(crate) total_umi: u64,
     pub(crate) unique_umi: u64,
 }
 
-impl GeneQuantQC {
-    pub fn report(&self, metric: &mut Metrics) {
-        metric.insert("frac_transcriptome".to_string(), self.total_umi as f64 / self.total_reads as f64);
-        metric.insert("frac_duplicates".to_string(), 1.0 - self.unique_umi as f64 / self.total_umi as f64);
+impl From<QcGeneQuant> for Value {
+    fn from(qc: QcGeneQuant) -> Self {
+        json!({
+            "frac_transcriptome": qc.total_umi as f64 / qc.total_reads as f64,
+            "frac_duplicates": 1.0 - qc.unique_umi as f64 / qc.total_umi as f64,
+        })
     }
 }
