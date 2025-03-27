@@ -1,7 +1,7 @@
 use std::{ops::{Deref, DerefMut}, path::PathBuf};
 use anyhow::Result;
 use noodles::sam::Header;
-use precellar::{align::Aligner, transcript::{AlignmentAnnotator, Transcript}};
+use precellar::{align::{AnnotatedFastq, Aligner}, transcript::{AlignmentAnnotator, Transcript}};
 use pyo3::prelude::*;
 use star_aligner::{StarAligner, StarOpts};
 use bwa_mem2::{AlignerOpts, BurrowsWheelerAligner, FMIndex};
@@ -46,6 +46,24 @@ impl<'py> TryFrom<Bound<'py, PyAny>> for AlignerRef<'py> {
         }
     }
 }
+
+impl Aligner for AlignerRef<'_> {
+    fn header(&self) -> noodles::sam::Header {
+        self.header()
+    }
+
+    fn align_reads(
+            &mut self,
+            num_threads: u16,
+            records: Vec<AnnotatedFastq>,
+        ) -> Vec<(Option<precellar::align::MultiMapR>, Option<precellar::align::MultiMapR>)> {
+        match self {
+            AlignerRef::STAR(aligner) => aligner.align_reads(num_threads, records),
+            AlignerRef::BWA(aligner) => Aligner::align_reads(aligner.deref_mut().deref_mut(), num_threads, records),
+        }
+    }
+}
+
 
 /** The STAR aligner.
 

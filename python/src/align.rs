@@ -2,14 +2,15 @@ use crate::aligners::AlignerRef;
 use crate::pyseqspec::Assay;
 
 use anyhow::{bail, Result};
-use noodles::sam::{self, alignment::io::Write};
-use precellar::qc::{QcAlign, QcFastq};
-use pyo3::{prelude::*, BoundObject};
-use pyo3::types::PyDict;
-use serde_json::Value;
-use std::ops::DerefMut;
-use std::{path::PathBuf, str::FromStr};
+use indicatif::{ProgressBar, ProgressFinish, ProgressStyle};
 use log::debug;
+use noodles::sam::{self, alignment::io::Write};
+use precellar::align::{Aligner, AlignmentResult};
+use precellar::qc::Metric;
+use pyo3::types::PyDict;
+use pyo3::{prelude::*, BoundObject};
+use serde_json::Value;
+use std::{path::PathBuf, str::FromStr};
 
 use precellar::{
     align::{FastqProcessor, MultiMapR},
@@ -100,7 +101,7 @@ pub fn make_bwa_index(fasta: PathBuf, genome_prefix: PathBuf) -> Result<()> {
 /// -------
 /// dict
 ///    A dictionary containing the QC metrics of the alignment and fragment generation.
-/// 
+///
 /// See Also
 /// --------
 /// aligners.BWAMEM2
@@ -142,9 +143,11 @@ pub fn align<'py>(
         Ok(p) => seqspec::Assay::from_path(&p).unwrap(),
         _ => assay.extract::<PyRef<Assay>>()?.0.clone(),
     };
-    
-    let modality = modality.map(Modality::from_str).unwrap_or(assay.modality())?;
-    
+
+    let modality = modality
+        .map(Modality::from_str)
+        .unwrap_or(assay.modality())?;
+
     let mut aligner = AlignerRef::try_from(aligner)?;
     let header = aligner.header();
     let transcript_annotator = aligner.transcript_annotator();
@@ -152,7 +155,6 @@ pub fn align<'py>(
     let mut processor = FastqProcessor::new(assay)
         .with_modality(modality)
         .with_barcode_correct_prob(0.9);
-    
     if !mito_dna.is_empty() {
         mito_dna.iter().for_each(|x| {
             processor.add_mito_dna(x);
@@ -161,42 +163,28 @@ pub fn align<'py>(
 
     let mut qc_metrics = serde_json::Map::new();
 
-    let mut qc_fq = QcFastq::default();
-    let mut qc_align = QcAlign::default();
-    let alignments: Box<dyn Iterator<Item = _>> = match &mut aligner {
-        AlignerRef::STAR(ref mut aligner) => {
-            Box::new(processor.gen_barcoded_alignments(
-                aligner.deref_mut().deref_mut(),
-                &mut qc_align,
-                &mut qc_fq,
-                num_threads,
-                num_threads as usize * chunk_size,
-            ))
-        },
-        AlignerRef::BWA(ref mut aligner) => {
-            Box::new(processor.gen_barcoded_alignments(
-                aligner.deref_mut().deref_mut(),
-                &mut qc_align,
-                &mut qc_fq,
-                num_threads,
-                num_threads as usize * chunk_size,
-            ))
-        },
-    };
+    let alignments = processor.gen_barcoded_alignments(
+        &mut aligner,
+        num_threads,
+        num_threads as usize * chunk_size,
+    );
+    let alignments = AlignProgressBar::new(alignments);
 
-    debug!("Processing output type: {}", output_type);
     match OutputType::try_from(output_type)? {
         OutputType::Alignment => {
             write_alignments(py, output, &header, alignments)?;
         }
         OutputType::Fragment => {
-            debug!("Generating fragments");
             let compression = compression
                 .map(|x| Compression::from_str(x).unwrap())
                 .or((&output).try_into().ok());
-            debug!("Using compression: {:?} with level: {:?}", compression, compression_level);
-            
-            let mut writer = create_file(output.clone(), compression, compression_level, num_threads as u32)?;
+
+            let mut writer = create_file(
+                output.clone(),
+                compression,
+                compression_level,
+                num_threads as u32,
+            )?;
 
             let mut fragment_generator = FragmentGenerator::default();
             fragment_generator.set_shift_left(shift_left);
@@ -205,7 +193,7 @@ pub fn align<'py>(
                 debug!("Using temporary directory: {:?}", dir);
                 fragment_generator.set_temp_dir(dir);
             }
-            
+
             let frag_qc = write_fragments(
                 py,
                 &mut writer,
@@ -224,28 +212,72 @@ pub fn align<'py>(
         }
     };
 
-    qc_metrics.insert("fastq".to_owned(), qc_fq.into());
-    qc_metrics.insert("alignment".to_owned(), qc_align.into());
+    qc_metrics.insert(
+        "fastq".to_owned(),
+        processor.get_fastq_qc().lock().unwrap().to_json(),
+    );
+    qc_metrics.insert(
+        "alignment".to_owned(),
+        processor.get_align_qc().lock().unwrap().to_json(),
+    );
 
     Ok(value_into_pyobject(qc_metrics.into(), py))
+}
+
+struct AlignProgressBar<'a, A> {
+    pb: ProgressBar,
+    alignments: AlignmentResult<'a, A>,
+}
+
+impl<'a, A> AlignProgressBar<'a, A> {
+    fn new(alignments: AlignmentResult<'a, A>) -> AlignProgressBar<'a, A> {
+        let pb = ProgressBar::new(alignments.fastq_reader.total_reads.unwrap_or(0) as u64);
+        let sty = ProgressStyle::with_template(
+            "{percent}%|{wide_bar:.cyan/blue}| {human_pos:>}/{human_len:} [{elapsed}<{eta}, {per_sec}]",
+        )
+        .unwrap();
+        pb.set_style(sty);
+        AlignProgressBar { pb: pb.with_finish(ProgressFinish::Abandon), alignments }
+    }
+}
+
+impl<A: Aligner> Iterator for AlignProgressBar<'_, A> {
+    type Item = Vec<(Option<MultiMapR>, Option<MultiMapR>)>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let item = self.alignments.next();
+        self.pb
+            .set_position(self.alignments.fastq_reader.num_processed as u64);
+        item
+    }
 }
 
 fn value_into_pyobject<'py>(val: Value, py: Python<'py>) -> Bound<'py, PyAny> {
     match val {
         Value::Null => py.None().into_bound(py),
-        Value::Bool(b) => pyo3::types::PyBool::new(py, b).into_pyobject(py).unwrap().into_bound().into_any(),
+        Value::Bool(b) => pyo3::types::PyBool::new(py, b)
+            .into_pyobject(py)
+            .unwrap()
+            .into_bound()
+            .into_any(),
         Value::Number(num) => {
             if let Some(n) = num.as_i64() {
                 n.into_pyobject(py).unwrap().into_any()
             } else if let Some(n) = num.as_u64() {
                 n.into_pyobject(py).unwrap().into_any()
             } else if let Some(n) = num.as_f64() {
-                pyo3::types::PyFloat::new(py, n).into_pyobject(py).unwrap().into_any()
+                pyo3::types::PyFloat::new(py, n)
+                    .into_pyobject(py)
+                    .unwrap()
+                    .into_any()
             } else {
                 panic!("invalid number type")
             }
         }
-        Value::String(s) => pyo3::types::PyString::new(py, &s).into_pyobject(py).unwrap().into_any(),
+        Value::String(s) => pyo3::types::PyString::new(py, &s)
+            .into_pyobject(py)
+            .unwrap()
+            .into_any(),
         Value::Array(vec) => {
             let list = pyo3::types::PyList::empty(py);
             for v in vec {

@@ -25,5 +25,3 @@ tokio = "1.41"
 tokio-util = "0.7"
 futures = "0.3"
 async-compression = { version = "0.4", features = ["gzip", "zstd", "tokio"] }
-env_logger = "0.9" # for testing
-test-log = "0.2" # for testing

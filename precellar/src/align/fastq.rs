@@ -7,14 +7,16 @@ use anyhow::Result;
 use bstr::BString;
 use indexmap::IndexMap;
 use itertools::Itertools;
-use kdam::{tqdm, BarExt};
 use log::{debug, info, warn};
 use noodles::{bam, fastq};
 use rayon::iter::ParallelIterator;
 use rayon::slice::ParallelSlice;
-use seqspec::{Assay, FastqReader, Modality, Read, RegionId, SegmentInfo, SequenceType};
+use seqspec::{
+    Assay, FastqReader, Modality, Read, RegionId, SegmentInfo, SequenceType, SplitError,
+};
 use smallvec::SmallVec;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+use std::sync::{Arc, Mutex};
 
 /// FastqProcessor manages the preprocessing of FASTQ files including barcode correction,
 /// alignment, and QC metrics.
@@ -26,6 +28,8 @@ pub struct FastqProcessor {
     // exceeds this threshold, the barcode will be corrected.
     // cellrange uses 0.975 for ATAC and 0.9 for multiome.
     mismatch_in_barcode: usize, // The number of mismatches allowed in barcode
+    qc_align: HashMap<Modality, Arc<Mutex<QcAlign>>>,
+    qc_fastq: HashMap<Modality, Arc<Mutex<QcFastq>>>,
 }
 
 impl FastqProcessor {
@@ -37,6 +41,8 @@ impl FastqProcessor {
             mito_dna: HashSet::new(),
             barcode_correct_prob: 0.975,
             mismatch_in_barcode: 1,
+            qc_align: HashMap::new(),
+            qc_fastq: HashMap::new(),
         }
     }
 
@@ -59,6 +65,18 @@ impl FastqProcessor {
         self
     }
 
+    pub fn get_fastq_qc(&self) -> &Arc<Mutex<QcFastq>> {
+        self.qc_fastq
+            .get(&self.modality())
+            .expect("fastq qc not found")
+    }
+
+    pub fn get_align_qc(&self) -> &Arc<Mutex<QcAlign>> {
+        self.qc_align
+            .get(&self.modality())
+            .expect("align qc not found")
+    }
+
     /// Align reads and return the alignments.
     /// If the fastq file is paired-end, the alignments will be returned as a tuple.
     /// Otherwise, the alignments will be returned as a single vector.
@@ -75,54 +93,39 @@ impl FastqProcessor {
     pub fn gen_barcoded_alignments<'a, A: Aligner>(
         &'a mut self,
         aligner: &'a mut A,
-        align_qc: &'a mut QcAlign,
-        fq_qc: &mut QcFastq,
         num_threads: u16,
         chunk_size: usize,
-    ) -> impl Iterator<Item = Vec<(Option<MultiMapR>, Option<MultiMapR>)>> + 'a {
-        let fq_reader = self
-            .gen_barcoded_fastq(true, fq_qc)
-            .with_chunk_size(chunk_size);
+    ) -> AlignmentResult<'a, A> {
+        let fq_reader = self.gen_barcoded_fastq(true).with_chunk_size(chunk_size);
 
+        // Initialize qc
+        let mut qc = QcAlign::default();
         let header = aligner.header();
         self.mito_dna.iter().for_each(|mito| {
             header
                 .reference_sequences()
                 .get_index_of(&BString::from(mito.as_str()))
-                .map(|x| align_qc.mito_dna.insert(x));
+                .map(|x| qc.mito_dna.insert(x));
         });
+        self.qc_align
+            .insert(self.modality(), Arc::new(Mutex::new(qc)));
 
-        let total_reads = fq_reader.total_reads.unwrap_or(0);
-        let mut progress_bar = tqdm!(total = total_reads);
-        info!("Aligning {} reads...", total_reads);
-        fq_reader.map(move |data| {
-            let results: Vec<_> = aligner.align_reads(num_threads, data);
-            results.iter().for_each(|ali| match ali {
-                (Some(ali1), Some(ali2)) => {
-                    align_qc.add_pair(&header, ali1, ali2).unwrap();
-                }
-                (Some(ali1), None) => {
-                    align_qc.add_read1(&header, ali1).unwrap();
-                }
-                (None, Some(ali2)) => {
-                    align_qc.add_read2(&header, ali2).unwrap();
-                }
-                _ => {
-                    debug!("No alignment found for read");
-                }
-            });
-
-            progress_bar.update(results.len()).unwrap();
-            results
-        })
+        info!("Aligning reads to reference genome...");
+        AlignmentResult {
+            aligner,
+            fastq_reader: fq_reader,
+            qc: self.get_align_qc().clone(),
+            header,
+            num_threads,
+        }
     }
 
-    pub fn gen_barcoded_fastq(
-        &self,
-        correct_barcode: bool,
-        qc: &mut QcFastq,
-    ) -> AnnotatedFastqReader {
+    pub fn gen_barcoded_fastq(&mut self, correct_barcode: bool) -> AnnotatedFastqReader {
         let modality = self.modality();
+        // Initialize qc
+        self.qc_fastq
+            .insert(modality.clone(), Arc::new(Mutex::new(QcFastq::default())));
+
         let corrector = if correct_barcode {
             Some(
                 BarcodeCorrector::default()
@@ -134,7 +137,7 @@ impl FastqProcessor {
         };
 
         info!("Counting barcodes...");
-        let mut whitelists = self.count_barcodes(qc).unwrap();
+        let (mut whitelists, num_reads) = self.count_barcodes().unwrap();
         for (id, whitelist) in whitelists.iter_mut() {
             if whitelist.len() > 0 {
                 info!(
@@ -157,40 +160,37 @@ impl FastqProcessor {
             }
         }
 
-        let mut fq_reader: AnnotatedFastqReader = self
-            .assay
-            .get_segments_by_modality(modality)
-            .filter_map(|(read, segment_info)| {
-                let annotator =
-                    FastqAnnotator::new(read, segment_info, &whitelists, corrector.clone())?;
-                let reader = read.open()?;
-                Some((annotator, reader))
-            })
-            .collect();
+        let readers =
+            self.assay
+                .get_segments_by_modality(modality)
+                .filter_map(|(read, segment_info)| {
+                    let annotator =
+                        FastqAnnotator::new(read, segment_info, &whitelists, corrector.clone())?;
+                    let reader = read.open()?;
+                    Some((annotator, reader))
+                });
+        let mut fq_reader = AnnotatedFastqReader::new(readers, self.get_fastq_qc().clone());
 
-        if !whitelists.is_empty() {
-            fq_reader.total_reads = Some(whitelists[0].total_count);
-        }
+        fq_reader.total_reads = Some(num_reads);
 
         fq_reader
     }
 
-    fn count_barcodes(&self, qc: &mut QcFastq) -> Result<IndexMap<RegionId, Whitelist>> {
+    fn count_barcodes(&self) -> Result<(IndexMap<RegionId, Whitelist>, usize)> {
         let modality = self.modality();
         let mut whitelists = self.get_whitelists();
 
+        let mut num_reads = 0;
         self.assay
             .get_segments_by_modality(modality)
+            .filter(|(_, info)| info.iter().any(|x| x.is_barcode()))
             .for_each(|(read, segment_info)| {
                 let is_reverse = read.is_reverse();
                 if let Some(mut reader) = read.open() {
-                    qc.num_reads.insert(read.read_id.clone(), 0);
-                    qc.num_defect.insert(read.read_id.clone(), 0);
+                    num_reads = 0;
                     for fq in reader.records() {
-                        let fq = fq.unwrap();
-                        qc.num_reads.get_mut(&read.read_id).map(|x| *x += 1);
-
-                        if let Ok(segments) = segment_info.split(&fq) {
+                        num_reads += 1;
+                        if let Ok(segments) = segment_info.split(&fq.unwrap()) {
                             segments.iter().for_each(|segment| {
                                 if segment.is_barcode() {
                                     let wl =
@@ -199,28 +199,18 @@ impl FastqProcessor {
                                             segment.region_id()
                                         ));
                                     if is_reverse {
-                                        wl.count_barcode(
-                                            &rev_compl(segment.seq),
-                                            &segment.qual.iter().rev().copied().collect::<Vec<_>>(),
-                                        );
+                                        wl.count_barcode(&rev_compl(segment.seq));
                                     } else {
-                                        wl.count_barcode(segment.seq, segment.qual);
+                                        wl.count_barcode(segment.seq);
                                     }
                                 }
                             })
-                        } else {
-                            qc.num_defect.get_mut(&read.read_id).map(|x| *x += 1);
                         }
                     }
                 }
             });
 
-        qc.frac_q30_bases_barcode = whitelists
-            .iter()
-            .map(|(k, v)| (k.clone(), v.frac_q30_bases()))
-            .collect();
-
-        Ok(whitelists)
+        Ok((whitelists, num_reads))
     }
 
     fn get_whitelists(&self) -> IndexMap<RegionId, Whitelist> {
@@ -255,17 +245,71 @@ impl FastqProcessor {
     }
 }
 
+pub struct AlignmentResult<'a, A> {
+    aligner: &'a mut A,
+    pub fastq_reader: AnnotatedFastqReader,
+    qc: Arc<Mutex<QcAlign>>,
+    header: noodles::sam::Header,
+    num_threads: u16,
+}
+
+impl<'a, A: Aligner> Iterator for AlignmentResult<'a, A> {
+    type Item = Vec<(Option<MultiMapR>, Option<MultiMapR>)>;
+    fn next(&mut self) -> Option<Self::Item> {
+        let data = self.fastq_reader.next()?;
+
+        let results: Vec<_> = self.aligner.align_reads(self.num_threads, data);
+        let mut qc = self.qc.lock().unwrap();
+        results.iter().for_each(|ali| match ali {
+            (Some(ali1), Some(ali2)) => {
+                qc.add_pair(&self.header, ali1, ali2).unwrap();
+            }
+            (Some(ali1), None) => {
+                qc.add_read1(&self.header, ali1).unwrap();
+            }
+            (None, Some(ali2)) => {
+                qc.add_read2(&self.header, ali2).unwrap();
+            }
+            _ => {
+                debug!("No alignment found for read");
+            }
+        });
+        Some(results)
+    }
+}
+
 pub struct AnnotatedFastqReader {
     buffer: fastq::Record,
-    total_reads: Option<usize>,
+    pub total_reads: Option<usize>,
+    pub num_processed: usize,
     trim_poly_a: bool,
     annotators: Vec<FastqAnnotator>,
     readers: Vec<FastqReader>,
     chunk_size: usize,
     chunk: Vec<SmallVec<[fastq::Record; 4]>>,
+    qc: Arc<Mutex<QcFastq>>,
 }
 
 impl AnnotatedFastqReader {
+    fn new<T: IntoIterator<Item = (FastqAnnotator, FastqReader)>>(
+        iter: T,
+        qc: Arc<Mutex<QcFastq>>,
+    ) -> Self {
+        let (annotators, readers): (Vec<_>, Vec<_>) = iter.into_iter().unzip();
+        let chunk = Vec::new();
+        Self {
+            buffer: fastq::Record::default(),
+            total_reads: None,
+            num_processed: 0,
+            annotators,
+            readers,
+            trim_poly_a: false,
+            chunk_size: 10000000,
+            chunk,
+            qc,
+        }
+    }
+
     pub fn with_chunk_size(mut self, chunk_size: usize) -> Self {
         self.chunk_size = chunk_size;
         self
@@ -362,22 +406,6 @@ impl AnnotatedFastqReader {
     }
 }
 
-impl FromIterator<(FastqAnnotator, FastqReader)> for AnnotatedFastqReader {
-    fn from_iter<T: IntoIterator<Item = (FastqAnnotator, FastqReader)>>(iter: T) -> Self {
-        let (annotators, readers): (Vec<_>, Vec<_>) = iter.into_iter().unzip();
-        let chunk = Vec::new();
-        Self {
-            buffer: fastq::Record::default(),
-            total_reads: None,
-            annotators,
-            readers,
-            trim_poly_a: false,
-            chunk_size: 10000000,
-            chunk,
-        }
-    }
-}
-
 impl Iterator for AnnotatedFastqReader {
     type Item = Vec<AnnotatedFastq>;
 
@@ -386,42 +414,63 @@ impl Iterator for AnnotatedFastqReader {
         if n == 0 {
             None
         } else {
-            let n = (n / 256).max(256);
+            self.num_processed += n;
+            let n = (n / 256).max(1024);
             let annotators = &self.annotators;
-            let result: Vec<AnnotatedFastq> = self
+            let (result, qc): (Vec<_>, Vec<_>) = self
                 .chunk
                 .par_chunks(n)
-                .flat_map_iter(|chunk| {
-                    chunk.into_iter().flat_map(move |records| {
-                        let fq = records
-                            .iter()
-                            .enumerate()
-                            .map(|(i, record)| annotators[i].annotate(record).unwrap())
-                            .reduce(|mut this, other| {
-                                this.join(other);
-                                this
-                            })
-                            .unwrap_or_else(|| {
-                                panic!("Failed to reduce annotated records");
-                            });
-                        if fq.barcode.is_none() {
-                            None
-                        } else {
-                            Some(fq)
-                        }
-                    })
-                })
-                .collect();
+                .map(|chunk| process_chunk(&annotators, chunk))
+                .unzip();
 
-            Some(result)
+            self.qc.lock().unwrap().extend(qc);
+            Some(result.into_iter().flatten().collect())
         }
     }
+}
+
+fn process_chunk<'a, I: IntoIterator<Item = &'a SmallVec<[fastq::Record; 4]>>>(
+    annotators: &[FastqAnnotator],
+    chunk: I,
+) -> (Vec<AnnotatedFastq>, QcFastq) {
+    let mut qc = QcFastq::default();
+    let annotated = chunk
+        .into_iter()
+        .flat_map(|records| {
+            let fq = records
+                .iter()
+                .enumerate()
+                .flat_map(|(i, record)| {
+                    let annotator = &annotators[i];
+                    let id = &annotator.read_id;
+                    *qc.num_reads.entry(id.clone()).or_insert(0) += 1;
+                    if let Ok(anno) = annotator.annotate(record) {
+                        Some(anno)
+                    } else {
+                        *qc.num_defect.entry(id.clone()).or_insert(0) += 1;
+                        None
+                    }
+                })
+                .reduce(|mut this, other| {
+                    this.join(other);
+                    this
+                })?;
+            qc.update(&fq);
+            if fq.barcode.is_none() {
+                None
+            } else {
+                Some(fq)
+            }
+        })
+        .collect();
+    (annotated, qc)
 }
 
 /// A FastqAnnotator that splits the reads into subregions, e.g., barcode, UMI, and
 /// return annotated reads.
 #[derive(Debug)]
 struct FastqAnnotator {
+    read_id: String,
     whitelists: IndexMap<String, OligoFrequncy>,
     corrector: Option<BarcodeCorrector>,
     is_reverse: bool,
@@ -448,6 +497,7 @@ impl FastqAnnotator {
                 })
                 .collect();
             let anno = Self {
+                read_id: read.read_id.to_string(),
                 whitelists,
                 corrector,
                 is_reverse: read.is_reverse(),
@@ -457,58 +507,57 @@ impl FastqAnnotator {
         }
     }
 
-    fn annotate(&self, record: &fastq::Record) -> Result<AnnotatedFastq> {
+    fn annotate(&self, record: &fastq::Record) -> Result<AnnotatedFastq, SplitError> {
         let mut barcode: Option<Barcode> = None;
         let mut umi = None;
         let mut read1 = None;
         let mut read2 = None;
 
-        if let Ok(segments) = self.segment_info.split(record) {
-            segments.into_iter().for_each(|segment| {
-                if segment.is_barcode() || segment.is_umi() {
-                    let mut fq = segment.into_fq(record.definition());
+        let segments = self.segment_info.split(record)?;
+        segments.into_iter().for_each(|segment| {
+            if segment.is_barcode() || segment.is_umi() {
+                let mut fq = segment.into_fq(record.definition());
+                if self.is_reverse {
+                    fq = rev_compl_fastq_record(fq);
+                }
+
+                if segment.is_barcode() {
+                    let corrected = self.whitelists.get(segment.region_id()).map_or(
+                        Some(fq.sequence().to_vec()),
+                        |counts| {
+                            if let Some(corrector) = self.corrector.as_ref() {
+                                corrector
+                                    .correct(counts, fq.sequence(), fq.quality_scores())
+                                    .ok()
+                                    .map(|x| x.to_vec())
+                            } else {
+                                Some(fq.sequence().to_vec())
+                            }
+                        },
+                    );
+
+                    if let Some(bc) = &mut barcode {
+                        bc.extend(&Barcode { raw: fq, corrected });
+                    } else {
+                        barcode = Some(Barcode { raw: fq, corrected });
+                    }
+                } else {
+                    umi = Some(fq);
+                }
+            } else if segment.contains_target() {
+                if read1.is_some() || read2.is_some() {
+                    panic!("Both Read1 and Read2 are set");
+                } else {
+                    let fq = segment.into_fq(record.definition());
+                    // TODO: polyA and adapter trimming
                     if self.is_reverse {
-                        fq = rev_compl_fastq_record(fq);
-                    }
-
-                    if segment.is_barcode() {
-                        let corrected = self.whitelists.get(segment.region_id()).map_or(
-                            Some(fq.sequence().to_vec()),
-                            |counts| {
-                                if let Some(corrector) = self.corrector.as_ref() {
-                                    corrector
-                                        .correct(counts, fq.sequence(), fq.quality_scores())
-                                        .ok()
-                                        .map(|x| x.to_vec())
-                                } else {
-                                    Some(fq.sequence().to_vec())
-                                }
-                            },
-                        );
-
-                        if let Some(bc) = &mut barcode {
-                            bc.extend(&Barcode { raw: fq, corrected });
-                        } else {
-                            barcode = Some(Barcode { raw: fq, corrected });
-                        }
+                        read2 = Some(fq);
                     } else {
-                        umi = Some(fq);
-                    }
-                } else if segment.contains_target() {
-                    if read1.is_some() || read2.is_some() {
-                        panic!("Both Read1 and Read2 are set");
-                    } else {
-                        let fq = segment.into_fq(record.definition());
-                        // TODO: polyA and adapter trimming
-                        if self.is_reverse {
-                            read2 = Some(fq);
-                        } else {
-                            read1 = Some(fq);
-                        }
+                        read1 = Some(fq);
                     }
                 }
-            });
-        }
+            }
+        });
 
         Ok(AnnotatedFastq {
             barcode,
@@ -653,7 +702,7 @@ impl<'a, R: std::io::Read> Iterator for NameCollatedRecords<'a, R> {
 mod tests {
     use super::*;
 
-    use std::io::{BufRead, Write};
+    use std::io::BufRead;
 
     fn show_fq(fq: &AnnotatedFastq) -> String {
         format!(
@@ -676,11 +725,11 @@ mod tests {
     fn test_fq(input: &str, output: &str) {
         let assay = Assay::from_path(input).unwrap();
         let modality = assay.modalities[0].clone();
-        let fq_proc = FastqProcessor::new(assay).with_modality(modality);
+        let mut fq_proc = FastqProcessor::new(assay).with_modality(modality);
         let file = std::fs::File::open(output).unwrap();
         let reader = std::io::BufReader::new(flate2::read::GzDecoder::new(file));
         for (fq, line) in fq_proc
-            .gen_barcoded_fastq(false, &mut QcFastq::default())
+            .gen_barcoded_fastq(false)
             .flatten()
             .zip(reader.lines())
         {
@@ -693,12 +742,9 @@ mod tests {
         let seqspec = "data/test4.yaml";
         let assay = Assay::from_path(seqspec).unwrap();
         let modality = assay.modalities[0].clone();
-        let fq_proc = FastqProcessor::new(assay).with_modality(modality);
+        let mut fq_proc = FastqProcessor::new(assay).with_modality(modality);
         // open a file
-        for fq in fq_proc
-            .gen_barcoded_fastq(false, &mut QcFastq::default())
-            .flatten()
-        {
+        for fq in fq_proc.gen_barcoded_fastq(false).flatten() {
             println!("{}", show_fq(&fq));
         }
     }

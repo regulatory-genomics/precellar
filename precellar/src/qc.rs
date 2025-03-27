@@ -1,4 +1,4 @@
-use crate::align::MultiMap;
+use crate::align::{AnnotatedFastq, MultiMap};
 use crate::fragment::Fragment;
 
 use anyhow::Result;
@@ -8,21 +8,93 @@ use noodles::sam::alignment::{record::data::field::tag::Tag, Record};
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
 
+/// The trait for quality control metrics.
+pub trait Metric: Sized + Extend<Self> {
+    fn to_json(&self) -> Value;
+
+    fn into_json(self) -> Value {
+        self.to_json()
+    }
+}
+
 #[derive(Debug, Default)]
 pub struct QcFastq {
     pub(crate) num_reads: HashMap<String, u64>,
     pub(crate) num_defect: HashMap<String, u64>, // Number of reads with defects, e.g., misformed structure.
-    pub(crate) frac_q30_bases_barcode: HashMap<String, f64>,
+    pub(crate) num_q30_bases: HashMap<String, u64>,
+    pub(crate) num_total_bases: HashMap<String, u64>,
 }
 
-impl From<QcFastq> for Value {
-    fn from(qc: QcFastq) -> Self {
+impl QcFastq {
+    pub fn update(&mut self, fq: &AnnotatedFastq) {
+        if let Some(umi) = &fq.umi {
+            *self.num_total_bases.entry("umi".to_string()).or_insert(0) +=
+                umi.sequence().len() as u64;
+            *self.num_q30_bases.entry("umi".to_string()).or_insert(0) +=
+                umi.quality_scores()
+                    .iter()
+                    .filter(|s| **s - 33 >= 30)
+                    .count() as u64;
+        }
+        if let Some(barcode) = &fq.barcode {
+            *self.num_total_bases.entry("barcode".to_string()).or_insert(0) +=
+                barcode.raw.sequence().len() as u64;
+            *self.num_q30_bases.entry("barcode".to_string()).or_insert(0) +=
+                barcode.raw.quality_scores()
+                    .iter()
+                    .filter(|s| **s - 33 >= 30)
+                    .count() as u64;
+        }
+        if let Some(read1) = &fq.read1 {
+            *self.num_reads.entry("read1".to_string()).or_insert(0) += 1;
+            *self.num_total_bases.entry("read1".to_string()).or_insert(0) +=
+                read1.sequence().len() as u64;
+            *self.num_q30_bases.entry("read1".to_string()).or_insert(0) +=
+                read1.quality_scores()
+                    .iter()
+                    .filter(|s| **s - 33 >= 30)
+                    .count() as u64;
+        }
+        if let Some(read2) = &fq.read2 {
+            *self.num_reads.entry("read2".to_string()).or_insert(0) += 1;
+            *self.num_total_bases.entry("read2".to_string()).or_insert(0) +=
+                read2.sequence().len() as u64;
+            *self.num_q30_bases.entry("read2".to_string()).or_insert(0) +=
+                read2.quality_scores()
+                    .iter()
+                    .filter(|s| **s - 33 >= 30)
+                    .count() as u64;
+        }
+    }
+}
+
+impl Extend<Self> for QcFastq {
+    fn extend<T: IntoIterator<Item = Self>>(&mut self, iter: T) {
+        for qc in iter {
+            for (k, v) in qc.num_reads {
+                *self.num_reads.entry(k).or_insert(0) += v;
+            }
+            for (k, v) in qc.num_defect {
+                *self.num_defect.entry(k).or_insert(0) += v;
+            }
+            for (k, v) in qc.num_q30_bases {
+                *self.num_q30_bases.entry(k).or_insert(0) += v;
+            }
+            for (k, v) in qc.num_total_bases {
+                *self.num_total_bases.entry(k).or_insert(0) += v;
+            }
+        }
+    }
+}
+
+impl Metric for QcFastq {
+    fn to_json(&self) -> Value {
         let mut map = serde_json::Map::new();
-        let defect = qc
+        let defect = self
             .num_defect
-            .into_iter()
-            .filter(|x| x.1 > 0)
-            .map(|(k, v)| (k.clone(), (v as f64 / qc.num_reads[&k] as f64).into()))
+            .iter()
+            .filter(|x| *x.1 > 0)
+            .map(|(k, v)| (k.clone(), (*v as f64 / self.num_reads[k] as f64).into()))
             .collect::<serde_json::Map<String, Value>>();
         if !defect.is_empty() {
             map.insert(
@@ -31,10 +103,15 @@ impl From<QcFastq> for Value {
             );
         }
         map.insert(
-            "frac_q30_bases_barcode".to_string(),
-            qc.frac_q30_bases_barcode
-                .into_iter()
-                .map(|(k, v)| (k, v.into()))
+            "frac_q30_bases".to_string(),
+            self.num_q30_bases
+                .iter()
+                .map(|(k, v)| {
+                    (
+                        k.clone(),
+                        (*v as f64 / self.num_total_bases[k] as f64).into(),
+                    )
+                })
                 .collect::<serde_json::Map<String, Value>>()
                 .into(),
         );
@@ -140,18 +217,24 @@ pub struct QcAlign {
     stat_all: PairAlignStat,
     stat_barcoded: PairAlignStat,
     stat_mito: PairAlignStat,
-    pub(crate) num_read1_bases: u64,
-    pub(crate) num_read1_q30_bases: u64,
-    pub(crate) num_read2_bases: u64,
-    pub(crate) num_read2_q30_bases: u64,
 }
 
-impl From<QcAlign> for Value {
-    fn from(qc: QcAlign) -> Self {
+impl Extend<Self> for QcAlign {
+    fn extend<T: IntoIterator<Item = Self>>(&mut self, iter: T) {
+        for qc in iter {
+            self.stat_all.combine(&qc.stat_all);
+            self.stat_barcoded.combine(&qc.stat_barcoded);
+            self.stat_mito.combine(&qc.stat_mito);
+        }
+    }
+}
+
+impl Metric for QcAlign {
+    fn to_json(&self) -> Value {
         let mut map = serde_json::Map::new();
 
-        let stat_all = &qc.stat_all;
-        let stat_barcoded = &qc.stat_barcoded;
+        let stat_all = &self.stat_all;
+        let stat_barcoded = &self.stat_barcoded;
 
         let fraction_confidently_mapped =
             stat_barcoded.total_high_quality() as f64 / stat_barcoded.total_reads() as f64;
@@ -167,30 +250,18 @@ impl From<QcAlign> for Value {
                 (stat_all.proper_pairs as f64 / stat_all.total_pairs() as f64).into(),
             );
         }
-        if qc.num_read1_bases > 0 {
-            map.insert(
-                "frac_q30_bases_read1".to_string(),
-                (qc.num_read1_q30_bases as f64 / qc.num_read1_bases as f64).into(),
-            );
-        }
-        if qc.num_read2_bases > 0 {
-            map.insert(
-                "frac_q30_bases_read2".to_string(),
-                (qc.num_read2_q30_bases as f64 / qc.num_read2_bases as f64).into(),
-            );
-        }
         map.insert(
             "frac_confidently_mapped".to_string(),
             fraction_confidently_mapped.into(),
         );
-        map.insert("frac_unmapped".to_string(), qc.frac_unmapped().into());
+        map.insert("frac_unmapped".to_string(), self.frac_unmapped().into());
         map.insert(
             "frac_valid_barcode".to_string(),
-            qc.frac_valid_barcode().into(),
+            self.frac_valid_barcode().into(),
         );
         map.insert(
             "frac_mitochondrial".to_string(),
-            qc.frac_mitochondrial().into(),
+            self.frac_mitochondrial().into(),
         );
 
         map.into()
@@ -209,22 +280,6 @@ impl QcAlign {
         record2: &MultiMap<R>,
     ) -> Result<()> {
         let mut stat = PairAlignStat::default();
-
-        self.num_read1_bases += record1.primary.sequence().len() as u64;
-        self.num_read2_bases += record2.primary.sequence().len() as u64;
-
-        self.num_read1_q30_bases += record1
-            .primary
-            .quality_scores()
-            .iter()
-            .filter(|s| s.as_ref().map(|x| *x >= 30).unwrap_or(false))
-            .count() as u64;
-        self.num_read2_q30_bases += record2
-            .primary
-            .quality_scores()
-            .iter()
-            .filter(|s| s.as_ref().map(|x| *x >= 30).unwrap_or(false))
-            .count() as u64;
 
         stat.add_pair(record1, record2)?;
 
@@ -255,13 +310,6 @@ impl QcAlign {
     ) -> Result<()> {
         let mut stat = PairAlignStat::default();
 
-        self.num_read1_bases += record.primary.sequence().len() as u64;
-        self.num_read1_q30_bases += record
-            .primary
-            .quality_scores()
-            .iter()
-            .filter(|s| s.as_ref().map(|x| *x >= 30).unwrap_or(false))
-            .count() as u64;
         stat.add_read1(record)?;
 
         self.stat_all.combine(&stat);
@@ -291,13 +339,6 @@ impl QcAlign {
     ) -> Result<()> {
         let mut stat = PairAlignStat::default();
 
-        self.num_read2_bases += record.primary.sequence().len() as u64;
-        self.num_read2_q30_bases += record
-            .primary
-            .quality_scores()
-            .iter()
-            .filter(|s| s.as_ref().map(|x| *x >= 30).unwrap_or(false))
-            .count() as u64;
         stat.add_read2(record)?;
 
         self.stat_all.combine(&stat);

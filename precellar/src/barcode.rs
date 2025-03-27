@@ -193,9 +193,6 @@ pub struct Whitelist {
     barcode_counts: OligoFrequncy,
     mismatch_count: usize,
     pub(crate) total_count: usize,
-    pub(crate) total_base_count: u64,
-    q30_base_count: u64,
-    base_qual_sum: i64,
 }
 
 impl Whitelist {
@@ -214,9 +211,6 @@ impl Whitelist {
             barcode_counts: OligoFrequncy::new(),
             mismatch_count: 0,
             total_count: 0,
-            total_base_count: 0,
-            q30_base_count: 0,
-            base_qual_sum: 0,
         }
     }
 
@@ -229,7 +223,7 @@ impl Whitelist {
     }
 
     /// Update the barcode counter with a barcode and its quality scores.
-    pub fn count_barcode(&mut self, barcode: &[u8], barcode_qual: &[u8]) {
+    pub fn count_barcode(&mut self, barcode: &[u8]) {
         if self.whitelist_exists {
             if let Some(count) = self.barcode_counts.get_mut(barcode) {
                 *count += 1;
@@ -243,15 +237,6 @@ impl Whitelist {
         }
 
         self.total_count += 1;
-
-        for &qual in barcode_qual {
-            let qual_int = (qual as u32) - 33;
-            self.base_qual_sum += qual_int as i64;
-            if qual_int >= 30 {
-                self.q30_base_count += 1;
-            }
-            self.total_base_count += 1;
-        }
     }
 
     pub fn predict_whitelist(&mut self) {
@@ -285,23 +270,6 @@ impl Whitelist {
 
     pub fn get_barcode_counts(&self) -> &OligoFrequncy {
         &self.barcode_counts
-    }
-
-    pub fn mean_base_quality_score(&self) -> f64 {
-        if self.total_base_count == 0 {
-            // u64 never < 0
-            0.0
-        } else {
-            self.base_qual_sum as f64 / self.total_base_count as f64
-        }
-    }
-
-    pub fn frac_q30_bases(&self) -> f64 {
-        if self.total_base_count == 0 {
-            0.0
-        } else {
-            self.q30_base_count as f64 / self.total_base_count as f64
-        }
     }
 
     pub fn frac_exact_match(&self) -> f64 {
@@ -584,9 +552,6 @@ mod tests {
         let whitelist = Whitelist::empty();
         assert_eq!(whitelist.num_seen_barcodes(), 0);
         assert_eq!(whitelist.total_count, 0);
-        assert_eq!(whitelist.total_base_count, 0);
-        assert_eq!(whitelist.mean_base_quality_score(), 0.0);
-        assert_eq!(whitelist.frac_q30_bases(), 0.0);
         assert_eq!(whitelist.frac_exact_match(), 0.0);
     }
 
@@ -605,117 +570,6 @@ mod tests {
             assert!(barcode_counts.contains_key(&barcode.as_bytes().to_vec()));
             assert_eq!(barcode_counts[&barcode.as_bytes().to_vec()], 0);
         }
-    }
-
-    #[test]
-    fn test_count_barcode_with_whitelist() {
-        let barcodes = ["ACGTACGT", "TGCATGCA", "GATCGATC"];
-        let mut whitelist = Whitelist::new(barcodes);
-
-        // Count an exact match
-        let barcode = b"ACGTACGT";
-        let quality = b"FFFFFFFI"; // Quality scores (~37, above Q30)
-        whitelist.count_barcode(barcode, quality);
-
-        assert_eq!(whitelist.total_count, 1);
-        assert_eq!(whitelist.total_base_count, 8);
-        assert_eq!(whitelist.get_barcode_counts()[&barcode.to_vec()], 1);
-        assert_eq!(whitelist.num_seen_barcodes(), 1);
-        assert_eq!(whitelist.frac_exact_match(), 1.0);
-
-        // Count a barcode not in whitelist
-        let barcode_not_in_list = b"GGGGGGGG";
-        let quality2 = b"IIIIIFFF"; // Mix of quality scores
-        whitelist.count_barcode(barcode_not_in_list, quality2);
-
-        assert_eq!(whitelist.total_count, 2);
-        assert_eq!(whitelist.total_base_count, 16);
-        assert_eq!(whitelist.mismatch_count, 1);
-        assert_eq!(whitelist.frac_exact_match(), 0.5); // 1 out of 2 matched exactly
-    }
-
-    #[test]
-    fn test_count_barcode_without_whitelist() {
-        let mut whitelist = Whitelist::empty();
-
-        // Add several barcodes with varying quality scores
-        whitelist.count_barcode(b"ACGTACGT", b"FFFFFFFF");
-        whitelist.count_barcode(b"ACGTACGT", b"FFFFFFFF");
-        whitelist.count_barcode(b"TGCATGCA", b"BBBBBBBB");
-
-        assert_eq!(whitelist.total_count, 3);
-        assert_eq!(whitelist.total_base_count, 24);
-        assert_eq!(whitelist.num_seen_barcodes(), 2);
-
-        let barcode_counts = whitelist.get_barcode_counts();
-        assert_eq!(barcode_counts[&b"ACGTACGT".to_vec()], 2);
-        assert_eq!(barcode_counts[&b"TGCATGCA".to_vec()], 1);
-    }
-
-    #[test]
-    fn test_quality_statistics() {
-        let mut whitelist = Whitelist::empty();
-
-        // Add barcodes with different quality scores
-        // ASCII 70 ('F') = Q37, ASCII 66 ('B') = Q33, ASCII 63 ('?') = Q30, ASCII 62 ('>') = Q29
-        whitelist.count_barcode(b"ACGTACGT", b"FFFFFFFF"); // All Q37
-        whitelist.count_barcode(b"TGCATGCA", b"????BBBB"); // Mixed Q30 and Q33
-        whitelist.count_barcode(b"GATCGATC", b">>>>>>>>"); // All Q29 (below Q30)
-
-        // Calculate expected values
-        let total_bases = 24.0;
-        let q30_bases = 8.0 + 8.0; // First two barcodes have Q30+ bases
-        let expected_q30_fraction = q30_bases / total_bases;
-
-        let sum_qual = (8 * (70 - 33)) + (4 * (63 - 33)) + (4 * (66 - 33)) + (8 * (62 - 33));
-        let expected_mean_quality = sum_qual as f64 / total_bases;
-
-        assert_eq!(whitelist.total_base_count, 24);
-        assert_eq!(whitelist.frac_q30_bases(), expected_q30_fraction);
-        assert!((whitelist.mean_base_quality_score() - expected_mean_quality).abs() < 0.001);
-    }
-
-    #[test]
-    fn test_with_sample_barcode_distribution() {
-        let mut whitelist = Whitelist::empty();
-
-        // Add barcodes with different counts
-        let barcodes = [
-            (b"ACGTACGT".to_vec(), 1000), // Max count
-            (b"TGCATGCA".to_vec(), 900),
-            (b"GATCGATC".to_vec(), 800),
-            (b"CTACGTAC".to_vec(), 500),
-            (b"ACACGTGT".to_vec(), 100),
-            (b"GTGTCACA".to_vec(), 80),
-            (b"TCAGTCAG".to_vec(), 50),
-            (b"CAGTTCAG".to_vec(), 30),
-            (b"AGTCAGTC".to_vec(), 10),
-            (b"TCAGTCAG".to_vec(), 5),
-        ];
-
-        // Simulate counting by adding each barcode the specified number of times
-        for (barcode, count) in barcodes.iter() {
-            // Create a quality string of the same length as the barcode
-            let quality = vec![b'F'; barcode.len()];
-
-            for _ in 0..*count {
-                whitelist.count_barcode(barcode, &quality);
-            }
-        }
-
-        // Check the total count matches what we expect
-        let expected_total = barcodes.iter().map(|(_, count)| count).sum::<usize>();
-        assert_eq!(whitelist.total_count, expected_total);
-
-        // Check that we have the right number of unique barcodes
-        // Note: one barcode appears twice in the list (TCAGTCAG)
-        assert_eq!(whitelist.num_seen_barcodes(), 9);
-
-        // Check specific barcode counts
-        let counts = whitelist.get_barcode_counts();
-        assert_eq!(counts[&b"ACGTACGT".to_vec()], 1000);
-        assert_eq!(counts[&b"AGTCAGTC".to_vec()], 10);
-        assert_eq!(counts[&b"TCAGTCAG".to_vec()], 55); // 50 + 5
     }
 
     #[test]

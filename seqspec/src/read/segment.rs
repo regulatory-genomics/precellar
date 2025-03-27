@@ -386,6 +386,10 @@ impl SegmentInfoElem {
     pub fn is_fixed_len(&self) -> bool {
         self.len.start == self.len.end
     }
+
+    pub fn is_barcode(&self) -> bool {
+        self.region_type.is_barcode()
+    }
 }
 
 /// Find a pattern with the Knuth-Morris-Pratt (KMP) algorithm - more efficient for large patterns

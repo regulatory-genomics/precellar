@@ -4,7 +4,6 @@ mod examples;
 mod pyseqspec;
 mod utils;
 
-use ::precellar::qc::QcFastq;
 use anyhow::Result;
 use itertools::Itertools;
 use log::info;
@@ -135,10 +134,9 @@ fn make_fastq(
         _ => assay.extract::<PyRef<Assay>>()?.0.clone(),
     };
 
-    let mut qc = QcFastq::default();
     let fq_reader = FastqProcessor::new(spec)
         .with_modality(modality)
-        .gen_barcoded_fastq(correct_barcode, &mut qc);
+        .gen_barcoded_fastq(correct_barcode);
 
     info!(
         "Adding these to the start of Read 1: {}",

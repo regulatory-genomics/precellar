@@ -18,7 +18,6 @@ log = "0.4"
 lexical = "6.1"
 nalgebra-sparse = "0.10"
 noodles = { version = "0.85", features = ["core", "gtf", "fastq", "bam", "sam", "async"] }
-kdam = "0.5.2"
 polars = "0.45"
 rayon = "1.10"
 serde = "1.0"

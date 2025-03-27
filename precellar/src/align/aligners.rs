@@ -7,14 +7,12 @@ pub use bwa_mem2::BurrowsWheelerAligner;
 use noodles::sam::alignment::Record;
 pub use star_aligner::StarAligner;
 
-use bwa_mem2::{AlignerOpts, FMIndex};
 use log;
 use noodles::sam;
 use noodles::sam::alignment::record::data::field::tag::Tag;
 use noodles::sam::alignment::record_buf::{data::field::value::Value, RecordBuf};
 use rayon::iter::ParallelIterator;
 use rayon::slice::ParallelSlice;
-use star_aligner::StarOpts;
 
 pub type MultiMapR = MultiMap<RecordBuf>;
 
@@ -106,9 +104,6 @@ impl<R: Record> TryFrom<Vec<R>> for MultiMap<R> {
 
 /// Trait defining the behavior of aligners like BWA and STAR.
 pub trait Aligner {
-    /// Creates a new aligner instance from a reference genome index path.
-    fn from_path<P: AsRef<std::path::Path>>(path: P) -> Self;
-
     /// Retrieves the SAM header associated with the aligner.
     fn header(&self) -> sam::Header;
 
@@ -128,10 +123,6 @@ pub trait Aligner {
 }
 
 impl Aligner for BurrowsWheelerAligner {
-    fn from_path<P: AsRef<std::path::Path>>(path: P) -> Self {
-        BurrowsWheelerAligner::new(FMIndex::read(path).unwrap(), AlignerOpts::default())
-    }
-
     fn header(&self) -> sam::Header {
         self.get_sam_header()
     }
@@ -201,11 +192,6 @@ impl Aligner for BurrowsWheelerAligner {
 }
 
 impl Aligner for StarAligner {
-    fn from_path<P: AsRef<std::path::Path>>(path: P) -> Self {
-        let opts = StarOpts::new(path);
-        StarAligner::new(opts).unwrap()
-    }
-
     fn header(&self) -> sam::Header {
         self.get_header().clone()
     }
