@@ -194,9 +194,11 @@ impl Assay {
     ///     Whether to compute the md5 hash of the fastq file.
     /// infer_read_length: bool
     ///     Whether to infer the read length from the fastq file.
+    /// infer_read_length_sample: int | None
+    ///     The number of records to sample from the fastq file to infer the read length.
     #[pyo3(
-        signature = (read_id, *, modality=None, primer_id=None, is_reverse=None, fastq=None, min_len=None, max_len=None, compute_md5=false, infer_read_length=false),
-        text_signature = "($self, read_id, *, modality=None, primer_id=None, is_reverse=None, fastq=None, min_len=None, max_len=None, compute_md5=False, infer_read_length=False)",
+        signature = (read_id, *, modality=None, primer_id=None, is_reverse=None, fastq=None, min_len=None, max_len=None, compute_md5=false, infer_read_length=true, infer_read_length_sample=1000),
+        text_signature = "($self, read_id, *, modality=None, primer_id=None, is_reverse=None, fastq=None, min_len=None, max_len=None, compute_md5=False, infer_read_length=True, infer_read_length_sample=1000)",
     )]
     fn update_read(
         &mut self,
@@ -209,6 +211,7 @@ impl Assay {
         max_len: Option<usize>,
         compute_md5: bool,
         infer_read_length: bool,
+        infer_read_length_sample: usize,
     ) -> Result<()> {
         let fastqs = fastq.map(|f| {
             if f.is_instance_of::<pyo3::types::PyList>() {
@@ -237,6 +240,7 @@ impl Assay {
             max_len,
             compute_md5,
             infer_read_length,
+            infer_read_length_sample,
         )
     }
 

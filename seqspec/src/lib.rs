@@ -223,7 +223,8 @@ impl Assay {
                         Some(read_len),
                         Some(read_len),
                         false,
-                        false,
+                        true,
+                        1000,
                     )?;
                     if forward_strand_workflow {
                         let acc_len = get_length(acc.as_slice(), false);
@@ -237,7 +238,8 @@ impl Assay {
                                 Some(acc_len),
                                 Some(acc_len),
                                 false,
-                                false,
+                        true,
+                        1000,
                             )?;
                         }
                     } else {
@@ -252,7 +254,8 @@ impl Assay {
                                 Some(acc_len),
                                 Some(acc_len),
                                 false,
-                                false,
+                        true,
+                        1000,
                             )?;
                         }
                     }
@@ -269,7 +272,8 @@ impl Assay {
                         Some(read_len),
                         Some(read_len),
                         false,
-                        false,
+                        true,
+                        1000,
                     )?;
                     if acc_len > 0 {
                         self.update_read::<PathBuf>(
@@ -281,7 +285,8 @@ impl Assay {
                             Some(acc_len),
                             Some(acc_len),
                             false,
-                            false,
+                        true,
+                        1000,
                         )?;
                     }
                 }
@@ -302,6 +307,7 @@ impl Assay {
         max_len: Option<usize>,
         compute_md5: bool,
         infer_read_length: bool,
+        infer_read_length_sample: usize,
     ) -> Result<()> {
 
         let mut read_buffer = if let Some(r) = self.sequence_spec.get(read_id) {
@@ -345,9 +351,15 @@ impl Assay {
 
         // Setting min_len and max_len
         if (min_len.is_none() || max_len.is_none()) && infer_read_length {
-            let len = read_buffer.actual_len()?;
-            read_buffer.min_len = min_len.unwrap_or(len) as u32;
-            read_buffer.max_len = max_len.unwrap_or(len) as u32;
+            let len = read_buffer.infer_length(infer_read_length_sample);
+            let len_str = if len.start == len.end {
+                format!("{}", len.start)
+            } else {
+                format!("{}-{}", len.start, len.end)
+            };
+            warn!("The read length of {} was inferred to be {}.", read_id, len_str);
+            read_buffer.min_len = min_len.unwrap_or(len.start) as u32;
+            read_buffer.max_len = max_len.unwrap_or(len.end) as u32;
         } else {
             read_buffer.min_len = min_len.unwrap_or(0) as u32;
             read_buffer.max_len = max_len.unwrap_or(0) as u32;
@@ -403,7 +415,8 @@ impl Assay {
     pub fn get_segments(&self, read_id: &str) -> Option<SegmentInfo> {
         let read = self.sequence_spec.get(read_id)?;
         let library_parent_region = self.library_spec.get_parent(&read.primer_id)?;
-        read.get_segments(&library_parent_region.read().unwrap())
+        let segments = read.get_segments(&library_parent_region.read().unwrap())?;
+        Some(segments.truncate_max(read.max_len as usize))
     }
 
     pub fn iter_reads(&self, modality: Modality) -> impl Iterator<Item = &Read> {

@@ -154,12 +154,21 @@ impl Read {
         ))
     }
 
-    /// Get the actual length of the read by reading the first record from the fastq file.
-    pub fn actual_len(&self) -> Result<usize> {
+    /// Get the actual length of the read by reading the first N record from the fastq file.
+    pub fn infer_length(&self, n: usize) -> std::ops::Range<usize> {
         let mut reader = self.open().expect("No fastq files found.").reader;
-        let mut record = fastq::Record::default();
-        reader.read_record(&mut record)?;
-        Ok(record.sequence().len())
+        let mut min_len = std::usize::MAX;
+        let mut max_len = 0;
+        reader.records().take(n).for_each(|r| {
+            let len = r.unwrap().sequence().len();
+            if len < min_len {
+                min_len = len;
+            }
+            if len > max_len {
+                max_len = len;
+            }
+        });
+        min_len..max_len
     }
 
     /// Check if the read is reverse.

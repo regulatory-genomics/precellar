@@ -134,6 +134,26 @@ impl SegmentInfo {
         self.0.len()
     }
 
+    /// Truncate the segment information to the given length L, such that L is larger
+    /// than the sum of the maximum lengths of the n-1 segments + minimum length of the last segment.
+    pub fn truncate_max(self, len: usize) -> Self {
+        let mut sum = 0;
+        let mut result = Vec::new();
+        let mut segments = self.0.into_iter();
+        while let Some(elem) = segments.next() {
+            if sum + elem.max_len() > len {
+                if sum + elem.min_len() <= len {
+                    result.push(elem);
+                }
+                break;
+            } else {
+                sum += elem.max_len();
+                result.push(elem);
+            }
+        }
+        SegmentInfo(result)
+    }
+
     /// Split a read into segments according to the segment information.
     /// This function uses a default tolerance of 1.0 for the linker sequence and 0.2 for the anchor sequence,
     /// which means that we do not check the sequence of the linker and allow up to 20% mismatches for the anchor sequence.
@@ -142,9 +162,9 @@ impl SegmentInfo {
     }
 
     /// Split a read into segments according to the segment information.
-    /// 
+    ///
     /// # Arguments
-    /// 
+    ///
     /// * `read` - The read to split
     /// * `linker_tolerance` - The fraction of mismatches allowed for the linker sequence
     /// * `anchor_tolerance` - The fraction of mismatches allowed for the anchor sequence
@@ -214,7 +234,7 @@ impl SegmentInfo {
 
             // Check if the segment is within the read bounds
             if max_offset >= len || min_offset + min_len > len {
-            //if max_offset + min_len > len {
+                //if max_offset + min_len > len {
                 break;
             }
 
@@ -267,10 +287,11 @@ impl SegmentInfo {
                                     seq,
                                     qual,
                                 ))
-                            } else if max_offset + max_len > len { // if the pattern is not found and we are at the end of the read
+                            } else if max_offset + max_len > len {
+                                // if the pattern is not found and we are at the end of the read
                                 break;
                             } else {
-                                return Err(SplitError::PatternMismatch(mis))
+                                return Err(SplitError::PatternMismatch(mis));
                             }
                         } else {
                             return Err(SplitError::AnchorNotFound);
@@ -661,5 +682,19 @@ mod tests {
             ),
             "[B]AAAA,[O]A,[U]TT,[O]ACCGG,[O]CC,[B]CA,[O]GGGG,[O]TTTT,[B]AT,[O]GGGG,[T]ACTGGGGGACTG",
         );
+    }
+
+    #[test]
+    fn test_truncate() {
+        let info: SegmentInfo = [
+            bc(4),
+            var(2, 4),
+            bc(2),
+            linker("GGGG"),
+            cdna(1, 1000),
+        ]
+        .into_iter()
+        .collect();
+        println!("{:?}", info.truncate_max(50));
     }
 }

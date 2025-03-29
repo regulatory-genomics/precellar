@@ -6,6 +6,7 @@ use crate::utils::{rev_compl, rev_compl_fastq_record};
 use anyhow::Result;
 use bstr::BString;
 use indexmap::IndexMap;
+use indicatif::{ProgressBar, ProgressDrawTarget, ProgressIterator, ProgressStyle};
 use itertools::Itertools;
 use log::{debug, info, warn};
 use noodles::{bam, fastq};
@@ -136,7 +137,6 @@ impl FastqProcessor {
             None
         };
 
-        info!("Counting barcodes...");
         let (mut whitelists, num_reads) = self.count_barcodes().unwrap();
         for (id, whitelist) in whitelists.iter_mut() {
             if whitelist.len() > 0 {
@@ -177,6 +177,14 @@ impl FastqProcessor {
     }
 
     fn count_barcodes(&self) -> Result<(IndexMap<RegionId, Whitelist>, usize)> {
+        let spinner = ProgressBar::with_draw_target(None, ProgressDrawTarget::stderr_with_hz(1))
+        .with_style(
+            ProgressStyle::with_template(
+                "{spinner} Processed {human_pos} reads in {elapsed} ({per_sec}) ...",
+            )
+            .unwrap(),
+        );
+
         let modality = self.modality();
         let mut whitelists = self.get_whitelists();
 
@@ -187,8 +195,10 @@ impl FastqProcessor {
             .for_each(|(read, segment_info)| {
                 let is_reverse = read.is_reverse();
                 if let Some(mut reader) = read.open() {
+                    info!("Counting barcodes in read {}...", read.read_id);
                     num_reads = 0;
-                    for fq in reader.records() {
+                    for fq in reader.records().progress_with(spinner.clone())
+                    {
                         num_reads += 1;
                         if let Ok(segments) = segment_info.split(&fq.unwrap()) {
                             segments.iter().for_each(|segment| {
