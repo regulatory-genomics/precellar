@@ -416,6 +416,8 @@ impl Assay {
         let read = self.sequence_spec.get(read_id)?;
         let library_parent_region = self.library_spec.get_parent(&read.primer_id)?;
         let segments = read.get_segments(&library_parent_region.read().unwrap())?;
+        // We truncate the segments to the max_len of the read because otherwise
+        // all segments will contain barcodes and cause issues in barcode counting step.
         Some(segments.truncate_max(read.max_len as usize))
     }
 

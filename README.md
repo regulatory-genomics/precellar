@@ -1,4 +1,4 @@
-# Single-cell genomics preprocessing package
+# Universal Single-Cell Genomics Preprocessing package
 
 ![PyPI](https://img.shields.io/pypi/v/precellar)
 ![PyPI - Downloads](https://img.shields.io/pypi/dm/precellar)
@@ -28,6 +28,9 @@ pip install 'git+https://github.com/regulatory-genomics/precellar.git#egg=precel
 
 > [!NOTE]
 > You need to **change the paths to the reference genome** in the examples below.
+> The reference genome should be downloaded and indexed before running the examples.
+> STAR genome index for human and mouse can be downloaded from [here](https://www.10xgenomics.com/support/software/cell-ranger/downloads#reference-downloads).
+> BWA genome index can be build using the `make_bwa_index` function.
 
 ### Gene Expression
 

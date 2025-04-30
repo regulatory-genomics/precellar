@@ -5,9 +5,14 @@
         "url": "https://lab.kaizhang.org/precellar/version/dev/"
     },
     {
-        "name": "0.2 (stable)",
-        "version": "0.2",
+        "name": "0.4 (stable)",
+        "version": "0.4",
         "preferred": true,
+        "url": "https://lab.kaizhang.org/precellar/version/0.4/"
+    },
+    {
+        "name": "0.2",
+        "version": "0.2",
         "url": "https://lab.kaizhang.org/precellar/version/0.2/"
     },
     {

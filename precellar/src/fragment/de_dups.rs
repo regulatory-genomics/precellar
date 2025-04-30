@@ -339,3 +339,41 @@ where
     });
     result
 }
+
+/*
+pub(crate) struct SNP {
+    pub relative_position: u32,
+    pub alt_base: u8,
+    pub qual: u8,
+}
+
+fn get_mutations<R: Record>(rec: &R) -> Result<Vec<SNP>> {
+    let mut mutations = Vec::new();
+    let mut i = 0;
+    for op in rec.cigar().iter() {
+        let op = op?;
+        if op.kind() == Kind::Match {
+            for _ in 0..op.len() {
+                mutations.push(SNP {
+                    relative_position: i,
+                    alt_base: 0,
+                    qual: 0,
+                });
+                i += 1;
+            }
+        } else if op.kind() == Kind::Insertion {
+            for _ in 0..op.len() {
+                mutations.push(SNP {
+                    relative_position: i,
+                    alt_base: 0,
+                    qual: 0,
+                });
+                i += 1;
+            }
+        } else if op.kind() == Kind::Deletion {
+            i += op.len();
+        }
+    }
+    mutations
+}
+*/
