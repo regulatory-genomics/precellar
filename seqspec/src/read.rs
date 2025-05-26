@@ -179,7 +179,7 @@ impl Read {
         }
     }
 
-    pub(crate) fn get_segments<'a>(&'a self, region: &'a Region) -> Option<SegmentInfo> {
+    pub(crate) fn get_segments<'a>(&'a self, region: &'a Region, truncate_by_length: bool) -> Option<SegmentInfo> {
         if !region.sequence_type.is_joined() {
             return None;
         }
@@ -191,7 +191,7 @@ impl Read {
             Box::new(subregions)
         };
 
-        let segment_info: SegmentInfo = subregions
+        let mut segment_info: SegmentInfo = subregions
             .skip_while(|region| {
                 let region = region.read().unwrap();
                 let found =
@@ -201,6 +201,9 @@ impl Read {
             .skip(1)
             .map(|x| x.read().unwrap().deref().clone())
             .collect();
+        if truncate_by_length {
+            segment_info = segment_info.truncate_max(self.max_len as usize);
+        }
         if segment_info.len() > 0 {
             Some(segment_info)
         } else {

@@ -238,8 +238,8 @@ impl Assay {
                                 Some(acc_len),
                                 Some(acc_len),
                                 false,
-                        true,
-                        1000,
+                                true,
+                                1000,
                             )?;
                         }
                     } else {
@@ -254,8 +254,8 @@ impl Assay {
                                 Some(acc_len),
                                 Some(acc_len),
                                 false,
-                        true,
-                        1000,
+                                true,
+                                1000,
                             )?;
                         }
                     }
@@ -285,8 +285,8 @@ impl Assay {
                             Some(acc_len),
                             Some(acc_len),
                             false,
-                        true,
-                        1000,
+                            true,
+                            1000,
                         )?;
                     }
                 }
@@ -309,7 +309,6 @@ impl Assay {
         infer_read_length: bool,
         infer_read_length_sample: usize,
     ) -> Result<()> {
-
         let mut read_buffer = if let Some(r) = self.sequence_spec.get(read_id) {
             r.clone()
         } else {
@@ -357,7 +356,10 @@ impl Assay {
             } else {
                 format!("{}-{}", len.start, len.end)
             };
-            warn!("The read length of {} was inferred to be {}.", read_id, len_str);
+            warn!(
+                "The read length of {} was inferred to be {}.",
+                read_id, len_str
+            );
             read_buffer.min_len = min_len.unwrap_or(len.start) as u32;
             read_buffer.max_len = max_len.unwrap_or(len.end) as u32;
         } else {
@@ -415,10 +417,10 @@ impl Assay {
     pub fn get_segments(&self, read_id: &str) -> Option<SegmentInfo> {
         let read = self.sequence_spec.get(read_id)?;
         let library_parent_region = self.library_spec.get_parent(&read.primer_id)?;
-        let segments = read.get_segments(&library_parent_region.read().unwrap())?;
+        let segments = read.get_segments(&library_parent_region.read().unwrap(), true)?;
         // We truncate the segments to the max_len of the read because otherwise
         // all segments will contain barcodes and cause issues in barcode counting step.
-        Some(segments.truncate_max(read.max_len as usize))
+        Some(segments)
     }
 
     pub fn iter_reads(&self, modality: Modality) -> impl Iterator<Item = &Read> {
@@ -434,12 +436,13 @@ impl Assay {
             .get_parent(&read.primer_id)
             .ok_or_else(|| anyhow!("Primer not found: {}", read.primer_id))?;
         // Check if the primer exists
-        if let Some(segment_info) = read.get_segments(&region.read().unwrap()) {
+        if let Some(segment_info) = read.get_segments(&region.read().unwrap(), true) {
             if let Some(mut reader) = read.open() {
                 let mut onlists = HashMap::new();
-                let total_reads = 1000;
+                let mut total_reads = 0;
                 let mut invalid = 0;
-                reader.records().take(total_reads).try_for_each(|record| {
+                reader.records().take(1000).try_for_each(|record| {
+                    total_reads += 1;
                     if let Ok(segments) = segment_info.split_with_tolerance(&record?, 0.2, 0.2) {
                         segments.iter().for_each(|segment| {
                             if segment.is_barcode() {
@@ -465,6 +468,16 @@ impl Assay {
                     anyhow::Ok(())
                 })?;
 
+                let percent_valid = (total_reads - invalid) as f64 / total_reads as f64 * 100.0;
+                println!("{}", percent_valid);
+                if percent_valid < 50.0 {
+                    warn!(
+                        "Read '{}' has low percentage of valid records. \
+                    Percentage of valid records: {:.2}%",
+                        read.read_id, percent_valid
+                    );
+                }
+
                 onlists.drain().for_each(|(region_id, x)| {
                     if let Some((_, n_matched)) = x {
                         let percent_matched = n_matched as f64 / total_reads as f64 * 100.0;
@@ -473,15 +486,6 @@ impl Assay {
                                 "Read '{}' has low percentage of matched records for region '{}'. \
                             Percentage of matched records: {:.2}%",
                                 read.read_id, region_id, percent_matched
-                            );
-                        }
-
-                        let percent_valid = (total_reads - invalid) as f64 / total_reads as f64 * 100.0;
-                        if percent_valid < 50.0 {
-                            warn!(
-                                "Read '{}' has low percentage of valid records. \
-                            Percentage of valid records: {:.2}%",
-                                read.read_id, percent_valid
                             );
                         }
                     }

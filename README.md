@@ -26,6 +26,8 @@ pip install 'git+https://github.com/regulatory-genomics/precellar.git#egg=precel
 
 ## Examples
 
+Each example dataset below contains approximately 2.5 million fastq records.
+
 > [!NOTE]
 > You need to **change the paths to the reference genome** in the examples below.
 > The reference genome should be downloaded and indexed before running the examples.
