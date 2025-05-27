@@ -2,7 +2,7 @@ use super::aligners::{Aligner, MultiMap, MultiMapR};
 
 use crate::barcode::{barcode_counting, BarcodeCorrector, OligoFrequncy, Whitelist};
 use crate::qc::{QcAlign, QcFastq};
-use crate::utils::{rev_compl_fastq_record};
+use crate::utils::rev_compl_fastq_record;
 use anyhow::Result;
 use bstr::BString;
 use indexmap::IndexMap;
@@ -11,9 +11,7 @@ use log::{debug, info};
 use noodles::{bam, fastq};
 use rayon::iter::ParallelIterator;
 use rayon::slice::ParallelSlice;
-use seqspec::{
-    Assay, FastqReader, Modality, Read, SegmentInfo, SequenceType, SplitError,
-};
+use seqspec::{Assay, FastqReader, Modality, SegmentInfo, SequenceType, SplitError};
 use smallvec::SmallVec;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
@@ -21,7 +19,7 @@ use std::sync::{Arc, Mutex};
 /// FastqProcessor manages the preprocessing of FASTQ files including barcode correction,
 /// alignment, and QC metrics.
 pub struct FastqProcessor {
-    assay: Vec<Assay>,                       // Sequencing assays. Multiple assays can be processed at once.
+    assay: Vec<Assay>, // Sequencing assays. Multiple assays can be processed at once.
     current_modality: Option<Modality>, // Current sequencing modality being processed (e.g., RNA, ATAC).
     mito_dna: HashSet<String>, // Set of mitochondrial DNA sequence identifiers for special handling.
     barcode_correct_prob: f64, // if the posterior probability of a correction
@@ -110,7 +108,14 @@ impl FastqProcessor {
         self.qc_align
             .insert(self.modality(), Arc::new(Mutex::new(qc)));
 
-        info!("Aligning reads to reference genome...");
+        let formatter = human_format::Formatter::new();
+        let n_reads: String = fq_reader
+            .readers
+            .iter()
+            .map(|r| formatter.format(r.total_reads.unwrap_or(0) as f64))
+            .intersperse(" + ".to_string())
+            .collect();
+        info!("Aligning {} reads to reference genome ...", n_reads);
         AlignmentResult {
             aligner,
             fastq_reader: fq_reader,
@@ -121,7 +126,9 @@ impl FastqProcessor {
     }
 
     pub fn gen_barcoded_fastq(
-        &mut self, correct_barcode: bool, chunk_size: usize
+        &mut self,
+        correct_barcode: bool,
+        chunk_size: usize,
     ) -> AnnotatedFastqReaders {
         let modality = self.modality();
         // Initialize qc
@@ -138,7 +145,11 @@ impl FastqProcessor {
             None
         };
 
-        let result: Vec<_> = self.assay.iter().map(|assay| {
+        let num_assays = self.assay.len();
+        let result: Vec<_> = self.assay.iter().enumerate().map(|(i, assay)| {
+            if num_assays > 1 {
+                info!(">>>Processing assay {}/{}<<<", i + 1, num_assays);
+            }
             let (mut whitelists, num_reads) = barcode_counting(assay, modality);
             for (id, whitelist) in whitelists.iter_mut() {
                 if whitelist.len() > 0 {
@@ -166,7 +177,7 @@ impl FastqProcessor {
                     .get_segments_by_modality(modality)
                     .filter_map(|(read, segment_info)| {
                         let annotator =
-                            FastqAnnotator::new(read, segment_info, &whitelists, corrector.clone())?;
+                            FastqAnnotator::new(&read.read_id, segment_info, &whitelists, corrector.clone())?;
                         let reader = read.open()?;
                         Some((annotator, reader))
                     });
@@ -252,10 +263,11 @@ impl AnnotatedFastqReaders {
     }
 
     pub fn is_paired_end(&self) -> Result<bool> {
-        self.readers.iter().map(|x| x.is_paired_end()).all_equal_value()
-            .map_err(|_|
-                anyhow::anyhow!("Not all readers are with the same paired-end status")
-            )
+        self.readers
+            .iter()
+            .map(|x| x.is_paired_end())
+            .all_equal_value()
+            .map_err(|_| anyhow::anyhow!("Not all readers are with the same paired-end status"))
     }
 }
 
@@ -307,7 +319,7 @@ impl AnnotatedFastqReader {
         self.annotators.iter().for_each(|x| {
             x.segment_info.iter().for_each(|info| {
                 if info.region_type.is_target() {
-                    if x.is_reverse {
+                    if x.segment_info.is_reverse() {
                         has_read1 = true;
                     } else {
                         has_read2 = true;
@@ -428,13 +440,12 @@ struct FastqAnnotator {
     read_id: String,
     whitelists: IndexMap<String, OligoFrequncy>,
     corrector: Option<BarcodeCorrector>,
-    is_reverse: bool,
     segment_info: SegmentInfo,
 }
 
 impl FastqAnnotator {
     pub fn new(
-        read: &Read,
+        read_id: impl Into<String>,
         segment_info: SegmentInfo,
         whitelists: &IndexMap<String, Whitelist>,
         corrector: Option<BarcodeCorrector>,
@@ -452,10 +463,9 @@ impl FastqAnnotator {
                 })
                 .collect();
             let anno = Self {
-                read_id: read.read_id.to_string(),
+                read_id: read_id.into(),
                 whitelists,
                 corrector,
-                is_reverse: read.is_reverse(),
                 segment_info,
             };
             Some(anno)
@@ -472,7 +482,7 @@ impl FastqAnnotator {
         segments.into_iter().for_each(|segment| {
             if segment.is_barcode() || segment.is_umi() {
                 let mut fq = segment.into_fq(record.definition());
-                if self.is_reverse {
+                if self.segment_info.is_reverse() {
                     fq = rev_compl_fastq_record(fq);
                 }
 
@@ -505,7 +515,7 @@ impl FastqAnnotator {
                 } else {
                     let fq = segment.into_fq(record.definition());
                     // TODO: polyA and adapter trimming
-                    if self.is_reverse {
+                    if self.segment_info.is_reverse() {
                         read2 = Some(fq);
                     } else {
                         read1 = Some(fq);

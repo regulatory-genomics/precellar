@@ -269,6 +269,12 @@ impl Assay {
         self.0.delete_read(read_id);
     }
 
+    /// Delete a region from the Assay object.
+    #[pyo3(signature = (region_id), text_signature = "($self, region_id)")]
+    fn delete_region(&mut self, region_id: &str) -> Result<()> {
+        self.0.delete_region(region_id)
+    }
+
     /// Return the whitelist of cell barcodes.
     #[pyo3(
         signature = (modality),

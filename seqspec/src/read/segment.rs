@@ -1,8 +1,8 @@
-use std::ops::{Deref, Range};
+use std::ops::Range;
 
 use noodles::fastq::{self, record::Definition};
 
-use crate::{Region, RegionType, SequenceType};
+use crate::{utils::rev_compl, Region, RegionType, SequenceType};
 
 #[derive(Debug, Clone)]
 pub enum SegmentType<'a> {
@@ -90,26 +90,9 @@ impl<'a> Segment<'a> {
 }
 
 #[derive(Debug, Clone)]
-pub struct SegmentInfo(Vec<SegmentInfoElem>);
-
-impl Deref for SegmentInfo {
-    type Target = Vec<SegmentInfoElem>;
-
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
-
-impl FromIterator<SegmentInfoElem> for SegmentInfo {
-    fn from_iter<I: IntoIterator<Item = SegmentInfoElem>>(iter: I) -> Self {
-        Self(iter.into_iter().collect())
-    }
-}
-
-impl FromIterator<Region> for SegmentInfo {
-    fn from_iter<T: IntoIterator<Item = Region>>(iter: T) -> Self {
-        Self(iter.into_iter().map(SegmentInfoElem::from).collect())
-    }
+pub struct SegmentInfo {
+    elems: Vec<SegmentInfoElem>,
+    is_reverse: bool,
 }
 
 #[derive(Debug, Copy, Clone)]
@@ -130,16 +113,38 @@ impl std::fmt::Display for SplitError {
 impl std::error::Error for SplitError {}
 
 impl SegmentInfo {
+    pub fn new<T, S>(iter: T, is_reverse: bool) -> Self
+    where
+        T: IntoIterator<Item = S>,
+        S: Into<SegmentInfoElem>,
+    {
+        let elems = iter.into_iter().map(|x| x.into()).collect::<Vec<_>>();
+        Self { elems, is_reverse }
+    }
+
     pub fn len(&self) -> usize {
-        self.0.len()
+        self.elems.len()
+    }
+
+    pub fn is_reverse(&self) -> bool {
+        self.is_reverse
+    }
+
+    pub fn iter<'a>(&'a self) -> impl Iterator<Item = &'a SegmentInfoElem> {
+        self.elems.iter()
+    }
+
+    pub fn into_iter(self) -> impl Iterator<Item = SegmentInfoElem> {
+        self.elems.into_iter()
     }
 
     /// Truncate the segment information to the given length L, such that L is larger
     /// than the sum of the maximum lengths of the n-1 segments + minimum length of the last segment.
     pub fn truncate_max(self, len: usize) -> Self {
+        let is_reverse = self.is_reverse;
         let mut sum = 0;
         let mut result = Vec::new();
-        let mut segments = self.0.into_iter();
+        let mut segments = self.into_iter();
         while let Some(elem) = segments.next() {
             if sum + elem.max_len() > len {
                 if sum + elem.min_len() <= len {
@@ -151,7 +156,10 @@ impl SegmentInfo {
                 result.push(elem);
             }
         }
-        SegmentInfo(result)
+        Self {
+            elems: result,
+            is_reverse: is_reverse,
+        }
     }
 
     /// Split a read into segments according to the segment information.
@@ -228,7 +236,7 @@ impl SegmentInfo {
         let mut buffer: Vec<&SegmentInfoElem> = Vec::new();
         let len = read.sequence().len();
 
-        for segment in self.0.iter() {
+        for segment in self.iter() {
             let min_len = segment.min_len();
             let max_len = segment.max_len();
 
@@ -248,8 +256,12 @@ impl SegmentInfo {
                             .sequence()
                             .get(min_offset..len.min(max_offset + max_len))
                             .unwrap();
-                        if let (Some(pos), mis) =
+                        let match_result = if self.is_reverse {
+                            find_best_pattern_match(&rev_compl(seq), segment.sequence.as_bytes())
+                        } else {
                             find_best_pattern_match(seq, segment.sequence.as_bytes())
+                        };
+                        if let (Some(pos), mis) = match_result
                         {
                             if mis as f64 <= anchor_tolerance * segment.sequence.len() as f64 {
                                 // [offset_left, offset_right] is the region of the read that
@@ -310,7 +322,11 @@ impl SegmentInfo {
                         .unwrap();
 
                     if linker_tolerance < 1.0 && segment.sequence_type.is_fixed() {
-                        let d = hamming::distance(&seq, segment.sequence.as_bytes());
+                        let d = if self.is_reverse {
+                            hamming::distance(&rev_compl(seq), segment.sequence.as_bytes())
+                        } else {
+                            hamming::distance(&seq, segment.sequence.as_bytes())
+                        };
                         if d as f64 > linker_tolerance * seq.len() as f64 {
                             return Err(SplitError::PatternMismatch(d as usize));
                         }
@@ -531,7 +547,7 @@ mod tests {
     }
 
     fn split_seq_by<I: IntoIterator<Item = SegmentInfoElem>>(seq: &str, elems: I) -> String {
-        let segment_info = SegmentInfo(elems.into_iter().collect());
+        let segment_info = SegmentInfo::new(elems, false);
         let fq = new_fq(seq);
         segment_info
             .split(&fq)
@@ -686,15 +702,14 @@ mod tests {
 
     #[test]
     fn test_truncate() {
-        let info: SegmentInfo = [
+        let info = [
             bc(4),
             var(2, 4),
             bc(2),
             linker("GGGG"),
             cdna(1, 1000),
-        ]
-        .into_iter()
-        .collect();
+        ];
+        let info = SegmentInfo::new(info, false);
         println!("{:?}", info.truncate_max(50));
     }
 }

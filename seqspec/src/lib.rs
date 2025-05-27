@@ -3,7 +3,7 @@ pub mod region;
 pub mod utils;
 
 use indexmap::{IndexMap, IndexSet};
-use log::warn;
+use log::{info, warn};
 pub use read::{
     FastqReader, File, Read, SegmentInfo, SegmentInfoElem, SplitError, Strand, UrlType,
 };
@@ -13,6 +13,7 @@ pub use region::{Onlist, Region, RegionId, RegionType, SequenceType};
 use anyhow::{anyhow, bail, Context, Result};
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_yaml::{self, Value};
+use utils::rev_compl;
 use std::collections::HashMap;
 use std::path::Path;
 use std::{
@@ -356,7 +357,7 @@ impl Assay {
             } else {
                 format!("{}-{}", len.start, len.end)
             };
-            warn!(
+            info!(
                 "The read length of {} was inferred to be {}.",
                 read_id, len_str
             );
@@ -394,6 +395,11 @@ impl Assay {
         ids.into_iter().for_each(|id| {
             self.delete_read(&id);
         });
+    }
+
+    pub fn delete_region(&mut self, region_id: &str) -> Result<()> {
+        self.library_spec = self.library_spec.delete_region(region_id)?;
+        Ok(())
     }
 
     /// Get the index of atomic regions of each read in the sequence spec.
@@ -472,7 +478,6 @@ impl Assay {
                 let mut onlists = HashMap::new();
                 let mut total_reads = 0;
                 let mut invalid = 0;
-                println!("{:?}", segment_info);
                 reader.records().take(sample_size).try_for_each(|record| {
                     total_reads += 1;
                     if let Ok(segments) = segment_info.split_with_tolerance(&record?, 0.2, 0.2) {
@@ -488,7 +493,12 @@ impl Assay {
                                         ))
                                     })
                                 {
-                                    if onlist.contains(segment.seq) {
+                                    let seq_in_onlist = if segment_info.is_reverse() {
+                                        onlist.contains(&rev_compl(segment.seq))
+                                    } else {
+                                        onlist.contains(segment.seq)
+                                    };
+                                    if seq_in_onlist {
                                         *n_matched += 1;
                                     }
                                 }

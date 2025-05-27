@@ -191,16 +191,16 @@ impl Read {
             Box::new(subregions)
         };
 
-        let mut segment_info: SegmentInfo = subregions
+        let segment_info = subregions
             .skip_while(|region| {
                 let region = region.read().unwrap();
                 let found =
                     region.region_type.is_sequencing_primer() && region.region_id == self.primer_id;
                 !found
-            })
+            }) // Skip until we find the primer region
             .skip(1)
-            .map(|x| x.read().unwrap().deref().clone())
-            .collect();
+            .map(|x| x.read().unwrap().deref().clone());
+        let mut segment_info = SegmentInfo::new(segment_info, self.is_reverse());
         if truncate_by_length {
             segment_info = segment_info.truncate_max(self.max_len as usize);
         }

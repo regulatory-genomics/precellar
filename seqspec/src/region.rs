@@ -4,8 +4,8 @@ use crate::Modality;
 use anyhow::Result;
 use cached_path::Cache;
 use indexmap::{IndexMap, IndexSet};
-use serde::{Deserialize, Serialize};
 use itertools::Itertools;
+use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
     io::BufRead,
@@ -108,19 +108,36 @@ impl LibSpec {
 
     pub fn cat_barcodes(&self, modality: &Modality) -> Option<Vec<Vec<u8>>> {
         let region = self.get_modality(modality)?;
-        region.read().unwrap().subregions.iter().filter_map(|r| {
-            let r = r.read().unwrap();
-            if r.region_type.is_barcode() && r.onlist.is_some() {
-                Some(r.onlist.as_ref().unwrap().read().unwrap().into_iter().collect::<Vec<_>>())
-            } else {
-                None
-            }
-        }).reduce(|a, b| {
-            a.into_iter().cartesian_product(b).map(|(mut a, b)| {
-                a.extend(b);
-                a
-            }).collect()
-        })
+        region
+            .read()
+            .unwrap()
+            .subregions
+            .iter()
+            .filter_map(|r| {
+                let r = r.read().unwrap();
+                if r.region_type.is_barcode() && r.onlist.is_some() {
+                    Some(
+                        r.onlist
+                            .as_ref()
+                            .unwrap()
+                            .read()
+                            .unwrap()
+                            .into_iter()
+                            .collect::<Vec<_>>(),
+                    )
+                } else {
+                    None
+                }
+            })
+            .reduce(|a, b| {
+                a.into_iter()
+                    .cartesian_product(b)
+                    .map(|(mut a, b)| {
+                        a.extend(b);
+                        a
+                    })
+                    .collect()
+            })
     }
 
     /// Returns the maximum nesting depth across all modalities
@@ -131,6 +148,18 @@ impl LibSpec {
             .unwrap_or(0)
     }
 
+    /// Remove a region from the library specification by its ID.
+    pub fn delete_region(&self, region_id: &str) -> Result<Self> {
+        LibSpec::new(
+            self.modalities()
+                .filter(|r| r.read().unwrap().region_id != region_id)
+                .map(|r| {
+                    r.read()
+                        .unwrap()
+                        .filter_subregions(&|subregion| subregion.region_id != region_id)
+                }),
+        )
+    }
 }
 
 pub type RegionId = String;
@@ -191,12 +220,43 @@ impl Region {
         let mut max_depth = 0;
         if !self.subregions.is_empty() {
             // Add 1 for current level and recursively check subregions
-            max_depth = 1 + self.subregions.iter()
+            max_depth = 1 + self
+                .subregions
+                .iter()
                 .map(|subregion| subregion.read().unwrap().get_nesting_depth())
                 .max()
                 .unwrap_or(0);
         }
         max_depth
+    }
+
+    pub fn filter_subregions<F>(&self, predicate: &F) -> Self
+    where
+        F: Fn(&Region) -> bool,
+    {
+        let subregions = self
+            .subregions
+            .iter()
+            .filter_map(|r| {
+                let r = r.read().unwrap();
+                if predicate(&r) {
+                    Some(Arc::new(RwLock::new(r.filter_subregions(predicate))))
+                } else {
+                    None
+                }
+            })
+            .collect();
+        Self {
+            region_id: self.region_id.clone(),
+            region_type: self.region_type,
+            name: self.name.clone(),
+            sequence_type: self.sequence_type,
+            sequence: self.sequence.clone(),
+            min_len: self.min_len,
+            max_len: self.max_len,
+            onlist: self.onlist.clone(),
+            subregions,
+        }
     }
 }
 
@@ -345,9 +405,9 @@ impl RegionType {
             "truseq_read2" | "truseqread2" => Some(RegionType::TruseqRead2),
             "umi" => Some(RegionType::Umi),
             // Handle Modality separately since it's an untagged enum
-            s if Modality::from_str_case_insensitive(s).is_some() => {
-                Some(RegionType::Modality(Modality::from_str_case_insensitive(s).unwrap()))
-            }
+            s if Modality::from_str_case_insensitive(s).is_some() => Some(RegionType::Modality(
+                Modality::from_str_case_insensitive(s).unwrap(),
+            )),
             _ => None,
         }
     }
@@ -464,7 +524,10 @@ mod tests {
             min_len: 4,
             max_len: 4,
             onlist: None,
-            subregions: vec![Arc::new(RwLock::new(create_nested_region(depth - 1, id_prefix)))],
+            subregions: vec![Arc::new(RwLock::new(create_nested_region(
+                depth - 1,
+                id_prefix,
+            )))],
         }
     }
 
