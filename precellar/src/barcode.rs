@@ -1,4 +1,6 @@
 use anyhow::{bail, Result};
+use indexmap::IndexMap;
+use indicatif::{ProgressBar, ProgressDrawTarget, ProgressIterator, ProgressStyle};
 use itertools::Itertools;
 use log::info;
 use noodles::sam::alignment::{
@@ -6,13 +8,63 @@ use noodles::sam::alignment::{
     Record,
 };
 use rand::distr::{slice::Choose, Distribution};
+use seqspec::{Assay, Modality, RegionId};
 use std::{
     collections::HashMap,
     ops::{Deref, DerefMut},
 };
+use crate::utils::{rev_compl};
 
 const BC_MAX_QV: u8 = 66; // This is the illumina quality value
 pub(crate) const BASE_OPTS: [u8; 4] = [b'A', b'C', b'G', b'T'];
+
+/// Count barcodes in a given assay and modality, returning a map of region IDs to their respective whitelists
+pub(crate) fn barcode_counting(assay: &Assay, modality: Modality) -> (IndexMap<RegionId, Whitelist>, usize) {
+    let spinner = ProgressBar::with_draw_target(None, ProgressDrawTarget::stderr_with_hz(1))
+    .with_style(
+        ProgressStyle::with_template(
+            "{spinner} Processed {human_pos} reads in {elapsed} ({per_sec}) ...",
+        )
+        .unwrap(),
+    );
+
+    let mut whitelists: IndexMap<_, _> = assay.get_whitelists(modality).into_iter()
+        .map(|(k, v)| (k, Whitelist::new(v))).collect();
+
+    let mut num_reads = 0;
+    assay
+        .get_segments_by_modality(modality)
+        .filter(|(_, info)| info.iter().any(|x| x.is_barcode()))
+        .for_each(|(read, segment_info)| {
+            let is_reverse = read.is_reverse();
+            if let Some(mut reader) = read.open() {
+                info!("Counting barcodes in read {}...", read.read_id);
+                num_reads = 0;
+                for fq in reader.records().progress_with(spinner.clone())
+                {
+                    num_reads += 1;
+                    if let Ok(segments) = segment_info.split(&fq.unwrap()) {
+                        segments.iter().for_each(|segment| {
+                            if segment.is_barcode() {
+                                let wl =
+                                    whitelists.get_mut(segment.region_id()).expect(&format!(
+                                        "whitelist not found for region {}",
+                                        segment.region_id()
+                                    ));
+                                if is_reverse {
+                                    wl.count_barcode(&rev_compl(segment.seq));
+                                } else {
+                                    wl.count_barcode(segment.seq);
+                                }
+                            }
+                        })
+                    }
+                }
+            }
+        });
+    (whitelists, num_reads)
+}
+
 
 /// A map of oligo species to their frequency in a given library.
 #[derive(Debug, Clone)]

@@ -5,12 +5,12 @@ use anndata::{
 use anndata_hdf5::H5;
 use anyhow::Result;
 use bed_utils::extsort::ExternalSorterBuilder;
+use bincode::{Decode, Encode};
 use indexmap::IndexMap;
 use itertools::Itertools;
 use noodles::sam::Header;
 use polars::df;
 use rayon::iter::{IntoParallelIterator, ParallelIterator};
-use serde::{Deserialize, Serialize};
 use std::{collections::HashSet, path::PathBuf};
 
 use crate::{align::MultiMapR, qc::QcGeneQuant, transcript::Gene};
@@ -19,7 +19,7 @@ use super::{
     annotate::AnnotationRegion, de_dups::count_unique_umi, AlignmentAnnotator, AnnotatedAlignment,
 };
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Encode, Decode)]
 pub struct GeneAlignment {
     pub idx: usize,
     pub umi: Option<String>,

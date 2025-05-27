@@ -5,15 +5,13 @@ mod pyseqspec;
 mod utils;
 
 use anyhow::Result;
-use itertools::Itertools;
-use log::info;
 use noodles::fastq;
 use pyo3::prelude::*;
 use std::io::Write;
 use std::{io::BufWriter, path::PathBuf, str::FromStr};
 
 use ::precellar::align::{extend_fastq_record, Barcode, FastqProcessor};
-use pyseqspec::Assay;
+use pyseqspec::extract_assays;
 use seqspec::{
     utils::{create_file, Compression},
     Modality,
@@ -129,30 +127,17 @@ fn make_fastq(
     correct_barcode: bool,
 ) -> Result<()> {
     let modality = Modality::from_str(modality).unwrap();
-    let spec = match assay.extract::<PathBuf>() {
-        Ok(p) => seqspec::Assay::from_path(&p).unwrap(),
-        _ => assay.extract::<PyRef<Assay>>()?.0.clone(),
-    };
+    let assay = extract_assays(assay)?;
 
-    let fq_reader = FastqProcessor::new(spec)
+    let fq_reader = FastqProcessor::new(assay)
         .with_modality(modality)
-        .gen_barcoded_fastq(correct_barcode);
-
-    info!(
-        "Adding these to the start of Read 1: {}",
-        fq_reader
-            .get_all_barcodes()
-            .into_iter()
-            .chain(fq_reader.get_all_umi())
-            .map(|(x, n)| format!("{} ({})", x, n))
-            .join(" + "),
-    );
+        .gen_barcoded_fastq(correct_barcode, 1000000);
 
     std::fs::create_dir_all(&out_dir)?;
     let read1_fq = out_dir.join("R1.fq.zst");
     let read1_writer = create_file(read1_fq, Some(Compression::Zstd), None, 8)?;
     let mut read1_writer = fastq::Writer::new(BufWriter::new(read1_writer));
-    let mut read2_writer = if fq_reader.is_paired_end() {
+    let mut read2_writer = if fq_reader.is_paired_end()? {
         let read2_fq = out_dir.join("R2.fq.zst");
         let read2_writer = create_file(read2_fq, Some(Compression::Zstd), None, 8)?;
         let read2_writer = fastq::Writer::new(BufWriter::new(read2_writer));

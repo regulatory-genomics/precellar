@@ -7,11 +7,11 @@ use crate::transcript::{Gene, SpliceSegments, Transcript};
 use anyhow::{ensure, Result};
 use bed_utils::bed::map::GIntervalMap;
 use bed_utils::bed::GenomicRange;
-use noodles::gtf::record::strand::Strand;
+use bincode::{Decode, Encode};
 use noodles::sam;
 use noodles::sam::alignment::record_buf::Cigar;
 use noodles::sam::alignment::record_buf::RecordBuf;
-use serde::{Deserialize, Serialize};
+use noodles::sam::record::data::field::value::base_modifications::group::Strand;
 use std::cmp;
 use std::collections::{BTreeMap, HashSet};
 
@@ -426,7 +426,7 @@ fn rescue_alignments_pe(mut pairs: Vec<AnnotatedAlignment>) -> Option<AnnotatedA
     }
 }
 
-#[derive(Serialize, Deserialize, Eq, PartialEq, Ord, PartialOrd, Debug, Clone, Copy, Hash)]
+#[derive(Encode, Decode, Eq, PartialEq, Ord, PartialOrd, Debug, Clone, Copy, Hash)]
 pub enum AnnotationRegion {
     Exonic,
     Intronic,

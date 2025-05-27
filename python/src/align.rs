@@ -1,9 +1,9 @@
 use crate::aligners::AlignerRef;
-use crate::pyseqspec::Assay;
+use crate::pyseqspec::extract_assays;
 
 use anyhow::{bail, Result};
 use indicatif::{ProgressBar, ProgressFinish, ProgressStyle};
-use log::debug;
+use log::{debug, info};
 use noodles::sam::{self, alignment::io::Write};
 use precellar::align::{Aligner, AlignmentResult};
 use precellar::qc::Metric;
@@ -62,9 +62,11 @@ pub fn make_bwa_index(fasta: PathBuf, genome_prefix: PathBuf) -> Result<()> {
 /// Parameters
 /// ----------
 ///
-/// assay: Assay | Path
+/// assay: Assay | Path | list[Assay | Path]
 ///     A Assay object or file path to the yaml sequencing specification file, see
-///     https://github.com/pachterlab/seqspec.
+///     https://github.com/pachterlab/seqspec. The assay can also be a list of
+///     Assay objects or file paths. In this case, the results will be
+///     concatenated into a single output file.
 /// aligner: STAR | BWAMEM2
 ///     The aligner to use for the alignment. Available aligners can be found at
 ///     `precellar.aligners` submodule.
@@ -139,15 +141,17 @@ pub fn align<'py>(
     num_threads: u16,
     chunk_size: usize,
 ) -> Result<Bound<'py, PyAny>> {
-    let assay = match assay.extract::<PathBuf>() {
-        Ok(p) => seqspec::Assay::from_path(&p).unwrap(),
-        _ => assay.extract::<PyRef<Assay>>()?.0.clone(),
-    };
+    let assay = extract_assays(assay)?;
 
-    let modality = modality
-        .map(Modality::from_str)
-        .unwrap_or(assay.modality())?;
-
+    let modality = match modality {
+        Some(m) => Modality::from_str(m),
+        None => {
+            let m = assay[0].modality()?;
+            info!("Using default modality: {}", m);
+            Ok(m)
+        }
+    }?;
+    
     let mut aligner = AlignerRef::try_from(aligner)?;
     let header = aligner.header();
     let transcript_annotator = aligner.transcript_annotator();
@@ -247,7 +251,7 @@ impl<A: Aligner> Iterator for AlignProgressBar<'_, A> {
     fn next(&mut self) -> Option<Self::Item> {
         let item = self.alignments.next();
         self.pb
-            .set_position(self.alignments.fastq_reader.num_processed as u64);
+            .set_position(self.alignments.fastq_reader.num_processed() as u64);
         item
     }
 }

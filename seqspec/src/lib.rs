@@ -2,6 +2,7 @@ pub mod read;
 pub mod region;
 pub mod utils;
 
+use indexmap::{IndexMap, IndexSet};
 use log::warn;
 pub use read::{
     FastqReader, File, Read, SegmentInfo, SegmentInfoElem, SplitError, Strand, UrlType,
@@ -65,7 +66,6 @@ impl Assay {
         for modality in &self.modalities {
             if let Some(region) = self.library_spec.get_modality(modality) {
                 let depth = region.read().unwrap().get_nesting_depth();
-                //println!("Modality {:?} has nesting depth: {}", modality, depth);
                 if depth != 1 {
                     bail!(
                         "Invalid assay structure for modality {:?}: nesting depth must be exactly 2 levels (found {} levels)",
@@ -367,7 +367,7 @@ impl Assay {
             read_buffer.max_len = max_len.unwrap_or(0) as u32;
         }
 
-        self.verify(&read_buffer)?;
+        self.verify(&read_buffer, infer_read_length_sample)?;
         if let Some(region) = self.library_spec.get(&read_buffer.primer_id) {
             if !region.read().unwrap().region_type.is_sequencing_primer() {
                 warn!(
@@ -423,6 +423,37 @@ impl Assay {
         Some(segments)
     }
 
+    /// Return a map of whitelists for each barcode region in the assay.
+    pub fn get_whitelists(&self, modality: Modality) -> IndexMap<RegionId, IndexSet<Vec<u8>>> {
+        let regions = self
+            .library_spec
+            .get_modality(&modality)
+            .expect(&format!("modality not found: {}", &modality))
+            .read()
+            .unwrap();
+        regions
+            .subregions
+            .iter()
+            .filter_map(|r| {
+                let r = r.read().unwrap();
+                if r.region_type.is_barcode() {
+                    let id = r.region_id.to_string();
+                    let list = if let Some(onlist) = r.onlist.as_ref() {
+                        onlist.read().unwrap()
+                    } else {
+                        if r.sequence_type == SequenceType::Onlist {
+                            warn!("Barcode region '{}' does not have a whitelist", id);
+                        }
+                        IndexSet::new()
+                    };
+                    Some((id, list))
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+
     pub fn iter_reads(&self, modality: Modality) -> impl Iterator<Item = &Read> {
         self.sequence_spec
             .values()
@@ -430,7 +461,7 @@ impl Assay {
     }
 
     /// Verify reads in the sequence spec.
-    fn verify(&self, read: &Read) -> Result<()> {
+    fn verify(&self, read: &Read, sample_size: usize) -> Result<()> {
         let region = self
             .library_spec
             .get_parent(&read.primer_id)
@@ -441,7 +472,8 @@ impl Assay {
                 let mut onlists = HashMap::new();
                 let mut total_reads = 0;
                 let mut invalid = 0;
-                reader.records().take(1000).try_for_each(|record| {
+                println!("{:?}", segment_info);
+                reader.records().take(sample_size).try_for_each(|record| {
                     total_reads += 1;
                     if let Ok(segments) = segment_info.split_with_tolerance(&record?, 0.2, 0.2) {
                         segments.iter().for_each(|segment| {
@@ -469,7 +501,6 @@ impl Assay {
                 })?;
 
                 let percent_valid = (total_reads - invalid) as f64 / total_reads as f64 * 100.0;
-                println!("{}", percent_valid);
                 if percent_valid < 50.0 {
                     warn!(
                         "Read '{}' has low percentage of valid records. \

@@ -9,6 +9,25 @@ use std::{
 };
 use termtree::Tree;
 
+pub(crate) fn extract_assays<'py>(assays: Bound<'py, PyAny>) -> PyResult<Vec<seqspec::Assay>> {
+    fn extract<'py>(assay: Bound<'py, PyAny>) -> PyResult<seqspec::Assay> {
+        let assay = match assay.extract::<PathBuf>() {
+            Ok(p) => seqspec::Assay::from_path(&p)?,
+            _ => assay.extract::<PyRef<Assay>>()?.0.clone(),
+        };
+        Ok(assay)
+    }
+    if assays.is_instance_of::<pyo3::types::PyList>() {
+        let assays: Vec<Bound<'py, PyAny>> = assays.extract()?;
+        assays.into_iter()
+            .map(extract)
+            .collect()
+    } else {
+        let assay = extract(assays)?;
+        Ok(vec![assay])
+    }
+}
+
 /** A Assay object.
 
     A Assay object is used to annotate sequencing libraries produced by genomics assays.
@@ -195,10 +214,10 @@ impl Assay {
     /// infer_read_length: bool
     ///     Whether to infer the read length from the fastq file.
     /// infer_read_length_sample: int | None
-    ///     The number of records to sample from the fastq file to infer the read length.
+    ///     The number of records to read from the fastq file to infer the read length.
     #[pyo3(
-        signature = (read_id, *, modality=None, primer_id=None, is_reverse=None, fastq=None, min_len=None, max_len=None, compute_md5=false, infer_read_length=true, infer_read_length_sample=1000),
-        text_signature = "($self, read_id, *, modality=None, primer_id=None, is_reverse=None, fastq=None, min_len=None, max_len=None, compute_md5=False, infer_read_length=True, infer_read_length_sample=1000)",
+        signature = (read_id, *, modality=None, primer_id=None, is_reverse=None, fastq=None, min_len=None, max_len=None, compute_md5=false, infer_read_length=true, infer_read_length_sample=10000),
+        text_signature = "($self, read_id, *, modality=None, primer_id=None, is_reverse=None, fastq=None, min_len=None, max_len=None, compute_md5=False, infer_read_length=True, infer_read_length_sample=10000)",
     )]
     fn update_read(
         &mut self,

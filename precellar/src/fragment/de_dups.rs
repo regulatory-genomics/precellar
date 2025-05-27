@@ -20,12 +20,12 @@
 
 use anyhow::{Context, Result};
 use bed_utils::bed::Strand;
+use bincode::{Decode, Encode};
 use itertools::Itertools;
 use noodles::sam::alignment::record::cigar::op::Kind;
 use noodles::sam::alignment::record::Flags;
 use noodles::sam::alignment::Record;
 use noodles::sam::Header;
-use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::hash::Hash;
 
@@ -56,7 +56,7 @@ use crate::fragment::Fragment;
 //
 // RF_secondstrand outward       3' <==1==---------- 5'
 //                               5' ----------==2==> 3'
-#[derive(Eq, PartialEq, Debug, Hash, Serialize, Deserialize)]
+#[derive(Eq, PartialEq, Debug, Hash)]
 pub enum Orientation {
     F,
     R,
@@ -85,7 +85,7 @@ pub(crate) enum FingerPrint {
 }
 
 /// Minimal information about an alignment extracted from the BAM record.
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Encode, Decode, Debug)]
 pub(crate) struct AlignmentMini {
     alignment_start: u32,
     alignment_end: u32,
@@ -154,7 +154,7 @@ impl AlignmentMini {
     }
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Encode, Decode, Debug)]
 pub struct AlignmentInfo {
     name: String,
     reference_sequence_id: u16,
