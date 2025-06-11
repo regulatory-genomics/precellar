@@ -82,9 +82,11 @@ pub fn make_bwa_index(fasta: PathBuf, genome_prefix: PathBuf) -> Result<()> {
 ///     List of mitochondrial DNA names.
 /// shift_left: int
 ///     The number of bases to shift the left end of the fragment.
+///     For example, in ATAC-seq, this is usually set to 4 to account for the Tn5 transposase insertion bias.
 ///     Available only when `output_type='fragment'`.
 /// shift_right: int
 ///     The number of bases to shift the right end of the fragment.
+///     For example, in ATAC-seq, this is usually set to -5 to account for the Tn5 transposase insertion bias.
 ///     Available only when `output_type='fragment'`.
 /// compression: str | None
 ///     The compression algorithm to use for the output fragment file.
