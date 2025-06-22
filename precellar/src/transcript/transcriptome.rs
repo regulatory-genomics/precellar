@@ -1,8 +1,7 @@
 use anyhow::{bail, ensure, Result};
 use noodles::sam::alignment::record::cigar::op::Kind;
 use noodles::sam::alignment::record::cigar::Op;
-use noodles::sam::alignment::record_buf::Cigar;
-use noodles::sam::alignment::record_buf::RecordBuf;
+use noodles::sam::alignment::record_buf::{Cigar, RecordBuf};
 use noodles::sam::record::data::field::value::base_modifications::group::Strand;
 use std::cmp;
 

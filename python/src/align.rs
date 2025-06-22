@@ -3,7 +3,7 @@ use crate::pyseqspec::extract_assays;
 
 use anyhow::{bail, Result};
 use indicatif::{ProgressBar, ProgressFinish, ProgressStyle};
-use log::{debug, info};
+use log::info;
 use noodles::sam::{self, alignment::io::Write};
 use precellar::align::{Aligner, AlignmentResult};
 use precellar::qc::Metric;
@@ -14,7 +14,7 @@ use std::{path::PathBuf, str::FromStr};
 
 use precellar::{
     align::{FastqProcessor, MultiMapR},
-    fragment::FragmentGenerator,
+    fragment::{IntoFragments, IntoFragOpts},
     qc::QcFragment,
     transcript::Quantifier,
 };
@@ -88,6 +88,9 @@ pub fn make_bwa_index(fasta: PathBuf, genome_prefix: PathBuf) -> Result<()> {
 ///     The number of bases to shift the right end of the fragment.
 ///     For example, in ATAC-seq, this is usually set to -5 to account for the Tn5 transposase insertion bias.
 ///     Available only when `output_type='fragment'`.
+/// compute_snv: bool
+///     Whether to compute single nucleotide variants (SNVs) from the alignments.
+///     If True, the SNVs will be computed and added to the fragment file.
 /// compression: str | None
 ///     The compression algorithm to use for the output fragment file.
 ///     If None, the compression algorithm will be inferred from the file extension.
@@ -116,14 +119,14 @@ pub fn make_bwa_index(fasta: PathBuf, genome_prefix: PathBuf) -> Result<()> {
         assay, aligner, *,
         output, modality=None, output_type="alignment",
         mito_dna=vec!["chrM".to_owned(), "M".to_owned()],
-        shift_left=4, shift_right=-5,
+        shift_left=4, shift_right=-5, compute_snv=false,
         compression=None, compression_level=None,
         temp_dir=None, num_threads=8, chunk_size=10000000,
     ),
     text_signature = "(assay, aligner, *,
         output, modality=None, output_type='alignment',
         mito_dna=['chrM', 'M'],
-        shift_left=4, shift_right=-5,
+        shift_left=4, shift_right=-5, compute_snv=False,
         compression=None, compression_level=None,
         temp_dir=None, num_threads=8, chunk_size=10000000)"
 )]
@@ -137,6 +140,7 @@ pub fn align<'py>(
     mito_dna: Vec<String>,
     shift_left: i64,
     shift_right: i64,
+    compute_snv: bool,
     compression: Option<&str>,
     compression_level: Option<u32>,
     temp_dir: Option<PathBuf>,
@@ -192,22 +196,27 @@ pub fn align<'py>(
                 num_threads as u32,
             )?;
 
-            let mut fragment_generator = FragmentGenerator::default();
-            fragment_generator.set_shift_left(shift_left);
-            fragment_generator.set_shift_right(shift_right);
-            if let Some(dir) = temp_dir.as_ref() {
-                debug!("Using temporary directory: {:?}", dir);
-                fragment_generator.set_temp_dir(dir);
-            }
+            let opts = IntoFragOpts {
+                shift_left,
+                shift_right,
+                temp_dir: temp_dir.clone(),
+                compute_snv,
+                ..Default::default()
+            };
 
-            let frag_qc = write_fragments(
-                py,
-                &mut writer,
-                &header,
-                &mito_dna,
-                fragment_generator,
-                alignments,
-            )?;
+            let mut frag_qc = QcFragment::default();
+            mito_dna.iter().for_each(|x| {
+                frag_qc.add_mito_dna(x);
+            });
+            alignments.into_fragments(&header, opts)
+                .into_iter()
+                .for_each(|fragments| {
+                    py.check_signals().unwrap();
+                    fragments.into_iter().for_each(|frag| {
+                        frag_qc.update(&frag);
+                        writeln!(writer, "{}", frag).unwrap();
+                    })
+                });
             qc_metrics.insert("fragment".to_owned(), frag_qc.into());
         }
         OutputType::GeneQuantification => {
@@ -326,30 +335,4 @@ fn write_alignments<'a>(
     });
 
     Ok(())
-}
-
-#[inline]
-fn write_fragments<'a>(
-    py: Python<'a>,
-    writer: &mut Box<dyn std::io::Write + Send>,
-    header: &'a sam::Header,
-    mito_dna: &Vec<String>,
-    fragment_generator: FragmentGenerator,
-    alignments: impl Iterator<Item = Vec<(Option<MultiMapR>, Option<MultiMapR>)>> + 'a,
-) -> Result<QcFragment> {
-    let mut fragment_qc = QcFragment::default();
-    mito_dna.iter().for_each(|x| {
-        fragment_qc.add_mito_dna(x);
-    });
-    fragment_generator
-        .gen_unique_fragments(&header, alignments)
-        .into_iter()
-        .for_each(|fragments| {
-            py.check_signals().unwrap();
-            fragments.into_iter().for_each(|frag| {
-                fragment_qc.update(&frag);
-                writeln!(writer, "{}", frag).unwrap();
-            })
-        });
-    Ok(fragment_qc)
 }

@@ -6,7 +6,7 @@ use bed_utils::{
     extsort::ExternalSorterBuilder,
 };
 use bincode::{Decode, Encode};
-use de_dups::{remove_duplicates, AlignmentInfo};
+use de_dups::AlignmentInfo;
 use itertools::Itertools;
 use noodles::sam::{
     alignment::{record::Flags, Record},
@@ -15,7 +15,10 @@ use noodles::sam::{
 use rayon::prelude::ParallelSliceMut;
 use std::path::PathBuf;
 
-use crate::align::MultiMap;
+use crate::{
+    align::{MultiMap, MultiMapR},
+    fragment::de_dups::{MutationCount, RemoveDuplicates},
+};
 
 pub type CellBarcode = String;
 
@@ -29,6 +32,7 @@ pub struct Fragment {
     pub barcode: Option<CellBarcode>,
     pub count: u32,
     pub strand: Option<Strand>,
+    pub snps: Option<MutationCount>,
 }
 
 impl BEDLike for Fragment {
@@ -77,6 +81,15 @@ impl core::fmt::Display for Fragment {
         )?;
         if let Some(strand) = self.strand() {
             write!(f, "\t{}", strand)?;
+        } else {
+            write!(f, "\t.")?;
+        }
+        if let Some(snp) = &self.snps {
+            if snp.len() == 0 {
+                write!(f, "\t.")?;
+            } else {
+                write!(f, "\t{}", snp)?;
+            }
         }
         Ok(())
     }
@@ -127,82 +140,81 @@ impl std::str::FromStr for Fragment {
             barcode,
             count,
             strand,
+            snps: None, // FIXME: handle SNPs
         })
     }
 }
 
-#[derive(Debug)]
-pub struct FragmentGenerator {
-    shift_left: i64,  // `shift_left` - Insertion site correction for the left end.
-    shift_right: i64, // `shift_right` - Insertion site correction for the right end.
-    mapq: u8,
-    chunk_size: usize,
-    temp_dir: Option<PathBuf>,
+#[derive(Debug, Clone)]
+pub struct IntoFragOpts {
+    pub shift_left: i64,  // Insertion site correction for the left end.
+    pub shift_right: i64, // Insertion site correction for the right end.
+    pub min_mapq: u8,
+    pub chunk_size: usize,
+    pub temp_dir: Option<PathBuf>,
+    pub compute_snv: bool, // Whether to compute SNVs for fragments.
 }
 
-impl Default for FragmentGenerator {
+impl Default for IntoFragOpts {
     fn default() -> Self {
         Self {
-            shift_left: 4,
-            shift_right: -5,
-            mapq: 30,
+            shift_left: 0,
+            shift_right: 0,
+            min_mapq: 30,
             chunk_size: 30000000,
             temp_dir: None,
+            compute_snv: false,
         }
     }
 }
 
-impl FragmentGenerator {
-    pub fn set_temp_dir<P: Into<PathBuf>>(&mut self, temp_dir: P) {
-        self.temp_dir = Some(temp_dir.into());
-    }
-
-    pub fn set_shift_left(&mut self, shift_left: i64) {
-        self.shift_left = shift_left;
-    }
-
-    pub fn set_shift_right(&mut self, shift_right: i64) {
-        self.shift_right = shift_right;
-    }
-
-    pub fn gen_unique_fragments<'a, I, R>(
-        &'a self,
+pub trait IntoFragments: Iterator {
+    fn into_fragments<'a>(
+        self,
         header: &'a Header,
-        records: I,
+        opts: IntoFragOpts,
     ) -> UniqueFragments<
         impl Iterator<Item = AlignmentInfo> + 'a,
         impl FnMut(&AlignmentInfo) -> String + 'a,
     >
     where
-        I: Iterator<Item = Vec<(Option<MultiMap<R>>, Option<MultiMap<R>>)>> + 'a,
-        R: Record + 'a,
+        Self: Iterator<Item = Vec<(Option<MultiMapR>, Option<MultiMapR>)>> + 'a + Sized,
     {
-        let data = records.flat_map(|chunk|
-            chunk.into_iter().flat_map(|(r1, r2)| if r1.is_some() && r2.is_some() {
-                let r1 = r1.unwrap();
-                let r2 = r2.unwrap();
-                if filter_read_pair((&r1.primary, &r2.primary), self.mapq) {
-                    AlignmentInfo::from_read_pair((&r1.primary, &r2.primary), header).unwrap()
+        let data = self.flat_map(move |chunk| {
+            chunk.into_iter().flat_map(move |(r1, r2)| {
+                if r1.is_some() && r2.is_some() {
+                    let r1 = r1.unwrap();
+                    let r2 = r2.unwrap();
+                    if filter_read_pair((&r1.primary, &r2.primary), opts.min_mapq) {
+                        AlignmentInfo::from_read_pair((&r1.primary, &r2.primary), header, opts.compute_snv).unwrap()
+                    } else {
+                        None
+                    }
                 } else {
-                    None
+                    let r = r1.or(r2).unwrap();
+                    if filter_read(&r.primary, opts.min_mapq) {
+                        AlignmentInfo::from_read(&r.primary, header, opts.compute_snv).unwrap()
+                    } else {
+                        None
+                    }
                 }
-            } else {
-                let r = r1.or(r2).unwrap();
-                if filter_read(&r.primary, self.mapq) {
-                    AlignmentInfo::from_read(&r.primary, header).unwrap()
-                } else {
-                    None
-                }
-            }
-        ));
+            })
+        });
 
-        let sorted = sort_by_barcode(data, self.temp_dir.clone(), self.chunk_size);
+        let sorted = sort_by_barcode(data, opts.temp_dir.clone(), opts.chunk_size);
         UniqueFragments {
-            shift_left: self.shift_left,
-            shift_right: self.shift_right,
+            shift_left: opts.shift_left,
+            shift_right: opts.shift_right,
             chunks: sorted.chunk_by(|x| x.barcode.clone()),
         }
     }
+}
+
+impl<T, R> IntoFragments for T
+where
+    T: Iterator<Item = Vec<(Option<MultiMap<R>>, Option<MultiMap<R>>)>> + Sized,
+    R: Record,
+{
 }
 
 pub struct UniqueFragments<I: Iterator, F> {
@@ -239,7 +251,9 @@ impl<'a, I: Iterator<Item = AlignmentInfo>, F: FnMut(&AlignmentInfo) -> String> 
 
     fn next(&mut self) -> Option<Self::Item> {
         let (_, chunk) = self.iter.next()?;
-        let mut fragments: Vec<_> = remove_duplicates(chunk)
+        let mut fragments: Vec<_> = chunk
+            .into_iter()
+            .remove_duplicates()
             .drain()
             .flat_map(|(_, mut frag)| {
                 if frag.strand().is_none() {
@@ -308,3 +322,44 @@ fn filter_read_pair<R: Record>(pair: (&R, &R), min_q: u8) -> bool {
         && filter_read(pair.1, min_q)
         && pair.0.flags().unwrap().is_properly_segmented()
 }
+
+/*
+pub fn txxx(cigar: Vec<u8>) -> Result<(u64, Vec<(u64, u64)>)>{
+    let cigar = noodles::sam::record::Cigar::new(&cigar);
+    let mut left_clip = 0;
+    let mut segments = Vec::new();
+    let mut seen_nonclips = false; // whether we've seen non-clip bases yet
+
+    let mut cur_start = 0u64;
+    let mut cur_end = 0u64;
+    for c in cigar.iter() {
+        let c = c?;
+        match c.kind() {
+            Kind::HardClip | Kind::SoftClip => {
+                if !seen_nonclips {
+                    left_clip += c.len() as u64;
+                }
+            }
+            Kind::Skip => {
+                seen_nonclips = true;
+                let next_start = cur_end + c.len() as u64;
+                segments.push((cur_start, cur_end));
+                cur_start = next_start;
+                cur_end = next_start;
+            }
+            Kind::Insertion => {
+                seen_nonclips = true;
+            }
+            Kind::Match | Kind::Deletion | Kind::SequenceMatch | Kind::SequenceMismatch => {
+                seen_nonclips = true;
+                cur_end += c.len() as u64;
+            }
+            Kind::Pad => unreachable!(),
+        }
+    }
+    if cur_start < cur_end {
+        segments.push((cur_start, cur_end));
+    }
+    Ok((left_clip, segments))
+}
+*/
