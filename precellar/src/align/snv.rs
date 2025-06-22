@@ -41,8 +41,7 @@ pub fn format_snvs(snv: &[SNV]) -> Option<String> {
     }
 
     let mut output = String::new();
-    let mut offset = snv[0].relative_position;
-    write!(output, "{}", offset).unwrap();
+    let mut offset = 0;
     snv.iter().for_each(|s| {
         if s.relative_position < offset {
             panic!(
@@ -51,10 +50,8 @@ pub fn format_snvs(snv: &[SNV]) -> Option<String> {
             );
         }
         let n = s.relative_position - offset;
-        if n > 0 {
-            write!(output, "{}", n).unwrap();
-            offset = s.relative_position;
-        }
+        write!(output, "{}", n).unwrap();
+        offset = s.relative_position;
 
         match &s.ty {
             Mutation::Substitution(base) => {
@@ -128,7 +125,18 @@ pub fn get_snv(rec: &RecordBuf) -> Result<Vec<SNV>> {
         }
     }
     .as_bytes();
-    let mut md: Vec<_> = parse_md_tag_str(md).map(|x| x.unwrap()).collect();
+    let mut md: Vec<_> = parse_md_tag_str(md)
+        .flat_map(|x| match x.unwrap() {
+            MDKind::Match(m) => {
+                if m == 0 {
+                    None
+                } else {
+                    Some(MDKind::Match(m))
+                }
+            }
+            k => Some(k),
+        })
+        .collect();
     md.reverse();
     let mut n_soft_clip = 0;
     rec.cigar()
@@ -145,8 +153,7 @@ pub fn get_snv(rec: &RecordBuf) -> Result<Vec<SNV>> {
         });
 
     let mut idx = 0;
-    rec
-        .cigar()
+    rec.cigar()
         .iter()
         .map(Result::unwrap)
         .skip_while(|op| {
@@ -154,86 +161,89 @@ pub fn get_snv(rec: &RecordBuf) -> Result<Vec<SNV>> {
             kind == Kind::HardClip || kind == Kind::SoftClip
         })
         .try_for_each(|op| {
-        let l = op.len();
-        match op.kind() {
-            Kind::Match | Kind::SequenceMismatch => {
-                let mut acc = l;
-                while acc > 0 {
-                    match md.pop() {
-                        Some(MDKind::Match(m)) => {
-                            if m as usize > acc {
-                                md.push(MDKind::Match(m - acc as u16));
-                                idx += acc;
-                                acc = 0;
-                            } else {
-                                idx += m as usize;
-                                acc -= m as usize;
+            let l = op.len();
+            match op.kind() {
+                Kind::Match | Kind::SequenceMismatch => {
+                    let mut acc = l;
+                    while acc > 0 {
+                        match md.pop() {
+                            Some(MDKind::Match(m)) => {
+                                if m as usize > acc {
+                                    md.push(MDKind::Match(m - acc as u16));
+                                    idx += acc;
+                                    acc = 0;
+                                } else {
+                                    idx += m as usize;
+                                    acc -= m as usize;
+                                }
+                            }
+                            Some(MDKind::Substitution(_)) => {
+                                if rec.quality_scores().as_ref()[idx + n_soft_clip] >= 30 {
+                                    let alt_base = rec.sequence().as_ref()[idx + n_soft_clip];
+                                    snv.push(SNV {
+                                        relative_position: u32::try_from(idx)?,
+                                        ty: Mutation::Substitution(alt_base),
+                                    });
+                                }
+                                idx += 1;
+                                acc -= 1;
+                            }
+                            _ => {
+                                bail!(err_msg("Expecting MATCH", rec));
                             }
                         }
-                        Some(MDKind::Substitution(_)) => {
-                            if rec.quality_scores().as_ref()[idx+n_soft_clip] >= 30 {
-                                let alt_base = rec.sequence().as_ref()[idx+n_soft_clip];
-                                snv.push(SNV {
-                                    relative_position: u32::try_from(idx)?,
-                                    ty: Mutation::Substitution(alt_base),
-                                });
+                    }
+                    if acc != 0 {
+                        bail!(err_msg("Length mismatch", rec));
+                    }
+                }
+                Kind::Deletion => {
+                    match md.pop() {
+                        Some(MDKind::Deletion(deletion_bases)) => {
+                            if deletion_bases.len() != l {
+                                bail!(err_msg("Deletion length mismatch", rec));
                             }
-                            idx += 1;
-                            acc -= 1;
                         }
                         _ => {
-                            bail!("Invalid MD tag: Expected match, found something else. Record: {:?}", rec);
+                            bail!(err_msg("Expecting DELETION", rec));
                         }
                     }
-                }
-                if acc != 0 {
-                    bail!(
-                        "Invalid MD tag: Match length mismatch, expected {}, found {}",
-                        l,
-                        acc
-                    );
-                }
-            }
-            Kind::Deletion => {
-                match md.pop() {
-                    Some(MDKind::Deletion(deletion_bases)) => {
-                        if deletion_bases.len() != l {
-                            bail!(
-                                "Invalid MD tag: Deletion length mismatch, expected {}, found {}",
-                                l,
-                                deletion_bases.len()
-                            );
-                        }
-                    }
-                    _ => {
-                        bail!("Invalid MD tag: Expected deletion in MD tag, found something else");
-                    }
-                }
-                snv.push(SNV {
-                    relative_position: u32::try_from(idx)?,
-                    ty: Mutation::Deletion(l as u16),
-                });
-            }
-            Kind::Insertion => {
-                if rec.quality_scores().as_ref()[idx+n_soft_clip] >= 30 {
-                    let alt_base = rec.sequence().as_ref()[idx+n_soft_clip..idx+n_soft_clip+l].to_vec();
                     snv.push(SNV {
                         relative_position: u32::try_from(idx)?,
-                        ty: Mutation::Insertion(alt_base),
+                        ty: Mutation::Deletion(l as u16),
                     });
                 }
-                idx += l;
-            }
-            Kind::Skip | Kind::Pad | Kind::HardClip => {},
-            _ => {
-                // For other kinds of CIGAR operations, we do not record mutations.
-                // This includes soft clips, hard clips, etc.
-                idx += l;
-            }
-        };
-        Ok(())
-    })?;
+                Kind::Insertion => {
+                    if rec.quality_scores().as_ref()[idx + n_soft_clip] >= 30 {
+                        let alt_base = rec.sequence().as_ref()
+                            [idx + n_soft_clip..idx + n_soft_clip + l]
+                            .to_vec();
+                        snv.push(SNV {
+                            relative_position: u32::try_from(idx)?,
+                            ty: Mutation::Insertion(alt_base),
+                        });
+                    }
+                    idx += l;
+                }
+                Kind::Skip | Kind::Pad | Kind::HardClip => {}
+                _ => {
+                    // For other kinds of CIGAR operations, we do not record mutations.
+                    // This includes soft clips, hard clips, etc.
+                    idx += l;
+                }
+            };
+            Ok(())
+        })?;
     Ok(snv)
+}
+
+fn err_msg(msg: &str, rec: &RecordBuf) -> String {
+    format!(
+        "{}. CIGAR: {:?}, MD tag: {:?}",
+        msg,
+        rec.cigar(),
+        rec.data().get(&Tag::MISMATCHED_POSITIONS).unwrap(),
+    )
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -315,6 +325,17 @@ mod tests {
         assert_eq!(iter.next().unwrap().unwrap(), MDKind::Match(3));
         assert_eq!(iter.next().unwrap().unwrap(), MDKind::Substitution(b'T'));
         assert!(iter.next().is_none());
+
+        let md = b"61G0^GAGGGGGAGGGTGG52";
+        let mut iter = parse_md_tag_str(md);
+        assert_eq!(iter.next().unwrap().unwrap(), MDKind::Match(61));
+        assert_eq!(iter.next().unwrap().unwrap(), MDKind::Substitution(b'G'));
+        assert_eq!(iter.next().unwrap().unwrap(), MDKind::Match(0));
+        assert_eq!(
+            iter.next().unwrap().unwrap(),
+            MDKind::Deletion(b"GAGGGGGAGGGTGG".to_vec()),
+        );
+        assert_eq!(iter.next().unwrap().unwrap(), MDKind::Match(52));
     }
 
     #[test]
@@ -335,11 +356,14 @@ mod tests {
             "3\t163\tchr1\t10009\t0\t49M\t=\t10176\t213\tACCCTAACCCTAACCCTAACCCTAACCCTAACCCAAACCCAAACCCTAA\tFFFFFFFFFFFFFFFFFFFFFF,F,,FF,F:,,FF:F,F:F,F::F:::\tMD:Z:34T5T8",
             "4\t99\tchr1\t10010\t0\t50M\t=\t10296\t335\tCCCTAACCCTAACCCTAACCCTAACCCTAACCCTTACCCTTACCCTTACC\tFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF\tMD:Z:34A5A5A3",
             "5\t99\tchr1\t10010\t0\t5M2I4M\t=\t10296\t335\tCCCTGAACCCT\tFFFFFFFFFFF\tMD:Z:4A4",
-            "5\t99\tchr1\t10010\t0\t8M2I4M\t=\t10296\t335\tCCCTGTTTAACCCT\tFFFFFFFFFFFFFF\tMD:Z:4A7",
-            "5\t99\tchr1\t10010\t0\t5S8M2I4M\t=\t10296\t335\tAAAAACCCTGTTTAACCCT\tFFFFFFFFFFFFFFFFFFF\tMD:Z:4A7",
-            "5\t99\tchr1\t10010\t0\t5H8M2I4M\t=\t10296\t335\tCCCTGTTTAACCCT\tFFFFFFFFFFFFFFFFFFF\tMD:Z:4A7",
+            "6\t99\tchr1\t10010\t0\t8M2I4M\t=\t10296\t335\tCCCTGTTTAACCCT\tFFFFFFFFFFFFFF\tMD:Z:4A7",
+            "7\t99\tchr1\t10010\t0\t5S8M2I4M\t=\t10296\t335\tAAAAACCCTGTTTAACCCT\tFFFFFFFFFFFFFFFFFFF\tMD:Z:4A7",
+            "8\t99\tchr1\t10010\t0\t5H8M2I4M\t=\t10296\t335\tCCCTGTTTAACCCT\tFFFFFFFFFFFFFFFFFFF\tMD:Z:4A7",
+            "9\t99\tchr1\t10010\t0\t23S61M14I1M14D52M\t=\t10296\t335\tAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\tFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF\tMD:Z:61G0^GAGGGGGAGGGTGG52",
         ];
-        let ground_truth = vec!["0C", ".", "34A5A", "34T5T5T", "4G+AA", "4G3+AA", "4G3+AA", "4G3+AA"];
+        let ground_truth = vec![
+            "0C", ".", "34A5A", "34T5T5T", "4G0+AA", "4G3+AA", "4G3+AA", "4G3+AA", "61+AAAAAAAAAAAAAA0A0^--------------",
+        ];
         let rec: Vec<_> = sam
             .into_iter()
             .map(|x| {
