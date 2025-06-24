@@ -13,14 +13,127 @@ use noodles::sam::{
     Header,
 };
 use rayon::prelude::ParallelSliceMut;
-use std::path::PathBuf;
+use std::{collections::BTreeMap, path::PathBuf};
 
 use crate::{
-    align::{MultiMap, MultiMapR},
-    fragment::de_dups::{MutationCount, RemoveDuplicates},
+    align::{MultiMap, MultiMapR, SNVs},
+    fragment::de_dups::{AlignmentMini, RemoveDuplicates},
 };
 
 pub type CellBarcode = String;
+
+#[derive(Encode, Decode, Debug)]
+pub struct ExtendedFields {
+    pub first_segment: ReadInfo,
+    pub second_segment: Option<ReadInfo>,
+}
+
+impl ExtendedFields {
+    pub fn new(ali: &AlignmentInfo) -> Option<Self> {
+        let first_segment = ReadInfo::new(&ali.read1)?;
+        let second_segment = if let Some(ali2) = &ali.read2 {
+            Some(ReadInfo::new(ali2)?)
+        } else {
+            None
+        };
+        Some(Self {
+            first_segment,
+            second_segment,
+        })
+    }
+
+    pub fn add(&mut self, ali: &AlignmentInfo) {
+        self.first_segment.update(&ali.read1);
+
+        if let Some(read2) = ali.read2.as_ref() {
+            self.second_segment.as_mut().unwrap().update(read2);
+        }
+    }
+}
+
+#[derive(Encode, Decode, Debug)]
+pub struct ReadInfo {
+    pub read_start: u32,
+    pub read_end: u32,
+    pub snps: Option<Vec<SNVs>>,  // We use Option because most reads will not have SNPs
+}
+
+impl ReadInfo {
+    pub(crate) fn new(ali: &AlignmentMini) -> Option<Self> {
+        let snv = ali.snps.as_ref()?;
+        let snps = if snv.is_empty() {
+            None
+        } else {
+            Some(vec![snv.clone()])
+        };
+        Some(Self {
+            read_start: ali.alignment_start - 1,
+            read_end: ali.alignment_end,
+            snps,
+        })
+    }
+
+    fn len(&self) -> u32 {
+        self.read_end - self.read_start
+    }
+
+    fn update(&mut self, ali: &AlignmentMini) {
+        if ali.alignment_start - 1 < self.read_start {
+            self.read_start = ali.alignment_start - 1;
+        }
+        if ali.alignment_end > self.read_end {
+            self.read_end = ali.alignment_end;
+        }
+
+        if let Some(snp) = &ali.snps {
+            if !snp.is_empty() {
+                self.add_snp(snp.clone());
+            }
+        }
+    }
+
+    fn add_snp(&mut self, snp: SNVs) {
+        if let Some(snps) = &mut self.snps {
+            snps.push(snp);
+        } else {
+            self.snps = Some(vec![snp]);
+        }
+    }
+
+    fn count_snp(&self) -> BTreeMap<String, u32> {
+        let mut count = BTreeMap::new();
+        if let Some(snps) = self.snps.as_ref() {
+            snps.iter().for_each(|snp| {
+                let key = snp.to_string(self.read_start, self.read_start + self.len()).unwrap();
+                count.entry(key)
+                    .and_modify(|e| *e += 1u32)
+                    .or_insert(1);
+            });
+        }
+        count
+    }
+
+    fn stringify(&self, n: u32) -> String {
+        let mut count = self.count_snp();
+
+        let n_snps = self.snps.as_ref().map(|x| x.len()).unwrap_or(0);
+        let n_match = n - n_snps as u32;
+        if n_match > 0 {
+            count.insert(self.len().to_string(), n_match);
+        }
+
+        let snps = count.into_iter()
+            .map(|(snv, c)| {
+                if c == n {
+                    snv
+                } else {
+                    format!("{}:{}", snv, c)
+                }
+            })
+            .join(";");
+        format!("{}\t{}", self.read_start, snps)
+    }
+}
 
 /// Fragments from single-cell ATAC-seq experiment. Each fragment is represented
 /// by a genomic coordinate, cell barcode and a integer value.
@@ -32,7 +145,46 @@ pub struct Fragment {
     pub barcode: Option<CellBarcode>,
     pub count: u32,
     pub strand: Option<Strand>,
-    pub snps: Option<MutationCount>,
+    pub extended: Option<ExtendedFields>,
+}
+
+impl Fragment {
+    fn from_alignment(value: AlignmentInfo) -> Fragment {
+        let extended = ExtendedFields::new(&value);
+        if value.read2.is_none() {
+            Fragment {
+                chrom: value.reference_sequence.clone(),
+                start: value.read1.alignment_start as u64 - 1,
+                end: value.read1.alignment_end as u64,
+                barcode: Some(value.barcode.clone()),
+                count: 1,
+                strand: Some(if value.read1.is_reverse_complemented() {
+                    Strand::Reverse
+                } else {
+                    Strand::Forward
+                }),
+                extended,
+            }
+        } else {
+            let rec1_5p = value.read1.alignment_5p();
+            let rec2_5p = value.read2.as_ref().unwrap().alignment_5p();
+            let (start, end) = if rec1_5p < rec2_5p {
+                (rec1_5p, rec2_5p)
+            } else {
+                (rec2_5p, rec1_5p)
+            };
+
+            Fragment {
+                chrom: value.reference_sequence.clone(),
+                start: start as u64 - 1,
+                end: end as u64,
+                barcode: Some(value.barcode.clone()),
+                count: 1,
+                strand: None,
+                extended,
+            }
+        }
+    }
 }
 
 impl BEDLike for Fragment {
@@ -84,13 +236,13 @@ impl core::fmt::Display for Fragment {
         } else {
             write!(f, "\t.")?;
         }
-        if let Some(snp) = &self.snps {
-            if snp.len() == 0 {
-                write!(f, "\t.")?;
-            } else {
-                write!(f, "\t{}", snp)?;
+        if let Some(ext) = &self.extended {
+            write!(f, "\t{}", ext.first_segment.stringify(self.count))?;
+            if let Some(second_segment) = ext.second_segment.as_ref() {
+                write!(f, "\t{}", second_segment.stringify(self.count))?;
             }
         }
+
         Ok(())
     }
 }
@@ -140,7 +292,7 @@ impl std::str::FromStr for Fragment {
             barcode,
             count,
             strand,
-            snps: None, // FIXME: handle SNPs
+            extended: None, // FIXME: handle SNPs
         })
     }
 }
@@ -322,44 +474,3 @@ fn filter_read_pair<R: Record>(pair: (&R, &R), min_q: u8) -> bool {
         && filter_read(pair.1, min_q)
         && pair.0.flags().unwrap().is_properly_segmented()
 }
-
-/*
-pub fn txxx(cigar: Vec<u8>) -> Result<(u64, Vec<(u64, u64)>)>{
-    let cigar = noodles::sam::record::Cigar::new(&cigar);
-    let mut left_clip = 0;
-    let mut segments = Vec::new();
-    let mut seen_nonclips = false; // whether we've seen non-clip bases yet
-
-    let mut cur_start = 0u64;
-    let mut cur_end = 0u64;
-    for c in cigar.iter() {
-        let c = c?;
-        match c.kind() {
-            Kind::HardClip | Kind::SoftClip => {
-                if !seen_nonclips {
-                    left_clip += c.len() as u64;
-                }
-            }
-            Kind::Skip => {
-                seen_nonclips = true;
-                let next_start = cur_end + c.len() as u64;
-                segments.push((cur_start, cur_end));
-                cur_start = next_start;
-                cur_end = next_start;
-            }
-            Kind::Insertion => {
-                seen_nonclips = true;
-            }
-            Kind::Match | Kind::Deletion | Kind::SequenceMatch | Kind::SequenceMismatch => {
-                seen_nonclips = true;
-                cur_end += c.len() as u64;
-            }
-            Kind::Pad => unreachable!(),
-        }
-    }
-    if cur_start < cur_end {
-        segments.push((cur_start, cur_end));
-    }
-    Ok((left_clip, segments))
-}
-*/

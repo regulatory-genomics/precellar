@@ -19,17 +19,16 @@
 // but not at the 3' end.
 
 use anyhow::{Context, Result};
-use bed_utils::bed::Strand;
 use bincode::{Decode, Encode};
 use itertools::Itertools;
 use noodles::sam::alignment::record::Cigar;
 use noodles::sam::alignment::record::{cigar::op::Kind, Flags};
 use noodles::sam::alignment::RecordBuf;
 use noodles::sam::Header;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 use std::hash::Hash;
 
-use crate::align::{format_snvs, get_snv, SNV};
+use crate::align::SNVs;
 use crate::barcode::{get_barcode, get_umi};
 use crate::fragment::Fragment;
 
@@ -88,21 +87,19 @@ pub(crate) enum FingerPrint {
 /// Minimal information about an alignment extracted from the BAM record.
 #[derive(Encode, Decode, Debug)]
 pub(crate) struct AlignmentMini {
-    alignment_start: u32, // 0-based start of the alignment
-    alignment_end: u32,   // 0-based end of the alignment
-    unclipped_start: u32, // 0-based start of the alignment without soft/hard clipping
-    unclipped_end: u32,   // 0-based end of the alignment without soft/hard clipping
-    flags: u16,
-    snps: Option<Vec<SNV>>, // SNPs in the alignment
+    pub alignment_start: u32, // 1-based start of the alignment
+    pub alignment_end: u32,   // 1-based end of the alignment
+    pub unclipped_start: u32, // 1-based start of the alignment without soft/hard clipping
+    pub unclipped_end: u32,   // 1-based end of the alignment without soft/hard clipping
+    pub flags: u16,
+    pub snps: Option<SNVs>, // SNPs in the alignment
 }
 
 impl AlignmentMini {
     fn new(rec: &RecordBuf, compute_snv: bool) -> Result<Self> {
         let cigar = rec.cigar();
-        let start: usize = rec.alignment_start().unwrap().into();
-        let alignment_start: u32 = start.try_into()?;
-        let alignment_span: u32 = cigar.alignment_span().try_into()?;
-        let alignment_end = alignment_start + alignment_span - 1;
+        let alignment_start: u32 = rec.alignment_start().unwrap().get().try_into()?;
+        let alignment_end = rec.alignment_end().unwrap().get().try_into()?;
         let clip_groups = cigar.iter().map(Result::unwrap).chunk_by(|op| {
             let kind = op.kind();
             kind == Kind::HardClip || kind == Kind::SoftClip
@@ -128,7 +125,11 @@ impl AlignmentMini {
             unclipped_start: alignment_start.wrapping_sub(clipped_start),
             unclipped_end: alignment_end + clipped_end,
             flags: rec.flags().bits(),
-            snps: if compute_snv { Some(get_snv(rec)?) } else { None },
+            snps: if compute_snv {
+                Some(SNVs::try_from(rec)?)
+            } else {
+                None
+            },
         })
     }
 
@@ -159,13 +160,13 @@ impl AlignmentMini {
 
 #[derive(Encode, Decode, Debug)]
 pub struct AlignmentInfo {
-    name: String,
-    reference_sequence_id: u16,
-    reference_sequence: String,
-    read1: AlignmentMini,
-    read2: Option<AlignmentMini>,
+    pub(crate) name: String,
+    pub(crate) reference_sequence_id: u16,
+    pub(crate) reference_sequence: String,
+    pub(crate) read1: AlignmentMini,
+    pub(crate) read2: Option<AlignmentMini>,
     pub(crate) barcode: String,
-    umi: Option<String>,
+    pub(crate) umi: Option<String>,
 }
 
 impl AlignmentInfo {
@@ -241,113 +242,6 @@ impl AlignmentInfo {
             umi: get_umi(rec1)?,
         }))
     }
-
-    fn snp_info(&self) -> Option<Vec<SNV>> {
-        if self.read2.is_none() {
-            Some(self.read1.snps.clone()?.into_iter().sorted().collect())
-        } else {
-            let rec1_5p = self.read1.alignment_5p();
-            let rec2_5p = self.read2.as_ref().unwrap().alignment_5p();
-            let start = if rec1_5p < rec2_5p { rec1_5p } else { rec2_5p };
-            let snps = self
-                .read1
-                .snps
-                .clone()?
-                .into_iter()
-                .flat_map(|snp| {
-                    Some(SNV {
-                        relative_position: (snp.relative_position + self.read1.alignment_start)
-                            .checked_sub(start)?,
-                        ty: snp.ty,
-                    })
-                })
-                .chain(
-                    self.read2
-                        .as_ref()
-                        .unwrap()
-                        .snps
-                        .clone()?
-                        .into_iter()
-                        .flat_map(|snp| {
-                            Some(SNV {
-                                relative_position: (snp.relative_position
-                                    + self.read2.as_ref().unwrap().alignment_start)
-                                    .checked_sub(start)?,
-                                ty: snp.ty,
-                            })
-                        }),
-                )
-                .sorted();
-            Some(merge_snps(snps))
-        }
-    }
-}
-
-fn merge_snps(mut snps: impl Iterator<Item = SNV>) -> Vec<SNV> {
-    let mut merged = Vec::new();
-    let mut buf = snps.next();
-    while let Some(snp) = buf.as_ref() {
-        if let Some(next_snp) = snps.next() {
-            if snp.relative_position as usize + snp.ty.len() <= next_snp.relative_position as usize
-            {
-                merged.push(buf.replace(next_snp).unwrap());
-            } else {
-                if snp.ty.is_insertion() && next_snp.ty.is_substitution() {
-                    buf.replace(next_snp);
-                } else if snp.ty.is_deletion() && !next_snp.ty.is_deletion() {
-                    buf.replace(next_snp);
-                }
-            }
-        } else {
-            merged.push(buf.take().unwrap());
-        }
-    }
-    merged
-}
-
-impl From<AlignmentInfo> for Fragment {
-    fn from(value: AlignmentInfo) -> Fragment {
-        let snps = if let Some(s) = value.snp_info() {
-            let mut snps = MutationCount::new();
-            snps.add(&s);
-            Some(snps)
-        } else {
-            None
-        };
-        if value.read2.is_none() {
-            Fragment {
-                chrom: value.reference_sequence.clone(),
-                start: value.read1.alignment_start as u64 - 1,
-                end: value.read1.alignment_end as u64,
-                barcode: Some(value.barcode.clone()),
-                count: 1,
-                strand: Some(if value.read1.is_reverse_complemented() {
-                    Strand::Reverse
-                } else {
-                    Strand::Forward
-                }),
-                snps,
-            }
-        } else {
-            let rec1_5p = value.read1.alignment_5p();
-            let rec2_5p = value.read2.unwrap().alignment_5p();
-            let (start, end) = if rec1_5p < rec2_5p {
-                (rec1_5p, rec2_5p)
-            } else {
-                (rec2_5p, rec1_5p)
-            };
-
-            Fragment {
-                chrom: value.reference_sequence.clone(),
-                start: start as u64 - 1,
-                end: end as u64,
-                barcode: Some(value.barcode.clone()),
-                count: 1,
-                strand: None,
-                snps,
-            }
-        }
-    }
 }
 
 impl From<&AlignmentInfo> for FingerPrint {
@@ -417,9 +311,9 @@ pub trait RemoveDuplicates: Iterator {
                 .entry(fingerprint)
                 .and_modify(|x| {
                     x.count += 1;
-                    x.snps.as_mut().map(|snps| snps.add(&ali.snp_info().unwrap()));
+                    x.extended.as_mut().map(|snps| snps.add(&ali));
                 })
-                .or_insert(Fragment::from(ali));
+                .or_insert(Fragment::from_alignment(ali));
         });
         result
     }
@@ -427,57 +321,39 @@ pub trait RemoveDuplicates: Iterator {
 
 impl<T> RemoveDuplicates for T where T: Iterator<Item = AlignmentInfo> + Sized {}
 
-#[derive(Encode, Decode, Debug)]
-pub struct MutationCount(BTreeMap<String, u32>);
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bstr::BString;
+    use std::num::NonZeroUsize;
+    use noodles::sam::{
+        self as sam,
+        header::record::value::{map::ReferenceSequence, Map},
+    };
 
-impl core::fmt::Display for MutationCount {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        let s = self
-            .0
-            .iter()
-            .map(|(snv, c)| {
-                if *c > 1 {
-                    format!("{}:{}", snv, c)
-                } else {
-                    format!("{}", snv)
-                }
-            })
-            .join(";");
-        write!(f, "{}", s)?;
+    #[test]
+    fn test_convert() -> Result<()> {
+        let reference_sequences = [(
+            BString::from("chr1"),
+            Map::<ReferenceSequence>::new(NonZeroUsize::try_from(248956422)?),
+        )]
+        .into_iter()
+        .collect();
+        let header = sam::Header::builder()
+            .set_reference_sequences(reference_sequences)
+            .build();
+
+        let sam = "1\t99\tchr1\t10003\t0\t4H50M2H\t=\t10083\t129\tCCCCTAACCCTAACCCTAACCCTAACCCTAACCCTAACCCTAACCCTAAC\tFFFF:FFFFF:FF:FF:FFFFFFFFFFFFFFFFF,FF:FF,FFFFFFFFF\tMD:Z:0A49";
+        let rec = noodles::sam::Record::try_from(sam.as_bytes())?;
+        let rec = noodles::sam::alignment::RecordBuf::try_from_alignment_record(&header, &rec)?;
+
+        let ali = AlignmentMini::new(&rec, true)?;
+
+        assert_eq!(ali.alignment_start, 10003);
+        assert_eq!(ali.alignment_end, 10052);
+        assert_eq!(ali.unclipped_start, 9999);
+        assert_eq!(ali.unclipped_end, 10054);
+
         Ok(())
-    }
-}
-
-impl FromIterator<Vec<SNV>> for MutationCount {
-    fn from_iter<I: IntoIterator<Item = Vec<SNV>>>(iter: I) -> Self {
-        let mut count = MutationCount::new();
-        iter.into_iter().for_each(|snp| count.add(&snp));
-        count
-    }
-}
-
-impl std::ops::AddAssign<MutationCount> for MutationCount {
-    fn add_assign(&mut self, other: MutationCount) {
-        for (key, value) in other.0 {
-            let count = self.0.entry(key).or_insert(0);
-            *count += value;
-        }
-    }
-}
-
-impl MutationCount {
-    pub fn new() -> Self {
-        MutationCount(BTreeMap::new())
-    }
-
-    pub fn len(&self) -> usize {
-        self.0.len()
-    }
-
-    fn add(&mut self, snv: &[SNV]) {
-        if let Some(snv) = format_snvs(snv) {
-            let count = self.0.entry(snv).or_insert(0);
-            *count += 1;
-        }
     }
 }

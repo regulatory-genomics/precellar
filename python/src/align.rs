@@ -195,6 +195,11 @@ pub fn align<'py>(
                 compression_level,
                 num_threads as u32,
             )?;
+            writeln!(
+                writer,
+                "{}",
+                fragment_file_header(compute_snv, shift_left, shift_right)
+            )?;
 
             let opts = IntoFragOpts {
                 shift_left,
@@ -237,6 +242,23 @@ pub fn align<'py>(
     );
 
     Ok(value_into_pyobject(qc_metrics.into(), py))
+}
+
+fn fragment_file_header(compute_snv: bool, shift_left: i64, shift_right: i64) -> String {
+    let header = if compute_snv {
+        "# chromosome\tstart\tend\tbarcode\tcount\tstrand\talignment1_start\talignment1_snv\talignment2_start\talignment2_snv"
+    } else {
+        "# chromosome\tstart\tend\tbarcode\tcount\tstrand"
+    };
+    format!(
+        "{}\n{}\n{}\n{}\n{}\n{}",
+        "# This file contains unique fragments created using precellar:",
+        format!("# version = {}", env!("CARGO_PKG_VERSION")),
+        format!("# shift_left = {}", shift_left),
+        format!("# shift_right = {}", shift_right),
+        "# Each line represents a unique fragment with the following fields:",
+        header,
+    )
 }
 
 struct AlignProgressBar<'a, A> {
