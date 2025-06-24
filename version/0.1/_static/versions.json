@@ -1,0 +1,13 @@
+[
+    {
+        "name": "dev",
+        "version": "dev",
+        "url": "https://lab.kaizhang.org/precellar/version/dev/"
+    },
+    {
+        "name": "0.1 (stable)",
+        "version": "dev",
+        "preferred": true,
+        "url": "https://lab.kaizhang.org/precellar/version/dev/"
+    }
+]
