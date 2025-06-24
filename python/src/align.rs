@@ -14,7 +14,7 @@ use std::{path::PathBuf, str::FromStr};
 
 use precellar::{
     align::{FastqProcessor, MultiMapR},
-    fragment::{IntoFragments, IntoFragOpts},
+    fragment::{IntoFragOpts, IntoFragments},
     qc::QcFragment,
     transcript::Quantifier,
 };
@@ -157,7 +157,7 @@ pub fn align<'py>(
             Ok(m)
         }
     }?;
-    
+
     let mut aligner = AlignerRef::try_from(aligner)?;
     let header = aligner.header();
     let transcript_annotator = aligner.transcript_annotator();
@@ -213,7 +213,8 @@ pub fn align<'py>(
             mito_dna.iter().for_each(|x| {
                 frag_qc.add_mito_dna(x);
             });
-            alignments.into_fragments(&header, opts)
+            alignments
+                .into_fragments(&header, opts)
                 .into_iter()
                 .for_each(|fragments| {
                     py.check_signals().unwrap();
@@ -250,15 +251,20 @@ fn fragment_file_header(compute_snv: bool, shift_left: i64, shift_right: i64) ->
     } else {
         "# chromosome\tstart\tend\tbarcode\tcount\tstrand"
     };
-    format!(
-        "{}\n{}\n{}\n{}\n{}\n{}",
-        "# This file contains unique fragments created using precellar:",
-        format!("# version = {}", env!("CARGO_PKG_VERSION")),
-        format!("# shift_left = {}", shift_left),
-        format!("# shift_right = {}", shift_right),
+    [
+        &format!(
+            "# This file contains unique fragments generated using precellar-v{}",
+            env!("CARGO_PKG_VERSION")
+        ),
+        "#",
+        "# Parameters",
+        &format!("# shift_left = {}", shift_left),
+        &format!("# shift_right = {}", shift_right),
+        "#",
         "# Each line represents a unique fragment with the following fields:",
         header,
-    )
+    ]
+    .join("\n")
 }
 
 struct AlignProgressBar<'a, A> {
@@ -274,7 +280,10 @@ impl<'a, A> AlignProgressBar<'a, A> {
         )
         .unwrap();
         pb.set_style(sty);
-        AlignProgressBar { pb: pb.with_finish(ProgressFinish::Abandon), alignments }
+        AlignProgressBar {
+            pb: pb.with_finish(ProgressFinish::Abandon),
+            alignments,
+        }
     }
 }
 
