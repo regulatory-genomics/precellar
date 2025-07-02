@@ -4,7 +4,7 @@ use crate::Modality;
 pub use segment::{Segment, SegmentInfo, SegmentInfoElem, SplitError};
 
 use anyhow::{bail, Result};
-use cached_path::Cache;
+use file_download::download::Downloader;
 use indexmap::IndexMap;
 use noodles::fastq;
 use serde::{Deserialize, Serialize, Serializer};
@@ -278,10 +278,10 @@ impl File {
         match self.urltype {
             UrlType::Local => Ok(Box::new(crate::utils::open_file(&self.url)?)),
             _ => {
-                let mut cache = Cache::new().unwrap();
-                cache.dir = home::home_dir().unwrap().join(".cache/seqspec");
-                let file = cache.cached_path(&self.url).unwrap();
-                Ok(Box::new(crate::utils::open_file(file)?))
+                let cache_dir = home::home_dir().unwrap().join(".cache/seqspec");
+                let downloader = Downloader::new(Some(cache_dir))?;
+                let file_path = downloader.retrieve(&self.url, Some(&self.filename), None, false)?;
+                Ok(Box::new(crate::utils::open_file(file_path)?))
             }
         }
     }

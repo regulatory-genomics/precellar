@@ -6,7 +6,7 @@ edition = "2021"
 [dependencies]
 anyhow = "1.0"
 base16ct = { version = "0.2", features = ["alloc"] }
-cached-path = "0.6"
+file-download = { git = "https://github.com/regulatory-genomics/file-download", rev = "2c41ff28d45c39edc73e144f00255476194ffc9b" }
 flate2 = "1.1"
 indexmap = "2.9"
 log = "0.4"

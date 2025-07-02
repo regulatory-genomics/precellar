@@ -1,8 +1,8 @@
 use crate::read::UrlType;
 use crate::Modality;
 
+use file_download::download::Downloader;
 use anyhow::Result;
-use cached_path::Cache;
 use indexmap::{IndexMap, IndexSet};
 use itertools::Itertools;
 use serde::{Deserialize, Serialize};
@@ -457,10 +457,10 @@ pub struct Onlist {
 
 impl Onlist {
     pub fn read(&self) -> Result<IndexSet<Vec<u8>>> {
-        let mut cache = Cache::new()?;
-        cache.dir = home::home_dir().unwrap().join(".cache/seqspec");
-        let file = cache.cached_path(&self.url)?;
-        let reader = std::io::BufReader::new(crate::utils::open_file(file)?);
+        let cache_dir = home::home_dir().unwrap().join(".cache/seqspec");
+        let downloader = Downloader::new(Some(cache_dir))?;
+        let file_path = downloader.retrieve(&self.url, Some(&self.filename), None, false)?;
+        let reader = std::io::BufReader::new(crate::utils::open_file(file_path)?);
         reader.lines().map(|x| Ok(x?.into_bytes())).collect()
     }
 
