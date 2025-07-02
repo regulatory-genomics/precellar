@@ -1,0 +1,23 @@
+﻿precellar.SeqSpec
+=================
+
+.. currentmodule:: precellar
+
+.. autoclass:: SeqSpec
+
+   
+   
+   
+
+   
+   
+   .. rubric:: Methods
+
+   .. autosummary::
+      :toctree: .
+   
+      SeqSpec.delete_read
+      SeqSpec.to_yaml
+      SeqSpec.update_read
+   
+   
