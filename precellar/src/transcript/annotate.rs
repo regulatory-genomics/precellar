@@ -61,6 +61,53 @@ impl AnnotatedAlignment {
     }
 }
 
+/// As I want to add intron annotation to the transcript, I have to modify the GIntervalMap
+pub trait GIntervalMapExt<T> {
+    /// Extract all items, apply a function to each, and rebuild the map
+    fn map_values_mut<F>(self, f: F) -> Self
+    where
+        F: FnMut(&mut T);
+
+    /// Extract items as a vector for manual modification, then rebuild
+    fn extract_and_rebuild<F>(self, f: F) -> Self
+    where
+        F: FnOnce(&mut Vec<(GenomicRange, T)>);
+}
+
+impl<T: Clone> GIntervalMapExt<T> for GIntervalMap<T> {
+    fn map_values_mut<F>(self, mut f: F) -> Self
+    where
+        F: FnMut(&mut T),
+    {
+        let mut items: Vec<(GenomicRange, T)> = self.iter()
+            .map(|(range, value)| (range.clone(), value.clone()))
+            .collect();
+
+        // Apply the function to each value
+        for (_, value) in &mut items {
+            f(value);
+        }
+
+        // Rebuild the map
+        items.into_iter().collect()
+    }
+
+    fn extract_and_rebuild<F>(self, f: F) -> Self
+    where
+        F: FnOnce(&mut Vec<(GenomicRange, T)>),
+    {
+        let mut items: Vec<(GenomicRange, T)> = self.iter()
+            .map(|(range, value)| (range.clone(), value.clone()))
+            .collect();
+
+        // Apply the function to the entire vector
+        f(&mut items);
+
+        // Rebuild the map
+        items.into_iter().collect()
+    }
+}
+
 /// Manages the annotation of alignments using transcriptome data.
 #[derive(Debug, Clone)]
 pub struct AlignmentAnnotator {

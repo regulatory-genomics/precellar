@@ -4,5 +4,5 @@ mod transcriptome;
 pub(crate) mod de_dups;
 
 pub use quantification::Quantifier;
-pub use transcriptome::{Transcript, Gene, SpliceSegments, Exon, Exons};
+pub use transcriptome::{Transcript, Gene, SpliceSegments, Exon, Exons, Intron, Introns};
 pub use annotate::{AlignmentAnnotator, AnnotatedAlignment};

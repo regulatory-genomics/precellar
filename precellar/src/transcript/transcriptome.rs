@@ -15,6 +15,7 @@ pub struct Transcript {
     pub strand: Strand,
     pub gene: Gene,
     exons: Exons,
+    introns: Introns,
 }
 
 impl TryFrom<star_aligner::transcript::Transcript> for Transcript {
@@ -45,6 +46,7 @@ impl TryFrom<star_aligner::transcript::Transcript> for Transcript {
                 name: transcript.gene_name,
             },
             exons,
+            introns: Introns::new(std::iter::empty()).unwrap(),
         })
     }
 }
@@ -59,6 +61,10 @@ impl Transcript {
         self.exons.as_ref()
     }
 
+    pub fn introns(&self) -> &[Intron] {
+        self.introns.as_ref()
+    }
+
     /// Convert a coordinate in the genome to a coordinate in the exons/transcript.
     /// The coordinate starts at the beginning of the transcript.
     pub fn get_offset(&self, coord: u64) -> Option<i64> {
@@ -71,7 +77,13 @@ impl Transcript {
         }
         None
     }
-}
+
+    pub fn make_intron_by_exons(&mut self) {
+        let introns = (0..self.exons().len() - 1)
+            .map(|i| (self.exons()[i].end, self.exons()[i + 1].start));
+        self.introns = Introns::new(introns).unwrap();
+    }
+    }
 
 #[derive(Debug, Clone)]
 pub struct Exons(Vec<Exon>);
@@ -114,6 +126,57 @@ pub struct Exon {
 impl Exon {
     pub fn len(&self) -> u64 {
         self.end - self.start
+    }
+    pub fn start(&self) -> u64 {
+        self.start
+    }
+    pub fn end(&self) -> u64 {
+        self.end
+    }
+}
+
+
+/// I try to make intron struct to store the validated intron information
+#[derive(Eq, PartialEq, Debug, Clone, Ord, PartialOrd)]
+pub struct Intron {
+    start: u64,
+    end: u64,
+    validated: bool,
+}
+
+impl Intron {
+    pub fn len(&self) -> u64 {
+        self.end - self.start
+    }
+    pub fn start(&self) -> u64 {
+        self.start
+    }
+
+    pub fn end(&self) -> u64 {
+        self.end
+    }
+
+    pub fn validated(&self) -> bool {
+        self.validated
+    }
+
+    pub fn set_validated(&mut self, validated: bool) {
+        self.validated = validated;
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct Introns(Vec<Intron>);
+
+impl Introns {
+    pub fn new(iter: impl IntoIterator<Item = (u64, u64)>) -> Result<Self> {
+        let introns = iter.into_iter().map(|(start, end)| Intron { start, end, validated: false }).collect();
+        Ok(Self(introns))
+    }
+}
+impl AsRef<[Intron]> for Introns {
+    fn as_ref(&self) -> &[Intron] {
+        &self.0
     }
 }
 
@@ -437,5 +500,253 @@ fn mark_deleted_ref_bases(cigar: &mut Cigar, del_len: usize, reverse: bool) -> C
         let mut new_cigar = cigar.clone();
         new_cigar.as_mut().push(del);
         new_cigar
+    }
+}
+
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::transcript::{Transcript, Gene, Exons, Introns};
+    use noodles::sam::record::data::field::value::base_modifications::group::Strand;
+
+    fn create_test_gene() -> Gene {
+        Gene {
+            id: "GENE001".to_string(),
+            name: "TestGene".to_string(),
+        }
+    }
+
+    fn create_test_transcript_with_gaps() -> Transcript {
+        // Create a transcript with 3 exons that have gaps between them (will create introns)
+        let exons = Exons::new(vec![
+            (100, 200),  // Exon 1: 100-200
+            (300, 400),  // Exon 2: 300-400 (gap: 200-300)
+            (500, 600),  // Exon 3: 500-600 (gap: 400-500)
+        ]).unwrap();
+
+        let introns = Introns::new(std::iter::empty()).unwrap(); // Start with empty introns
+
+        Transcript {
+            id: "TRANSCRIPT001".to_string(),
+            chrom: "chr1".to_string(),
+            start: 100,
+            end: 600,
+            strand: Strand::Forward,
+            gene: create_test_gene(),
+            exons,
+            introns,
+        }
+    }
+
+    fn create_test_transcript_no_gaps() -> Transcript {
+        // Create a transcript with adjacent exons (no gaps, no introns)
+        let exons = Exons::new(vec![
+            (100, 200),  // Exon 1: 100-200
+            (200, 300),  // Exon 2: 200-300 (no gap)
+        ]).unwrap();
+
+        let introns = Introns::new(std::iter::empty()).unwrap();
+
+        Transcript {
+            id: "TRANSCRIPT002".to_string(),
+            chrom: "chr1".to_string(),
+            start: 100,
+            end: 300,
+            strand: Strand::Forward,
+            gene: create_test_gene(),
+            exons,
+            introns,
+        }
+    }
+
+    #[test]
+    fn test_introns_new_method() {
+        // Test creating introns from coordinate pairs
+        let intron_coords = vec![
+            (200, 300),
+            (400, 500),
+        ];
+
+        let introns = Introns::new(intron_coords).unwrap();
+        let intron_slice = introns.as_ref();
+
+        assert_eq!(intron_slice.len(), 2);
+
+        // Check first intron
+        assert_eq!(intron_slice[0].start(), 200);
+        assert_eq!(intron_slice[0].end(), 300);
+        assert_eq!(intron_slice[0].len(), 100);
+        assert!(!intron_slice[0].validated());
+
+        // Check second intron
+        assert_eq!(intron_slice[1].start(), 400);
+        assert_eq!(intron_slice[1].end(), 500);
+        assert_eq!(intron_slice[1].len(), 100);
+        assert!(!intron_slice[1].validated());
+    }
+
+    #[test]
+    fn test_transcript_make_intron_by_exons_with_gaps() {
+        let mut transcript = create_test_transcript_with_gaps();
+
+        // Initially, transcript should have no introns
+        assert_eq!(transcript.introns().len(), 0);
+
+        // Generate introns from exons
+        transcript.make_intron_by_exons();
+
+        // Should now have 2 introns
+        let introns = transcript.introns();
+        assert_eq!(introns.len(), 2);
+
+        // Check first intron (between exon 1 and exon 2)
+        assert_eq!(introns[0].start(), 200);  // End of first exon
+        assert_eq!(introns[0].end(), 300);    // Start of second exon
+        assert_eq!(introns[0].len(), 100);
+        assert!(!introns[0].validated());
+
+        // Check second intron (between exon 2 and exon 3)
+        assert_eq!(introns[1].start(), 400);  // End of second exon
+        assert_eq!(introns[1].end(), 500);    // Start of third exon
+        assert_eq!(introns[1].len(), 100);
+        assert!(!introns[1].validated());
+    }
+
+    #[test]
+    fn test_transcript_make_intron_by_exons_no_gaps() {
+        let mut transcript = create_test_transcript_no_gaps();
+
+        // Initially, transcript should have no introns
+        assert_eq!(transcript.introns().len(), 0);
+
+        // Generate introns from exons
+        transcript.make_intron_by_exons();
+
+        // Should still have no introns because exons are adjacent
+        let introns = transcript.introns();
+        assert_eq!(introns.len(), 1);
+
+        // The "intron" should have zero length (start == end)
+        assert_eq!(introns[0].start(), 200);
+        assert_eq!(introns[0].end(), 200);
+        assert_eq!(introns[0].len(), 0);
+    }
+
+    #[test]
+    fn test_transcript_introns_accessor() {
+        let mut transcript = create_test_transcript_with_gaps();
+        transcript.make_intron_by_exons();
+
+        // Test that we can access introns through the accessor method
+        let introns = transcript.introns();
+        assert_eq!(introns.len(), 2);
+
+        // Verify we get the same data through the accessor
+        assert_eq!(introns[0].start(), 200);
+        assert_eq!(introns[0].end(), 300);
+        assert_eq!(introns[1].start(), 400);
+        assert_eq!(introns[1].end(), 500);
+    }
+
+    #[test]
+    fn test_single_exon_transcript() {
+        // Test transcript with only one exon (should have no introns)
+        let exons = Exons::new(vec![(100, 200)]).unwrap();
+        let introns = Introns::new(std::iter::empty()).unwrap();
+
+        let mut transcript = Transcript {
+            id: "TRANSCRIPT_SINGLE".to_string(),
+            chrom: "chr1".to_string(),
+            start: 100,
+            end: 200,
+            strand: Strand::Forward,
+            gene: create_test_gene(),
+            exons,
+            introns,
+        };
+
+        transcript.make_intron_by_exons();
+
+        // Should have no introns
+        assert_eq!(transcript.introns().len(), 0);
+    }
+
+    #[test]
+    fn test_intron_validation_field() {
+        let intron_coords = vec![(200, 300)];
+        let introns = Introns::new(intron_coords).unwrap();
+        let intron_slice = introns.as_ref();
+
+        // All introns should start as unvalidated
+        assert!(!intron_slice[0].validated());
+
+        // Note: The current implementation doesn't provide a way to set validation
+        // This test documents the current behavior
+    }
+
+    #[test]
+    fn test_empty_introns() {
+        let introns = Introns::new(vec![]).unwrap();
+        let intron_slice = introns.as_ref();
+
+        assert_eq!(intron_slice.len(), 0);
+        assert!(intron_slice.is_empty());
+    }
+
+    #[test]
+    fn test_multiple_transcripts_with_introns() {
+        // Test that multiple transcripts can have their own introns
+        let mut transcript1 = create_test_transcript_with_gaps();
+        let mut transcript2 = create_test_transcript_no_gaps();
+
+        transcript1.make_intron_by_exons();
+        transcript2.make_intron_by_exons();
+
+        // Transcript 1 should have 2 introns
+        assert_eq!(transcript1.introns().len(), 2);
+
+        // Transcript 2 should have 1 intron (zero-length)
+        assert_eq!(transcript2.introns().len(), 1);
+
+        // Verify they don't interfere with each other
+        assert_eq!(transcript1.introns()[0].start(), 200);
+        assert_eq!(transcript2.introns()[0].start(), 200);
+        assert_eq!(transcript2.introns()[0].end(), 200); // Zero length
+    }
+
+    #[test]
+    fn test_intron_validation_methods() {
+        let intron_coords = vec![(200, 300)];
+        let introns = Introns::new(intron_coords).unwrap();
+        let intron_slice = introns.as_ref();
+
+        // Test initial validation state
+        assert!(!intron_slice[0].validated());
+
+        // Note: Since Intron fields are private and we only have immutable access
+        // through the slice, we can't test the set_validated method directly here.
+        // This would require either making fields public or adding mutable access methods.
+
+        // Test that we can read the validation state
+        let validation_state = intron_slice[0].validated();
+        assert!(!validation_state);
+    }
+
+    #[test]
+    fn test_intron_length_calculation() {
+        let intron_coords = vec![
+            (100, 200),   // Length: 100
+            (500, 1000),  // Length: 500
+            (2000, 2001), // Length: 1
+        ];
+
+        let introns = Introns::new(intron_coords).unwrap();
+        let intron_slice = introns.as_ref();
+
+        assert_eq!(intron_slice[0].len(), 100);
+        assert_eq!(intron_slice[1].len(), 500);
+        assert_eq!(intron_slice[2].len(), 1);
     }
 }

@@ -14,7 +14,8 @@ use rayon::iter::{IntoParallelIterator, ParallelIterator};
 use std::{collections::HashSet, path::PathBuf};
 
 use crate::{align::MultiMapR, qc::QcGeneQuant, transcript::Gene};
-
+use bed_utils::bed::map::GIntervalMap;
+use crate::transcript::annotate::GIntervalMapExt;
 use super::{
     annotate::AnnotationRegion, de_dups::count_unique_umi, AlignmentAnnotator, AnnotatedAlignment,
 };
@@ -66,10 +67,11 @@ impl Quantifier {
     }
 
     pub fn quantify<'a, I, P>(
-        &'a self,
+        &'a mut self,
         header: &'a Header,
         records: I,
         output: P,
+        splice_aware: bool,
     ) -> Result<QcGeneQuant>
     where
         I: Iterator<Item = Vec<(Option<MultiMapR>, Option<MultiMapR>)>> + 'a,
@@ -86,6 +88,16 @@ impl Quantifier {
         let mut mito_count: Vec<u64> = Vec::new();
 
         {
+            if splice_aware {
+                // Extract transcripts, modify them, and rebuild the map
+                let transcripts = std::mem::replace(&mut self.annotator.transcripts, GIntervalMap::new());
+                let updated_transcripts = transcripts.map_values_mut(|transcript| {
+                    transcript.make_intron_by_exons();
+                });
+
+                // Update the annotator's transcripts
+                self.annotator.transcripts = updated_transcripts;
+            }
             let tx_alignments = records.flat_map(|recs| {
                 qc.total_reads += recs.len() as u64;
                 recs.into_par_iter()

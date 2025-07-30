@@ -141,6 +141,7 @@ pub fn align<'py>(
     shift_left: i64,
     shift_right: i64,
     compute_snv: bool,
+    splice_aware: bool,
     compression: Option<&str>,
     compression_level: Option<u32>,
     temp_dir: Option<PathBuf>,
@@ -228,7 +229,7 @@ pub fn align<'py>(
         OutputType::GeneQuantification => {
             let mut quantifier = Quantifier::new(transcript_annotator.unwrap());
             mito_dna.iter().for_each(|x| quantifier.add_mito_dna(x));
-            let quant_qc = quantifier.quantify(&header, alignments, output.clone())?;
+            let quant_qc = quantifier.quantify(&header, alignments, output.clone(), splice_aware)?;
             qc_metrics.insert("gene_quantification".to_owned(), quant_qc.into());
         }
     };
