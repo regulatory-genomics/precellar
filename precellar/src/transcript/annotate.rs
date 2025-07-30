@@ -142,6 +142,39 @@ impl AlignmentAnnotator {
         }
     }
 
+    /// Process validation requests from transcript alignments
+    pub fn process_validation_requests(&mut self, alignments: &[TranscriptAlignment]) {
+        let mut validation_requests = Vec::new();
+
+        // Collect all validation requests from alignments
+        for alignment in alignments {
+            if let Some(transcript_id) = alignment.transcript_id() {
+                for &intron_index in &alignment.validation_requests() {
+                    validation_requests.push((transcript_id.to_string(), intron_index));
+                }
+            }
+        }
+
+        if validation_requests.is_empty() {
+            return;
+        }
+
+        // Use the existing GIntervalMapExt to modify transcripts
+        let transcripts = std::mem::replace(&mut self.transcripts, GIntervalMap::new());
+        let updated_transcripts = transcripts.map_values_mut(|transcript| {
+            for (transcript_id, intron_index) in &validation_requests {
+                if transcript.id == *transcript_id {
+                    transcript.validate_intron(*intron_index);
+                }
+            }
+        });
+        self.transcripts = updated_transcripts;
+
+        // Log validation activity
+        if !validation_requests.is_empty() {
+            log::info!("Processed {} intron validation requests", validation_requests.len());
+        }
+    }
     /// Annotate the alignments by mapping them to the transcriptome. If multiple
     /// alignments are present, we will try to find the confident ones and promote
     /// them to primary. A read may align to multiple transcripts and genes, but
@@ -331,12 +364,20 @@ impl AlignmentAnnotator {
                 let tx_length = transcript.len();
 
                 // align the read to the exons
-                if let Some((mut tx_cigar, tx_aligned_bases)) = splice_segments.align_junctions(
+                if let Some((mut tx_cigar, tx_aligned_bases,is_spanning, validation_requests)) = splice_segments.align_junctions(
                     transcript,
                     self.junction_trim_bases,
                     self.intergenic_trim_bases,
                     self.intronic_trim_bases,
                 ) {
+                    // debug information
+                    if is_spanning {
+                        debug!(
+                            "Spanning read detected: {} validation requests for transcript {}",
+                            validation_requests.len(),
+                            transcript.id
+                        );
+                    }
                     // flip reverse strand
                     if tx_reverse_strand {
                         tx_offset = tx_length - (tx_offset + tx_aligned_bases);
@@ -350,6 +391,8 @@ impl AlignmentAnnotator {
                             pos: tx_offset,
                             cigar: tx_cigar,
                             alen: tx_aligned_bases,
+                            is_spanning,
+                            validation_requests,
                         }),
                     };
                 }
@@ -495,6 +538,25 @@ impl TranscriptAlignment {
     pub fn is_intronic(&self) -> bool {
         !self.is_exonic()
     }
+    
+    /// Check if this alignment spans validated junctions
+    pub fn is_spanning(&self) -> bool {
+        self.exon_align.as_ref()
+            .map(|align| align.is_spanning)
+            .unwrap_or(false)
+    }
+
+    /// Get validation requests from this alignment
+    pub fn validation_requests(&self) -> Vec<usize> {
+        self.exon_align.as_ref()
+            .map(|align| align.validation_requests.clone())
+            .unwrap_or_default()
+    }
+
+    /// Get the transcript ID if this is an exonic alignment
+    pub fn transcript_id(&self) -> Option<&str> {
+        self.exon_align.as_ref().map(|align| align.id.as_str())
+    }
 }
 
 // These quantities are well defined for a valid transcriptomic alignment
@@ -504,6 +566,8 @@ pub struct TxAlignProperties {
     pub pos: u64,
     pub cigar: Cigar,
     pub alen: u64,
+    pub is_spanning: bool,  // NEW: Indicates if this alignment spans validated junctions
+    pub validation_requests: Vec<usize>,  // NEW: Intron indices that should be validated
 }
 
 /// Fraction of read interval covered by ref interval

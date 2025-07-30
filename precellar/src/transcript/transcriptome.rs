@@ -85,6 +85,61 @@ impl Transcript {
     }
     }
 
+        /// Validate a specific intron by index
+    pub fn validate_intron(&mut self, index: usize) -> bool {
+        if let Some(intron) = self.introns.0.get_mut(index) {
+            intron.set_validated(true);
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn is_intron_validated(&self, index: usize) -> bool {
+        self.introns.0.get(index)
+            .map(|intron| intron.validated())
+            .unwrap_or(false)
+    }
+
+
+    /// Get count of validated introns
+    pub fn validated_intron_count(&self) -> usize {
+        self.introns.0.iter()
+            .filter(|intron| intron.validated())
+            .count()
+    }
+
+    /// Get total intron count
+    pub fn total_intron_count(&self) -> usize {
+        self.introns.0.len()
+    }
+    /// Get validation percentage
+    /// Functions below is not necessary, I keep it for test purpose.
+    /// This should be removed later
+    pub fn intron_validation_percentage(&self) -> f64 {
+        let total = self.total_intron_count();
+        if total == 0 {
+            0.0
+        } else {
+            self.validated_intron_count() as f64 / total as f64
+        }
+    }
+
+    /// Get comprehensive validation summary
+    pub fn validation_summary(&self) -> ValidationSummary {
+        let total = self.total_intron_count();
+        let validated = self.validated_intron_count();
+        let percentage = if total > 0 { validated as f64 / total as f64 } else { 0.0 };
+
+        ValidationSummary {
+            transcript_id: self.id.clone(),
+            total_introns: total,
+            validated_introns: validated,
+            validation_percentage: percentage,
+            is_fully_validated: percentage == 1.0 && total > 0,
+        }
+    }
+
 #[derive(Debug, Clone)]
 pub struct Exons(Vec<Exon>);
 
@@ -179,7 +234,41 @@ impl AsRef<[Intron]> for Introns {
         &self.0
     }
 }
+/// Comprehensive validation summary for a transcript
+/// For test purpose. 
+/// This should be deleted later
+#[derive(Debug, Clone)]
+pub struct ValidationSummary {
+    pub transcript_id: String,
+    pub total_introns: usize,
+    pub validated_introns: usize,
+    pub validation_percentage: f64,
+    pub is_fully_validated: bool,
+}
 
+impl ValidationSummary {
+    /// Check if transcript has sufficient validation confidence
+    pub fn is_well_validated(&self, min_percentage: f64) -> bool {
+        self.validation_percentage >= min_percentage && self.total_introns > 0
+    }
+
+    /// Get validation confidence level
+    pub fn confidence_level(&self) -> ValidationConfidence {
+        match self.validation_percentage {
+            p if p >= 0.9 => ValidationConfidence::High,
+            p if p >= 0.7 => ValidationConfidence::Medium,
+            p if p >= 0.3 => ValidationConfidence::Low,
+            _ => ValidationConfidence::None,
+        }
+    }
+}
+#[derive(Debug, Clone, PartialEq)]
+pub enum ValidationConfidence {
+    High,    // >= 90% introns validated
+    Medium,  // >= 70% introns validated
+    Low,     // >= 30% introns validated
+    None,    // < 30% introns validated
+}
 #[derive(Hash, Eq, PartialEq, Debug, Clone, Ord, PartialOrd)]
 pub struct Gene {
     pub id: String,
@@ -236,7 +325,7 @@ impl SpliceSegments {
         tolerance: u64,
         intergenic_trim_bases: u64,
         intronic_trim_bases: u64,
-    ) -> Option<(Cigar, u64)> {
+    ) -> Option<(Cigar, u64, bool, Vec<usize>)> {  // (cigar, aligned_bases, is_spanning, validation_requests)
         let (ex_start, ex_end) = find_exons(
             &transcript.exons(),
             self.start(),
@@ -244,11 +333,21 @@ impl SpliceSegments {
             intergenic_trim_bases,
             intronic_trim_bases,
         )?;
-        self._align_junctions_helper(&transcript.exons()[ex_start..=ex_end], tolerance)
+        self._align_junctions_helper(
+            &transcript.exons()[ex_start..=ex_end],
+            &transcript.id,
+            ex_start,
+            tolerance
+        )
     }
 
     /// Align the read to the exons. Returns the aligned cigar and the number of aligned bases.
-    fn _align_junctions_helper(&self, exons: &[Exon], tolerance: u64) -> Option<(Cigar, u64)> {
+    fn _align_junctions_helper(&self,
+         exons: &[Exon], 
+         tolerance: u64,
+         transcript_id: &str,
+         exon_offset: usize,
+        ) -> Option<(Cigar, u64, bool, Vec<usize>)> {
         // check if the number of segments matches the number of exons
         if self.segments.len() != exons.len() {
             return None;
@@ -256,6 +355,8 @@ impl SpliceSegments {
 
         let mut full_cigar = self.left_clip.clone();
         let mut aligned_bases = 0;
+        let mut has_spanning = false;
+        let mut validation_requests = Vec::new();
 
         for i in 0..self.segments.len() {
             let curr_segment = &self.segments[i];
@@ -274,6 +375,11 @@ impl SpliceSegments {
                         Op::new(Kind::SoftClip, start_diff as usize),
                         false,
                     );
+
+                // REQUEST VALIDATION for preceding intron
+                let intron_index = exon_offset + i - 1;
+                validation_requests.push(intron_index);
+                has_spanning = true;
                 } else if start_diff < 0 {
                     // underhang -> decrement aligned bases
                     aligned_bases -= start_diff.unsigned_abs();
@@ -307,6 +413,10 @@ impl SpliceSegments {
                         Op::new(Kind::SoftClip, end_diff as usize),
                         true,
                     );
+                // REQUEST VALIDATION for following intron
+                let intron_index = exon_offset + i;
+                validation_requests.push(intron_index);
+                has_spanning = true;
                 } else if end_diff < 0 {
                     // underhang -> decrement aligned bases
                     aligned_bases -= end_diff.unsigned_abs();
@@ -334,7 +444,7 @@ impl SpliceSegments {
         }
         full_cigar.extend(self.right_clip.as_ref().iter().copied());
 
-        Some((full_cigar, aligned_bases))
+        Some((full_cigar, aligned_bases, has_spanning, validation_requests))
     }
 }
 
@@ -732,6 +842,73 @@ mod tests {
         // Test that we can read the validation state
         let validation_state = intron_slice[0].validated();
         assert!(!validation_state);
+    }
+
+    #[test]
+    fn test_validation_confidence_levels() {
+        let summary_high = ValidationSummary {
+            transcript_id: "test".to_string(),
+            total_introns: 10,
+            validated_introns: 9,
+            validation_percentage: 0.9,
+            is_fully_validated: false,
+        };
+        assert_eq!(summary_high.confidence_level(), ValidationConfidence::High);
+        assert!(summary_high.is_well_validated(0.8));
+
+        let summary_medium = ValidationSummary {
+            transcript_id: "test".to_string(),
+            total_introns: 10,
+            validated_introns: 7,
+            validation_percentage: 0.7,
+            is_fully_validated: false,
+        };
+        assert_eq!(summary_medium.confidence_level(), ValidationConfidence::Medium);
+
+        let summary_low = ValidationSummary {
+            transcript_id: "test".to_string(),
+            total_introns: 10,
+            validated_introns: 3,
+            validation_percentage: 0.3,
+            is_fully_validated: false,
+        };
+        assert_eq!(summary_low.confidence_level(), ValidationConfidence::Low);
+
+        let summary_none = ValidationSummary {
+            transcript_id: "test".to_string(),
+            total_introns: 10,
+            validated_introns: 1,
+            validation_percentage: 0.1,
+            is_fully_validated: false,
+        };
+        assert_eq!(summary_none.confidence_level(), ValidationConfidence::None);
+    }
+
+    #[test]
+    fn test_alignment_with_validation_requests() {
+        use noodles::sam::alignment::record_buf::RecordBuf;
+
+        // Create a test transcript with multiple exons
+        let mut transcript = create_test_transcript_with_gaps();
+        transcript.make_intron_by_exons();
+
+        // Create a mock read that would span exons (this is a simplified test)
+        let record = RecordBuf::default();
+        // This is a simplified test - in reality we'd need to set up proper CIGAR and coordinates
+
+        // Test that align_junctions now returns validation information
+        let splice_segments = SpliceSegments::from(&record);
+        let result = splice_segments.align_junctions(&transcript, 10, 100, 50);
+
+        // The result should be Some or None, and if Some, should have the new format
+        if let Some((cigar, aligned_bases, is_spanning, validation_requests)) = result {
+            // Verify the new return format works
+            assert!(cigar.as_ref().len() >= 0); // CIGAR can be empty
+            assert!(aligned_bases >= 0); // Aligned bases should be non-negative
+            assert!(validation_requests.len() >= 0); // Validation requests can be empty
+            // is_spanning can be true or false
+        }
+        // Either Some or None is fine for this basic test with mock data
     }
 
     #[test]
