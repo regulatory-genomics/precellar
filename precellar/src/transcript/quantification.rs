@@ -76,20 +76,29 @@ impl IntronValidationCollector {
         requests
     }
 
-    /// Extract validation requests from a slice of transcript alignments
+
+    /// Extract validation requests from ALL transcript alignments (both intronic and exonic)
+    /// This aggregates validation information regardless of final alignment classification
     pub fn extract_validation_requests(alignments: &[TranscriptAlignment]) -> Vec<(String, usize)> {
         let mut validation_requests = Vec::new();
         for alignment in alignments {
+            // For exonic alignments, use the transcript ID from exon_align
             if let Some(transcript_id) = alignment.transcript_id() {
                 for &intron_index in &alignment.validation_requests() {
                     validation_requests.push((transcript_id.to_string(), intron_index));
+                }
+            } else {
+                // For intronic alignments, we still want to collect validation requests
+                // but we don't have a transcript ID. We'll use the gene ID as a fallback.
+                // This ensures we don't lose validation information from intronic alignments.
+                for &intron_index in &alignment.validation_requests() {
+                    validation_requests.push((alignment.gene.id.clone(), intron_index));
                 }
             }
         }
         validation_requests
     }
 }
-
 
 
 #[derive(Debug, Encode, Decode)]
