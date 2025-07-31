@@ -17,8 +17,80 @@ use crate::{align::MultiMapR, qc::QcGeneQuant, transcript::Gene};
 use bed_utils::bed::map::GIntervalMap;
 use crate::transcript::annotate::GIntervalMapExt;
 use super::{
-    annotate::AnnotationRegion, de_dups::count_unique_umi, AlignmentAnnotator, AnnotatedAlignment,
+    annotate::{AnnotationRegion, TranscriptAlignment}, de_dups::count_unique_umi, AlignmentAnnotator, AnnotatedAlignment
 };
+
+
+
+/// I use this to collect intron validation information outside
+#[derive(Debug, Clone, Default)]
+pub struct IntronValidationCollector {
+    /// Map of transcript_id -> set of intron indices that need validation
+    pub validation_requests: std::collections::HashMap<String, HashSet<usize>>,
+}
+
+impl IntronValidationCollector {
+    pub fn new() -> Self {
+        Self {
+            validation_requests: std::collections::HashMap::new(),
+        }
+    }
+
+    /// Add a validation request for a specific transcript and intron
+    pub fn add_validation_request(&mut self, transcript_id: String, intron_index: usize) {
+        self.validation_requests
+            .entry(transcript_id)
+            .or_insert_with(HashSet::new)
+            .insert(intron_index);
+    }
+
+    /// Add multiple validation requests from transcript alignments
+    pub fn collect_from_alignments(&mut self, alignments: &[TranscriptAlignment]) {
+        for alignment in alignments {
+            if let Some(transcript_id) = alignment.transcript_id() {
+                for &intron_index in &alignment.validation_requests() {
+                    self.add_validation_request(transcript_id.to_string(), intron_index);
+                }
+            }
+        }
+    }
+
+    /// Get the total number of validation requests
+    pub fn total_requests(&self) -> usize {
+        self.validation_requests.values().map(|set| set.len()).sum()
+    }
+
+    /// Check if there are any validation requests
+    pub fn is_empty(&self) -> bool {
+        self.validation_requests.is_empty()
+    }
+
+    /// Get all validation requests as a vector of (transcript_id, intron_index) pairs
+    pub fn get_all_requests(&self) -> Vec<(String, usize)> {
+        let mut requests = Vec::new();
+        for (transcript_id, intron_indices) in &self.validation_requests {
+            for &intron_index in intron_indices {
+                requests.push((transcript_id.clone(), intron_index));
+            }
+        }
+        requests
+    }
+
+    /// Extract validation requests from a slice of transcript alignments
+    pub fn extract_validation_requests(alignments: &[TranscriptAlignment]) -> Vec<(String, usize)> {
+        let mut validation_requests = Vec::new();
+        for alignment in alignments {
+            if let Some(transcript_id) = alignment.transcript_id() {
+                for &intron_index in &alignment.validation_requests() {
+                    validation_requests.push((transcript_id.to_string(), intron_index));
+                }
+            }
+        }
+        validation_requests
+    }
+}
+
+
 
 #[derive(Debug, Encode, Decode)]
 pub struct GeneAlignment {
@@ -29,7 +101,7 @@ pub struct GeneAlignment {
 
 #[derive(Debug)]
 pub struct Quantifier {
-    annotator: AlignmentAnnotator,
+    pub annotator: AlignmentAnnotator, // make it public for testing purposes
     genes: IndexMap<String, Gene>,
     temp_dir: Option<PathBuf>,
     chunk_size: usize,
@@ -86,6 +158,7 @@ impl Quantifier {
         let mut exon_count: Vec<u64> = Vec::new();
         let mut intron_count: Vec<u64> = Vec::new();
         let mut mito_count: Vec<u64> = Vec::new();
+        let mut validation_collector = IntronValidationCollector::new();
 
         {
             if splice_aware {
@@ -98,14 +171,53 @@ impl Quantifier {
                 // Update the annotator's transcripts
                 self.annotator.transcripts = updated_transcripts;
             }
-            let tx_alignments = records.flat_map(|recs| {
-                qc.total_reads += recs.len() as u64;
-                recs.into_par_iter()
-                    .filter_map(|(r1, r2)| self.make_gene_alignment(header, r1, r2))
-                    .collect::<Vec<_>>()
-            });
+            let temp_dir = self.temp_dir.clone();
+            let chunk_size = self.chunk_size;
+            let mito_genes = self.mito_genes.clone();
+            let (gene_alignments, all_validation_requests) = if splice_aware {
+                // When splice_aware is true, collect both alignments and validation requests
+                let tx_alignments = records.flat_map(|recs| {
+                    qc.total_reads += recs.len() as u64;
+                    recs.into_par_iter()
+                        .filter_map(|(r1, r2)| {
+                            self.make_gene_alignment(header, r1, r2, splice_aware).map(|(barcode, gene_alignment, validation_requests)| {
+                                (barcode, gene_alignment, validation_requests)
+                            })
+                        })
+                        .collect::<Vec<_>>()
+                });
+
+                let mut all_validation_requests = Vec::new();
+                let gene_alignments: Vec<_> = tx_alignments.into_iter().map(|(barcode, gene_alignment, validation_requests)| {
+                    all_validation_requests.extend(validation_requests);
+                    (barcode, gene_alignment)
+                }).collect();
+
+                (gene_alignments, all_validation_requests)
+            } else {
+                // When splice_aware is false, only collect alignments (no validation overhead)
+                // There might be a minimal time cost compared to the original function, but I think it's acceptable
+                let gene_alignments: Vec<_> = records.flat_map(|recs| {
+                    qc.total_reads += recs.len() as u64;
+                    recs.into_par_iter()
+                        .filter_map(|(r1, r2)| {
+                            self.make_gene_alignment(header, r1, r2, splice_aware).map(|(barcode, gene_alignment, _)| {
+                                (barcode, gene_alignment)
+                            })
+                        })
+                        .collect::<Vec<_>>()
+                }).collect();
+                (gene_alignments, Vec::new())
+            };
+
+            // Process validation requests only if splice_aware is enabled
+            if splice_aware {
+                for (transcript_id, intron_index) in all_validation_requests {
+                    validation_collector.add_validation_request(transcript_id, intron_index);
+                }
+            }
             let tx_alignments_chunks =
-                sort_alignments(tx_alignments, self.temp_dir.as_ref(), self.chunk_size)
+                sort_alignments(gene_alignments.into_iter(), temp_dir.as_ref(), chunk_size)
                     .chunk_by(|x| x.0.clone());
             let tx_alignments_chunks = tx_alignments_chunks
                 .into_iter()
@@ -118,7 +230,7 @@ impl Quantifier {
                 let results: Vec<_> = chunk
                     .collect::<Vec<_>>()
                     .into_par_iter()
-                    .map(|alignments| count_unique_umi(alignments, &self.mito_genes))
+                    .map(|alignments| count_unique_umi(alignments, &mito_genes))
                     .collect();
                 results.iter().for_each(|r| {
                     qc.total_umi += r.total_umi;
@@ -151,16 +263,28 @@ impl Quantifier {
             "gene_name" => self.genes.values().map(|g| g.name.clone()).collect::<Vec<_>>()
         )?)?;
 
+        
+        // Log validation summary only if splice_aware is enabled
+        if splice_aware && !validation_collector.is_empty() {
+            log::info!(
+                "Collected {} validation requests for {} transcripts",
+                validation_collector.total_requests(),
+                validation_collector.validation_requests.len()
+            );
+        }
+
         adata.close()?;
         Ok(qc)
     }
 
-    fn make_gene_alignment(
+    /// I make it public for testing purposes. Better to be removed latter
+    pub fn make_gene_alignment(
         &self,
         header: &Header,
         rec1: Option<MultiMapR>,
         rec2: Option<MultiMapR>,
-    ) -> Option<(String, GeneAlignment)> {
+        splice_aware: bool,
+    ) -> Option<(String, GeneAlignment, Vec<(String, usize)>)> {
         let barcode;
         let umi;
         let anno = if rec1.is_some() && rec2.is_some() {
@@ -178,6 +302,7 @@ impl Quantifier {
 
         let gene_id;
         let align_type;
+        let mut validation_requests = Vec::new();
 
         match anno {
             AnnotatedAlignment::PeMapped(a1, a2, anno) => {
@@ -192,6 +317,14 @@ impl Quantifier {
                     _ => AnnotationRegion::Exonic,
                 };
                 gene_id = self.genes.get_full(&gene.id).unwrap().0;
+                
+                // Extract validation information only if splice_aware is enabled
+                if splice_aware {
+                    validation_requests.extend(IntronValidationCollector::extract_validation_requests(&a1.aln_sense));
+                    validation_requests.extend(IntronValidationCollector::extract_validation_requests(&a1.aln_antisense));
+                    validation_requests.extend(IntronValidationCollector::extract_validation_requests(&a2.aln_sense));
+                    validation_requests.extend(IntronValidationCollector::extract_validation_requests(&a2.aln_antisense));
+                }
             }
             AnnotatedAlignment::SeMapped(anno) => {
                 let genes = anno.genes;
@@ -201,6 +334,11 @@ impl Quantifier {
                 let gene = genes.iter().next().unwrap();
                 align_type = anno.region;
                 gene_id = self.genes.get_full(&gene.id).unwrap().0;
+                // Extract validation information only if splice_aware is enabled
+                if splice_aware {
+                    validation_requests.extend(IntronValidationCollector::extract_validation_requests(&anno.aln_sense));
+                    validation_requests.extend(IntronValidationCollector::extract_validation_requests(&anno.aln_antisense));
+                }
             }
         }
 
@@ -209,7 +347,7 @@ impl Quantifier {
             umi,
             align_type,
         };
-        Some((barcode, alignment))
+        Some((barcode, alignment, validation_requests))
     }
 }
 
@@ -235,3 +373,4 @@ where
         .unwrap()
         .map(|x| x.unwrap())
 }
+

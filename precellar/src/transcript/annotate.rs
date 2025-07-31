@@ -14,6 +14,7 @@ use noodles::sam::alignment::record_buf::RecordBuf;
 use noodles::sam::record::data::field::value::base_modifications::group::Strand;
 use std::cmp;
 use std::collections::{BTreeMap, HashSet};
+use log::debug;
 
 #[derive(Eq, PartialEq, Debug)]
 pub struct Annotation {
@@ -68,10 +69,6 @@ pub trait GIntervalMapExt<T> {
     where
         F: FnMut(&mut T);
 
-    /// Extract items as a vector for manual modification, then rebuild
-    fn extract_and_rebuild<F>(self, f: F) -> Self
-    where
-        F: FnOnce(&mut Vec<(GenomicRange, T)>);
 }
 
 impl<T: Clone> GIntervalMapExt<T> for GIntervalMap<T> {
@@ -88,22 +85,6 @@ impl<T: Clone> GIntervalMapExt<T> for GIntervalMap<T> {
             f(value);
         }
 
-        // Rebuild the map
-        items.into_iter().collect()
-    }
-
-    fn extract_and_rebuild<F>(self, f: F) -> Self
-    where
-        F: FnOnce(&mut Vec<(GenomicRange, T)>),
-    {
-        let mut items: Vec<(GenomicRange, T)> = self.iter()
-            .map(|(range, value)| (range.clone(), value.clone()))
-            .collect();
-
-        // Apply the function to the entire vector
-        f(&mut items);
-
-        // Rebuild the map
         items.into_iter().collect()
     }
 }
@@ -523,7 +504,7 @@ pub enum AnnotationRegion {
     Intergenic,
 }
 
-#[derive(Eq, PartialEq, Debug)]
+#[derive(Eq, PartialEq, Debug, Clone)]
 pub struct TranscriptAlignment {
     pub gene: Gene,
     pub strand: Strand,
@@ -560,7 +541,7 @@ impl TranscriptAlignment {
 }
 
 // These quantities are well defined for a valid transcriptomic alignment
-#[derive(Eq, PartialEq, Debug)]
+#[derive(Eq, PartialEq, Debug, Clone)]
 pub struct TxAlignProperties {
     pub id: String,
     pub pos: u64,
