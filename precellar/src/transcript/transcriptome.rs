@@ -326,27 +326,66 @@ impl SpliceSegments {
         tolerance: u64,
         intergenic_trim_bases: u64,
         intronic_trim_bases: u64,
-    ) -> Option<(Cigar, u64, bool, Vec<usize>)> {  // (cigar, aligned_bases, is_spanning, validation_requests)
+    ) -> Option<(Cigar, u64)> {  // (cigar, aligned_bases)
         let (ex_start, ex_end) = find_exons(
             &transcript.exons(),
             self.start(),
             self.end(),
             intergenic_trim_bases,
             intronic_trim_bases,
+            false, // I suppose we don't need validate intergenic & intronic trim in intron validation
         )?;
-        self._align_junctions_helper(
+        let (cigar, aligned_bases) = self._align_junctions_helper(
             &transcript.exons()[ex_start..=ex_end],
             tolerance,
-            ex_start,
-         )
+        )?;
+        return Some((cigar, aligned_bases));
+    }
+
+    pub fn annotate_splice(&self,
+        transcript: &Transcript
+    ) -> Option<(bool, Vec<usize>)> {
+        let (ex_start, ex_end) = find_exons(
+            &transcript.exons(),
+            self.start(),
+            self.end(),
+            0,
+            0,
+            true,
+        )?;
+        let mut has_spanning = false; // This is set to find the intron index
+        let mut validation_requests = Vec::new();
+        let exons = &transcript.exons()[ex_start..=ex_end];
+        for i in 0..self.segments.len() {
+            let curr_segment = &self.segments[i];
+            let curr_exon = &exons[i];
+
+            // align the start
+            let start_diff = curr_exon.start as i64 - curr_segment.start as i64;
+            //mark the overhang as validated intron
+            if start_diff > 0 && i > 0 {
+                // REQUEST VALIDATION for preceding intron
+                let intron_index = ex_start + i - 1;
+                validation_requests.push(intron_index);
+                has_spanning = true;
+            }
+            // align the end
+            let end_diff = curr_segment.end as i64 - curr_exon.end as i64 - 1;
+            if end_diff > 0 && i < self.segments.len() - 1 {
+                // REQUEST VALIDATION for following intron
+                let intron_index = ex_start + i;
+                validation_requests.push(intron_index);
+                has_spanning = true;
+            }
+        }
+        Some((has_spanning, validation_requests))
     }
 
     /// Align the read to the exons. Returns the aligned cigar and the number of aligned bases.
     fn _align_junctions_helper(&self,
          exons: &[Exon], 
          tolerance: u64,
-         exon_offset: usize,
-        ) -> Option<(Cigar, u64, bool, Vec<usize>)> {
+        ) -> Option<(Cigar, u64)> {
         // check if the number of segments matches the number of exons
         if self.segments.len() != exons.len() {
             return None;
@@ -354,8 +393,6 @@ impl SpliceSegments {
 
         let mut full_cigar = self.left_clip.clone();
         let mut aligned_bases = 0;
-        let mut has_spanning = false;
-        let mut validation_requests = Vec::new();
         for i in 0..self.segments.len() {
             let curr_segment = &self.segments[i];
             let curr_exon = &exons[i];
@@ -365,12 +402,6 @@ impl SpliceSegments {
             // align the start
             let start_diff = curr_exon.start as i64 - curr_segment.start as i64;
             //mark the overhang as validated intron
-            if start_diff > 0 && i > 0 {
-                // REQUEST VALIDATION for preceding intron
-                let intron_index = exon_offset + i - 1;
-                validation_requests.push(intron_index);
-                has_spanning = true;
-            }
 
             if i == 0 {
                 // first segment
@@ -407,12 +438,6 @@ impl SpliceSegments {
 
             // align the end
             let end_diff = curr_segment.end as i64 - curr_exon.end as i64 - 1;
-            if end_diff > 0 && i < self.segments.len() - 1 {
-                // REQUEST VALIDATION for following intron
-                let intron_index = exon_offset + i;
-                validation_requests.push(intron_index);
-                has_spanning = true;
-            }
             if i == self.segments.len() - 1 {
                 // last segment
                 if end_diff > 0 {
@@ -449,7 +474,7 @@ impl SpliceSegments {
         }
         full_cigar.extend(self.right_clip.as_ref().iter().copied());
 
-        Some((full_cigar, aligned_bases, has_spanning, validation_requests))
+        Some((full_cigar, aligned_bases))
     }
 }
 
@@ -526,6 +551,7 @@ fn find_exons(
     read_end: u64, // inclusive
     intergenic_trim_bases: u64,
     intronic_trim_bases: u64,
+    skip_trim_validation: bool, // I suppose we don't need validate intergenic & intronic trim in intron validation
 ) -> Option<(usize, usize)> {
     // find first exon that ends to the right of the read start
     let ex_start = exon_info
@@ -538,7 +564,9 @@ fn find_exons(
     if ex_start >= exon_info.len() {
         return None;
     }
-
+    if skip_trim_validation {
+        return Some((ex_start, ex_end));
+    }
     let starting_exon = &exon_info[ex_start];
     let ending_exon = &exon_info[ex_end];
 
@@ -928,17 +956,15 @@ mod tests {
 
         // Test that align_junctions now returns validation information
         let splice_segments = SpliceSegments::from(&record);
-        let result = splice_segments._align_junctions_helper(&transcript.exons(), 10, 1);
+        let result = splice_segments.annotate_splice(&transcript);
 
         // The result should be Some since we have a perfect alignment
-        if let Some((cigar, aligned_bases, is_spanning, validation_requests)) = result {
+        if let Some((is_spanning, validation_requests)) = result {
             // Verify the new return format works
-            assert!(cigar.as_ref().len() > 0); // CIGAR should not be empty
-            assert_eq!(aligned_bases, 300); // Should match total sequence length (3 x 101)
             assert_eq!(validation_requests.len(), 1); // No validation requests for perfect alignment
             assert!(is_spanning); // Should not be spanning since it aligns perfectly
-            println!("Test passed: CIGAR length={}, aligned_bases={}, is_spanning={}, validation_requests={:?}",
-                     cigar.as_ref().len(), aligned_bases, is_spanning, validation_requests);
+            println!("Test passed: is_spanning={}, validation_requests={:?}",
+                    is_spanning, validation_requests);
         } else {
             // If alignment fails, that's not expected for this perfect alignment
             panic!("Alignment should succeed for perfect alignment but returned None");
@@ -1030,7 +1056,7 @@ mod tests {
         assert!(validation_collector.is_empty(), "Should start with no validation requests");
 
         // First, let's test if the annotator can create exonic alignments at all
-        let annotated = quantifier.annotator.annotate_alignments_se(&header, multi_map.clone());
+        let annotated = quantifier.annotator.annotate_alignments_se(&header, multi_map.clone(), true);
         println!("Debug: Annotated alignment result: {:?}", annotated.is_some());
 
         if let Some(annotated_alignment) = annotated {
@@ -1045,6 +1071,8 @@ mod tests {
                     for (i, alignment) in anno.aln_sense.iter().enumerate() {
                         println!("Debug: Sense alignment {}: is_exonic={}, transcript_id={:?}",
                                 i, alignment.is_exonic(), alignment.transcript_id());
+                        println!("Debug: Sense alignment {} validation requests: {:?}",
+                                i, alignment.validation_requests());
                         if alignment.is_exonic() {
                             println!("Debug: Sense alignment {} validation requests: {:?}",
                                     i, alignment.validation_requests());

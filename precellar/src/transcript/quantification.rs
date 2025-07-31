@@ -292,12 +292,12 @@ impl Quantifier {
             let rec2 = rec2.unwrap();
             barcode = rec1.barcode().unwrap()?;
             umi = rec1.umi().unwrap();
-            self.annotator.annotate_alignments_pe(header, rec1, rec2)
+            self.annotator.annotate_alignments_pe(header, rec1, rec2,splice_aware)
         } else {
             let rec = rec1.or(rec2).unwrap();
             barcode = rec.barcode().unwrap()?;
             umi = rec.umi().unwrap();
-            self.annotator.annotate_alignments_se(header, rec)
+            self.annotator.annotate_alignments_se(header, rec,splice_aware)
         }?;
 
         let gene_id;

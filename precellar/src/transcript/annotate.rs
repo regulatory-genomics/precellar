@@ -123,39 +123,7 @@ impl AlignmentAnnotator {
         }
     }
 
-    /// Process validation requests from transcript alignments
-    pub fn process_validation_requests(&mut self, alignments: &[TranscriptAlignment]) {
-        let mut validation_requests = Vec::new();
 
-        // Collect all validation requests from alignments
-        for alignment in alignments {
-            if let Some(transcript_id) = alignment.transcript_id() {
-                for &intron_index in &alignment.validation_requests() {
-                    validation_requests.push((transcript_id.to_string(), intron_index));
-                }
-            }
-        }
-
-        if validation_requests.is_empty() {
-            return;
-        }
-
-        // Use the existing GIntervalMapExt to modify transcripts
-        let transcripts = std::mem::replace(&mut self.transcripts, GIntervalMap::new());
-        let updated_transcripts = transcripts.map_values_mut(|transcript| {
-            for (transcript_id, intron_index) in &validation_requests {
-                if transcript.id == *transcript_id {
-                    transcript.validate_intron(*intron_index);
-                }
-            }
-        });
-        self.transcripts = updated_transcripts;
-
-        // Log validation activity
-        if !validation_requests.is_empty() {
-            log::info!("Processed {} intron validation requests", validation_requests.len());
-        }
-    }
     /// Annotate the alignments by mapping them to the transcriptome. If multiple
     /// alignments are present, we will try to find the confident ones and promote
     /// them to primary. A read may align to multiple transcripts and genes, but
@@ -169,10 +137,11 @@ impl AlignmentAnnotator {
         &self,
         header: &sam::Header,
         rec: MultiMapR,
+        splice_aware: bool,
     ) -> Option<AnnotatedAlignment> {
         let results = rec
             .iter()
-            .filter_map(|rec| self.annotate_alignment_se(header, rec))
+            .filter_map(|rec| self.annotate_alignment_se(header, rec,splice_aware))
             .collect::<Vec<_>>();
         rescue_alignments_se(results)
     }
@@ -188,22 +157,23 @@ impl AlignmentAnnotator {
         header: &sam::Header,
         rec1: MultiMapR,
         rec2: MultiMapR,
+        splice_aware: bool,
     ) -> Option<AnnotatedAlignment> {
         let _pair_improper = rec1.len() != rec2.len();
         let result: Vec<_> = rec1
             .iter()
             .zip(rec2.iter())
-            .filter_map(|(r1, r2)| self.annotate_alignment_pe(header, r1, r2))
+            .filter_map(|(r1, r2)| self.annotate_alignment_pe(header, r1, r2,splice_aware))
             .collect();
         rescue_alignments_pe(result)
     }
 
     /// Annotates a single-end alignment record.
-    fn annotate_alignment_se(&self, header: &sam::Header, rec: &RecordBuf) -> Option<AnnotatedAlignment> {
+    fn annotate_alignment_se(&self, header: &sam::Header, rec: &RecordBuf,splice_aware: bool) -> Option<AnnotatedAlignment> {
         if rec.flags().is_unmapped() {
             None
         } else {
-            let anno = self.annotate_alignment(header, rec).unwrap();
+            let anno = self.annotate_alignment(header, rec, splice_aware).unwrap();
             Some(AnnotatedAlignment::SeMapped(anno))
         }
     }
@@ -214,20 +184,21 @@ impl AlignmentAnnotator {
         header: &sam::Header,
         rec1: &RecordBuf,
         rec2: &RecordBuf,
+        splice_aware: bool,
     ) -> Option<AnnotatedAlignment> {
         // STAR _shouldn't_ return pairs where only a single end is mapped,
         //   but if it does, consider the pair unmapped
         if rec1.flags().is_unmapped() || rec2.flags().is_unmapped() {
             None
         } else {
-            let anno1 = self.annotate_alignment(header, rec1).unwrap();
-            let anno2 = self.annotate_alignment(header, rec2).unwrap();
+            let anno1 = self.annotate_alignment(header, rec1,splice_aware).unwrap();
+            let anno2 = self.annotate_alignment(header, rec2,splice_aware).unwrap();
             let annop = PairAnnotationData::from_pair(&anno1, &anno2);
             Some(AnnotatedAlignment::PeMapped(anno1, anno2, annop))
         }
     }
 
-    fn annotate_alignment(&self, header: &sam::Header, read: &RecordBuf) -> Result<Annotation> {
+    fn annotate_alignment(&self, header: &sam::Header, read: &RecordBuf,splice_aware: bool) -> Result<Annotation> {
         ensure!(
             !read.flags().is_unmapped(),
             "Unmapped alignments cannot be annotated"
@@ -243,7 +214,7 @@ impl AlignmentAnnotator {
         let alignments = self
             .transcripts
             .find(&region)
-            .flat_map(|(_, transcript)| self.align_to_transcript(read, transcript))
+            .flat_map(|(_, transcript)| self.align_to_transcript(read, transcript, splice_aware))
             .collect::<Vec<_>>();
 
         let mut seen_genes = HashSet::new();
@@ -305,6 +276,7 @@ impl AlignmentAnnotator {
         &self,
         read: &RecordBuf,
         transcript: &Transcript,
+        splice_aware: bool,
     ) -> Option<TranscriptAlignment> {
         // figure out coordinates
         let tx_start = transcript.start;
@@ -312,7 +284,11 @@ impl AlignmentAnnotator {
         let genomic_start = read.alignment_start().unwrap().get() as u64;
         let genomic_end = read.alignment_end().unwrap().get() as u64;
         let splice_segments = SpliceSegments::from(read);
-
+        let (is_spanning, validation_requests) = if splice_aware {
+            splice_segments.annotate_splice(transcript).unwrap()
+        } else {
+            (false, Vec::new())
+        };
         let is_exonic = splice_segments.is_exonic(transcript, self.region_min_overlap);
         if is_exonic || get_overlap(genomic_start, genomic_end, tx_start, tx_end) >= 1.0 {
             // compute strand
@@ -333,10 +309,13 @@ impl AlignmentAnnotator {
             };
 
             let gene = transcript.gene.clone();
+            let validation_requests_clone = validation_requests.clone();
             let mut alignment = TranscriptAlignment {
                 gene: gene.clone(),
                 strand: tx_strand,
                 exon_align: None,
+                is_spanning,
+                validation_requests,
             };
 
             if is_exonic {
@@ -345,20 +324,12 @@ impl AlignmentAnnotator {
                 let tx_length = transcript.len();
 
                 // align the read to the exons
-                if let Some((mut tx_cigar, tx_aligned_bases,is_spanning, validation_requests)) = splice_segments.align_junctions(
+                if let Some((mut tx_cigar, tx_aligned_bases)) = splice_segments.align_junctions(
                     transcript,
                     self.junction_trim_bases,
                     self.intergenic_trim_bases,
                     self.intronic_trim_bases,
                 ) {
-                    // debug information
-                    if is_spanning {
-                        debug!(
-                            "Spanning read detected: {} validation requests for transcript {}",
-                            validation_requests.len(),
-                            transcript.id
-                        );
-                    }
                     // flip reverse strand
                     if tx_reverse_strand {
                         tx_offset = tx_length - (tx_offset + tx_aligned_bases);
@@ -372,14 +343,24 @@ impl AlignmentAnnotator {
                             pos: tx_offset,
                             cigar: tx_cigar,
                             alen: tx_aligned_bases,
-                            is_spanning,
-                            validation_requests,
                         }),
+                        is_spanning,
+                        validation_requests: validation_requests_clone,
                     };
                 }
             }
             Some(alignment)
         } else {
+            if splice_aware {
+                let alignment = TranscriptAlignment {
+                        gene: transcript.gene.clone(),
+                        strand: Strand::Reverse, // placeholder
+                        exon_align: None,
+                        is_spanning,
+                        validation_requests,
+                };
+                return Some(alignment);
+            }
             None
         }
     }
@@ -509,6 +490,8 @@ pub struct TranscriptAlignment {
     pub gene: Gene,
     pub strand: Strand,
     pub exon_align: Option<TxAlignProperties>,
+    pub is_spanning: bool,
+    pub validation_requests: Vec<usize>,
 }
 
 impl TranscriptAlignment {
@@ -522,16 +505,12 @@ impl TranscriptAlignment {
     
     /// Check if this alignment spans validated junctions
     pub fn is_spanning(&self) -> bool {
-        self.exon_align.as_ref()
-            .map(|align| align.is_spanning)
-            .unwrap_or(false)
+        self.is_spanning
     }
 
     /// Get validation requests from this alignment
     pub fn validation_requests(&self) -> Vec<usize> {
-        self.exon_align.as_ref()
-            .map(|align| align.validation_requests.clone())
-            .unwrap_or_default()
+        self.validation_requests.clone()
     }
 
     /// Get the transcript ID if this is an exonic alignment
@@ -547,8 +526,6 @@ pub struct TxAlignProperties {
     pub pos: u64,
     pub cigar: Cigar,
     pub alen: u64,
-    pub is_spanning: bool,  // NEW: Indicates if this alignment spans validated junctions
-    pub validation_requests: Vec<usize>,  // NEW: Intron indices that should be validated
 }
 
 /// Fraction of read interval covered by ref interval
