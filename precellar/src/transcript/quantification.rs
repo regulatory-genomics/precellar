@@ -1,7 +1,8 @@
 use anndata::{
     data::utils::{from_csr_data, to_csr_data},
-    AnnData, AnnDataOp,
+    AnnData, AnnDataOp,ArrayData,AxisArraysOp
 };
+use ndarray::Array2;
 use anndata_hdf5::H5;
 use anyhow::Result;
 use bed_utils::extsort::ExternalSorterBuilder;
@@ -106,6 +107,7 @@ pub struct GeneAlignment {
     pub idx: usize,
     pub umi: Option<String>,
     pub align_type: AnnotationRegion,
+    pub splice_state: SpliceState,
 }
 
 #[derive(Debug)]
@@ -167,6 +169,9 @@ impl Quantifier {
         let mut exon_count: Vec<u64> = Vec::new();
         let mut intron_count: Vec<u64> = Vec::new();
         let mut mito_count: Vec<u64> = Vec::new();
+        let mut spliced_count: Vec<u64> = Vec::new();
+        let mut unspliced_count: Vec<u64> = Vec::new();
+        let mut ambiguous_count: Vec<u64> = Vec::new();
         let mut validation_collector = IntronValidationCollector::new();
 
         {
@@ -189,7 +194,7 @@ impl Quantifier {
                     qc.total_reads += recs.len() as u64;
                     recs.into_par_iter()
                         .filter_map(|(r1, r2)| {
-                            self.make_gene_alignment(header, r1, r2, splice_aware).map(|(barcode, gene_alignment, validation_requests, splice_state, intron_mapping)| {
+                            self.make_gene_alignment(header, r1, r2, splice_aware).map(|(barcode, gene_alignment, validation_requests, intron_mapping)| {
                                 (barcode, gene_alignment, validation_requests)
                             })
                         })
@@ -210,7 +215,7 @@ impl Quantifier {
                     qc.total_reads += recs.len() as u64;
                     recs.into_par_iter()
                         .filter_map(|(r1, r2)| {
-                            self.make_gene_alignment(header, r1, r2, splice_aware).map(|(barcode, gene_alignment, _, _, _)| {
+                            self.make_gene_alignment(header, r1, r2, splice_aware).map(|(barcode, gene_alignment, _, _)| {
                                 (barcode, gene_alignment)
                             })
                         })
@@ -235,29 +240,79 @@ impl Quantifier {
                     group.map(|x| x.1).collect::<Vec<_>>()
                 })
                 .chunks(500);
-            let counts = tx_alignments_chunks.into_iter().map(|chunk| {
-                let results: Vec<_> = chunk
+            // Collect all results first
+            let all_results: Vec<Vec<_>> = tx_alignments_chunks.into_iter().map(|chunk| {
+                chunk
                     .collect::<Vec<_>>()
                     .into_par_iter()
-                    .map(|alignments| count_unique_umi(alignments, &mito_genes))
-                    .collect();
-                results.iter().for_each(|r| {
+                    .map(|alignments| count_unique_umi(alignments, &mito_genes, splice_aware))
+                    .collect()
+            }).collect();
+
+            // Process results for QC metrics
+            all_results.iter().for_each(|chunk_results| {
+                chunk_results.iter().for_each(|r| {
                     qc.total_umi += r.total_umi;
                     qc.unique_umi += r.unique_umi;
                     exon_count.push(r.uniq_exon);
                     intron_count.push(r.uniq_intron);
                     mito_count.push(r.uniq_mito);
+                    if splice_aware {
+                        spliced_count.push(r.uniq_spliced);
+                        unspliced_count.push(r.uniq_unspliced);
+                        ambiguous_count.push(r.uniq_ambiguous);
+                    }
                 });
+            });
+
+            // Create main count matrix (combined exon + intron)
+            let counts = all_results.iter().map(|chunk_results| {
                 let (nrows, ncols, indptr, indices, data) = to_csr_data(
-                    results
-                        .into_iter()
-                        .map(|r| r.into_counts().collect()),
+                    chunk_results
+                        .iter()
+                        .map(|r| r.get_combined_counts()),
                     num_cols,
                 );
                 from_csr_data(nrows, ncols, indptr, indices, data).unwrap()
             });
-
             adata.set_x_from_iter(counts)?;
+
+            // Create splice-state-specific layers if splice_aware is enabled
+            if splice_aware {
+                // Create spliced layer
+                let spliced_counts: Vec<_> = all_results.iter().map(|chunk_results| {
+                    let (nrows, ncols, indptr, indices, data) = to_csr_data(
+                        chunk_results.iter().map(|r| r.get_spliced_counts()),
+                        num_cols,
+                    );
+                    from_csr_data(nrows, ncols, indptr, indices, data).unwrap()
+                }).collect();
+                adata.layers().add_iter("spliced", spliced_counts.into_iter())?; // It seems adata-rs don't have layer function now. THis is a placeholder for future implementation
+
+                // Create unspliced layer
+                let unspliced_counts: Vec<_> = all_results.iter().map(|chunk_results| {
+                    let (nrows, ncols, indptr, indices, data) = to_csr_data(
+                        chunk_results
+                            .iter()
+                            .map(|r| r.get_unspliced_counts()),
+                        num_cols,
+                    );
+                    from_csr_data(nrows, ncols, indptr, indices, data).unwrap()
+                }).collect();
+                adata.layers().add_iter("unspliced", unspliced_counts.into_iter())?; // It seems adata-rs don't have layer function now. THis is a placeholder for future implementation
+
+                // Create ambiguous layer
+                let ambiguous_counts = all_results.iter().map(|chunk_results| {
+                    let (nrows, ncols, indptr, indices, data) = to_csr_data(
+                        chunk_results
+                            .iter()
+                            .map(|r| r.get_ambiguous_counts()),
+                        num_cols,
+                    );
+                    from_csr_data(nrows, ncols, indptr, indices, data).unwrap()
+                });
+                adata.layers().add_iter("ambiguous", ambiguous_counts.into_iter())?; // It seems adata-rs don't have layer function now. THis is a placeholder for future implementation
+            }
         }
 
         adata.set_obs_names(barcodes.into())?;
@@ -293,7 +348,7 @@ impl Quantifier {
         rec1: Option<MultiMapR>,
         rec2: Option<MultiMapR>,
         splice_aware: bool,
-    ) -> Option<(String, GeneAlignment, Vec<(String, usize)>,  SpliceState, std::collections::HashMap<String, std::collections::HashSet<usize>>)> {
+    ) -> Option<(String, GeneAlignment, Vec<(String, usize)>,  std::collections::HashMap<String, std::collections::HashSet<usize>>)> {
         let barcode;
         let umi;
         let anno = if rec1.is_some() && rec2.is_some() {
@@ -312,7 +367,7 @@ impl Quantifier {
         let gene_id;
         let align_type;
         let mut validation_requests = Vec::new();
-        let mut splice_state = SpliceState::Unspliced;
+        let mut splice_state = SpliceState::Undetermined;
         let mut intron_mapping = std::collections::HashMap::new();
 
         match anno {
@@ -386,8 +441,9 @@ impl Quantifier {
             idx: gene_id,
             umi,
             align_type,
+            splice_state,
         };
-        Some((barcode, alignment, validation_requests, splice_state, intron_mapping))
+        Some((barcode, alignment, validation_requests, intron_mapping))
     }
 }
 
@@ -414,3 +470,301 @@ where
         .map(|x| x.unwrap())
 }
 
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::transcript::{Gene};
+    use crate::transcript::annotate::{AlignmentAnnotator, SpliceState, AnnotationRegion};
+    use noodles::sam::{self as sam, header::record::value::{map::ReferenceSequence, Map}};
+    use bstr::BString;
+    use std::num::NonZeroUsize;
+    use bed_utils::bed::Strand;
+    use crate::transcript::transcriptome::{Transcript, Exons, Introns};
+    use noodles::sam::record::data::field::value::base_modifications::group::Strand as NoodlesStrand;
+    use tempfile::TempDir;
+
+    fn create_test_gene() -> Gene {
+        Gene {
+            id: "gene1".to_string(),
+            name: "GENE1".to_string(),
+        }
+    }
+
+    fn create_test_transcript() -> Transcript {
+        // Create a transcript with 3 exons that have gaps between them (will create introns)
+        let exons = Exons::new(vec![
+            (100, 200),  // Exon 1: 100-200
+            (300, 400),  // Exon 2: 300-400 (gap: 200-300)
+            (500, 600),  // Exon 3: 500-600 (gap: 400-500)
+        ]).unwrap();
+
+        let introns = Introns::new(std::iter::empty()).unwrap(); // Start with empty introns
+
+        Transcript {
+            id: "transcript1".to_string(),
+            chrom: "chr1".to_string(),
+            start: 100,
+            end: 600,
+            strand: NoodlesStrand::Forward,
+            gene: create_test_gene(),
+            exons,
+            introns,
+        }
+    }
+
+    fn create_test_header() -> sam::Header {
+        let mut builder = sam::Header::builder();
+        let reference_sequences = [(
+            BString::from("chr1"),
+            Map::<ReferenceSequence>::new(NonZeroUsize::try_from(1000).unwrap()),
+        )]
+        .into_iter()
+        .collect();
+        builder = builder.set_reference_sequences(reference_sequences);
+        builder.build()
+    }
+
+    #[test]
+    fn test_splice_state_specific_counting() {
+        // Create test data
+        let transcript = create_test_transcript();
+        let annotator = AlignmentAnnotator::new(vec![transcript]);
+        let mut quantifier = Quantifier::new(annotator);
+
+        // Create test alignments with different splice states
+        let alignments = vec![
+            GeneAlignment {
+                idx: 0, // gene index
+                umi: Some("AAAA".to_string()),
+                align_type: AnnotationRegion::Exonic,
+                splice_state: SpliceState::Spliced,
+            },
+            GeneAlignment {
+                idx: 0,
+                umi: Some("TTTT".to_string()),
+                align_type: AnnotationRegion::Exonic,
+                splice_state: SpliceState::Unspliced,
+            },
+            GeneAlignment {
+                idx: 0,
+                umi: Some("CCCC".to_string()),
+                align_type: AnnotationRegion::Intronic,
+                splice_state: SpliceState::Ambiguous,
+            },
+            GeneAlignment {
+                idx: 0,
+                umi: Some("GGGG".to_string()),
+                align_type: AnnotationRegion::Exonic,
+                splice_state: SpliceState::Spliced,
+            },
+        ];
+
+        // Test the count_unique_umi function with splice_aware = true
+        let mito_genes = std::collections::HashSet::new();
+        let result = count_unique_umi(alignments, &mito_genes, true);
+
+        // Verify splice-state-specific counts
+        assert_eq!(result.uniq_spliced, 2, "Should have 2 spliced UMIs");
+        assert_eq!(result.uniq_unspliced, 1, "Should have 1 unspliced UMI");
+        assert_eq!(result.uniq_ambiguous, 1, "Should have 1 ambiguous UMI");
+
+        // Verify total counts
+        assert_eq!(result.unique_umi, 4, "Should have 4 total unique UMIs");
+
+        // Test the accessor methods
+        let spliced_counts: Vec<_> = result.get_spliced_counts();
+        let unspliced_counts: Vec<_> = result.get_unspliced_counts();
+        let ambiguous_counts: Vec<_> = result.get_ambiguous_counts();
+
+        assert_eq!(spliced_counts.len(), 1, "Should have counts for 1 gene");
+        assert_eq!(spliced_counts[0], (0, 2), "Gene 0 should have 2 spliced counts");
+
+        assert_eq!(unspliced_counts.len(), 1, "Should have counts for 1 gene");
+        assert_eq!(unspliced_counts[0], (0, 1), "Gene 0 should have 1 unspliced count");
+
+        assert_eq!(ambiguous_counts.len(), 1, "Should have counts for 1 gene");
+        assert_eq!(ambiguous_counts[0], (0, 1), "Gene 0 should have 1 ambiguous count");
+    }
+
+    #[test]
+    fn test_splice_aware_disabled() {
+        // Test that when splice_aware is false, splice-state-specific counts are zero
+        let alignments = vec![
+            GeneAlignment {
+                idx: 0,
+                umi: Some("AAAA".to_string()),
+                align_type: AnnotationRegion::Exonic,
+                splice_state: SpliceState::Spliced,
+            },
+            GeneAlignment {
+                idx: 0,
+                umi: Some("TTTT".to_string()),
+                align_type: AnnotationRegion::Intronic,
+                splice_state: SpliceState::Unspliced,
+            },
+        ];
+
+        let mito_genes = std::collections::HashSet::new();
+        let result = count_unique_umi(alignments, &mito_genes, false);
+
+        // When splice_aware is false, splice-state-specific counts should be zero
+        assert_eq!(result.uniq_spliced, 0, "Spliced count should be 0 when splice_aware is false");
+        assert_eq!(result.uniq_unspliced, 0, "Unspliced count should be 0 when splice_aware is false");
+        assert_eq!(result.uniq_ambiguous, 0, "Ambiguous count should be 0 when splice_aware is false");
+
+        // But traditional exon/intron counts should work
+        assert_eq!(result.uniq_exon, 1, "Should have 1 exonic UMI");
+        assert_eq!(result.uniq_intron, 1, "Should have 1 intronic UMI");
+    }
+    #[test]
+    fn test_quantify_with_splice_layers() {
+        use noodles::sam::{self as sam, header::record::value::{map::ReferenceSequence, Map}};
+        use bstr::BString;
+        use std::num::NonZeroUsize;
+        use crate::align::MultiMapR;
+        use noodles::sam::alignment::record::data::field::Tag;
+        use noodles::sam::alignment::record_buf::data::field::Value;
+        use tempfile::TempDir;
+
+        // Create a test transcript with multiple exons that will generate introns
+        let exons = Exons::new(vec![
+            (100, 200),  // Exon 1: 100-200 (101bp)
+            (300, 400),  // Exon 2: 300-400 (101bp) 
+            (500, 600),  // Exon 3: 500-600 (101bp)
+        ]).unwrap();
+
+        let introns = Introns::new(std::iter::empty()).unwrap();
+
+        let mut transcript = Transcript {
+            id: "TRANSCRIPT001".to_string(),
+            chrom: "chr1".to_string(),
+            start: 100,
+            end: 600,
+            strand: NoodlesStrand::Forward,
+            gene: Gene {
+                id: "GENE001".to_string(),
+                name: "TestGene".to_string(),
+            },
+            exons,
+            introns,
+        };
+
+        // Generate introns from exons
+        transcript.make_intron_by_exons();
+
+        let annotator = AlignmentAnnotator::new(vec![transcript]);
+        let mut quantifier = Quantifier::new(annotator);
+
+        // Create a SAM header with proper reference sequence
+        let reference_sequences = [(
+            BString::from("chr1"),
+            Map::<ReferenceSequence>::new(NonZeroUsize::try_from(248956422).unwrap()),
+        )]
+        .into_iter()
+        .collect();
+        let header = sam::Header::builder()
+            .set_reference_sequences(reference_sequences)
+            .build();
+
+        // Create a temporary directory for output
+        let temp_dir = TempDir::new().unwrap();
+        let output_path = temp_dir.path().join("test_output.h5ad");
+
+        // Create mock records with realistic SAM alignments
+        let mut mock_records = Vec::new();
+        
+        // Record 1: Spliced alignment spanning all exons
+        let sequence1 = "A".repeat(303); // 101 + 101 + 101 bases
+        let quality1 = "I".repeat(303);
+        let sam_line1 = format!(
+            "read1\t0\tchr1\t100\t60\t101M99N101M99N101M\t*\t0\t0\t{}\t{}",
+            sequence1, quality1
+        );
+        
+        let sam_record1 = noodles::sam::Record::try_from(sam_line1.as_bytes()).unwrap();
+        let mut record1 = noodles::sam::alignment::RecordBuf::try_from_alignment_record(&header, &sam_record1).unwrap();
+        record1.data_mut().insert(Tag::from([b'C', b'B']), Value::String(BString::from("AAACCTGAGAAACCAT")));
+        record1.data_mut().insert(Tag::from([b'U', b'B']), Value::String(BString::from("AAAAAAAAAA")));
+        let multi_map1 = Some(MultiMapR::new(record1, None));
+
+        // Record 2: Unspliced alignment within first exon
+        let sequence2 = "T".repeat(50);
+        let quality2 = "I".repeat(50);
+        let sam_line2 = format!(
+            "read2\t0\tchr1\t120\t60\t50M\t*\t0\t0\t{}\t{}",
+            sequence2, quality2
+        );
+        
+        let sam_record2 = noodles::sam::Record::try_from(sam_line2.as_bytes()).unwrap();
+        let mut record2 = noodles::sam::alignment::RecordBuf::try_from_alignment_record(&header, &sam_record2).unwrap();
+        record2.data_mut().insert(Tag::from([b'C', b'B']), Value::String(BString::from("AAACCTGAGAAACCAT")));
+        record2.data_mut().insert(Tag::from([b'U', b'B']), Value::String(BString::from("TTTTTTTTTT")));
+        let multi_map2 = Some(MultiMapR::new(record2, None));
+
+        // Record 3: Intronic alignment
+        let sequence3 = "G".repeat(30);
+        let quality3 = "I".repeat(30);
+        let sam_line3 = format!(
+            "read3\t0\tchr1\t250\t60\t30M\t*\t0\t0\t{}\t{}",
+            sequence3, quality3
+        );
+        
+        let sam_record3 = noodles::sam::Record::try_from(sam_line3.as_bytes()).unwrap();
+        let mut record3 = noodles::sam::alignment::RecordBuf::try_from_alignment_record(&header, &sam_record3).unwrap();
+        record3.data_mut().insert(Tag::from([b'C', b'B']), Value::String(BString::from("AAACCTGAGAAACCAT")));
+        record3.data_mut().insert(Tag::from([b'U', b'B']), Value::String(BString::from("CCCCCCCCCC")));
+        let multi_map3 = Some(MultiMapR::new(record3, None));
+
+        mock_records.push((multi_map1, None));
+        mock_records.push((multi_map2, None));
+        mock_records.push((multi_map3, None));
+
+        let records = std::iter::once(mock_records).into_iter();
+
+        // Test quantification with splice_aware = true
+        let result = quantifier.quantify(&header, records, &output_path, true);
+        
+        // The test should complete without errors
+        match result {
+            Ok(_) => {
+                // Verify the output file exists
+                assert!(output_path.exists(), "Output file should be created");
+                
+                // Additional verification that splice-aware quantification worked
+                println!("Quantification completed successfully with splice-aware mode enabled");
+                println!("Output file created at: {:?}", output_path);
+            },
+            Err(e) => {
+                panic!("Quantification failed with error: {:?}", e);
+            }
+        }
+
+        // Test quantification with splice_aware = false for comparison
+        let output_path_no_splice = temp_dir.path().join("test_output_no_splice.h5ad");
+        
+        // Recreate records for second test
+        let mut mock_records_2 = Vec::new();
+        
+        let sam_record1_copy = noodles::sam::Record::try_from(sam_line1.as_bytes()).unwrap();
+        let mut record1_copy = noodles::sam::alignment::RecordBuf::try_from_alignment_record(&header, &sam_record1_copy).unwrap();
+        record1_copy.data_mut().insert(Tag::from([b'C', b'B']), Value::String(BString::from("AAACCTGAGAAACCAT")));
+        record1_copy.data_mut().insert(Tag::from([b'U', b'B']), Value::String(BString::from("AAAAAAAAAA")));
+        let multi_map1_copy = Some(MultiMapR::new(record1_copy, None));
+        
+        mock_records_2.push((multi_map1_copy, None));
+        let records_no_splice = std::iter::once(mock_records_2).into_iter();
+
+        let result_no_splice = quantifier.quantify(&header, records_no_splice, &output_path_no_splice, false);
+        
+        match result_no_splice {
+            Ok(_) => {
+                assert!(output_path_no_splice.exists(), "Output file without splice-aware should be created");
+                println!("Quantification completed successfully with splice-aware mode disabled");
+            },
+            Err(e) => {
+                panic!("Quantification without splice-aware failed with error: {:?}", e);
+            }
+        }
+    }
+}

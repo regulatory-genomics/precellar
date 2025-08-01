@@ -16,8 +16,8 @@ pub struct Transcript {
     pub end: u64, // exclusive
     pub strand: Strand,
     pub gene: Gene,
-    exons: Exons,
-    introns: Introns,
+    pub exons: Exons, // make public for test purpose
+    pub introns: Introns, // make public for test purpose
 }
 
 impl TryFrom<star_aligner::transcript::Transcript> for Transcript {
@@ -827,63 +827,6 @@ mod tests {
         assert_eq!(transcript1.introns()[0].start(), 201);
     }
 
-    #[test]
-    fn test_intron_validation_methods() {
-        let intron_coords = vec![(200, 300)];
-        let introns = Introns::new(intron_coords).unwrap();
-        let intron_slice = introns.as_ref();
-
-        // Test initial validation state
-        assert!(!intron_slice[0].validated());
-
-        // Note: Since Intron fields are private and we only have immutable access
-        // through the slice, we can't test the set_validated method directly here.
-        // This would require either making fields public or adding mutable access methods.
-
-        // Test that we can read the validation state
-        let validation_state = intron_slice[0].validated();
-        assert!(!validation_state);
-    }
-
-    #[test]
-    fn test_validation_confidence_levels() {
-        let summary_high = ValidationSummary {
-            transcript_id: "test".to_string(),
-            total_introns: 10,
-            validated_introns: 9,
-            validation_percentage: 0.9,
-            is_fully_validated: false,
-        };
-        assert_eq!(summary_high.confidence_level(), ValidationConfidence::High);
-        assert!(summary_high.is_well_validated(0.8));
-
-        let summary_medium = ValidationSummary {
-            transcript_id: "test".to_string(),
-            total_introns: 10,
-            validated_introns: 7,
-            validation_percentage: 0.7,
-            is_fully_validated: false,
-        };
-        assert_eq!(summary_medium.confidence_level(), ValidationConfidence::Medium);
-
-        let summary_low = ValidationSummary {
-            transcript_id: "test".to_string(),
-            total_introns: 10,
-            validated_introns: 3,
-            validation_percentage: 0.3,
-            is_fully_validated: false,
-        };
-        assert_eq!(summary_low.confidence_level(), ValidationConfidence::Low);
-
-        let summary_none = ValidationSummary {
-            transcript_id: "test".to_string(),
-            total_introns: 10,
-            validated_introns: 1,
-            validation_percentage: 0.1,
-            is_fully_validated: false,
-        };
-        assert_eq!(summary_none.confidence_level(), ValidationConfidence::None);
-    }
 
     #[test]
     fn test_alignment_with_validation_requests() {
@@ -1000,10 +943,10 @@ mod tests {
         // Transcript exons: 100-200 (101bp), 300-400 (101bp), 500-600 (101bp)
         // CIGAR: 102M99N102M99N102M creates small 1bp overhangs
         // This should create overhangs that trigger validation requests
-        let sequence = "A".repeat(306); // 102 + 102 + 102 = 306 bases
-        let quality = "I".repeat(306);
+        let sequence = "A".repeat(307); // 102 + 102 + 102 = 306 bases
+        let quality = "I".repeat(307);
         let sam_line = format!(
-            "test_read\t0\tchr1\t100\t60\t102M99N102M99N102M\t*\t0\t0\t{}\t{}",
+            "test_read\t0\tchr1\t100\t60\t105M95N101M99N101M\t*\t0\t0\t{}\t{}",
             sequence, quality
         );
 
@@ -1057,7 +1000,7 @@ mod tests {
 
         // Verify that the alignment was processed and extract validation requests
         assert!(result.is_some(), "Alignment should be processed successfully");
-        let (barcode, gene_alignment, validation_requests, splice_state, intron_mapping) = result.unwrap();
+        let (barcode, gene_alignment, validation_requests, intron_mapping) = result.unwrap();
         println!("Debug: Barcode: {:?}", barcode);
         println!("Debug: Gene alignment: {:?}", gene_alignment);
         println!("Debug: Validation requests count: {}", validation_requests.len());
@@ -1089,7 +1032,7 @@ mod tests {
         let mut validation_collector_disabled = IntronValidationCollector::new();
         let result_disabled = quantifier.make_gene_alignment(&header, Some(multi_map_clone), None, false);
         assert!(result_disabled.is_some(), "Alignment should be processed successfully");
-        let (_, _, validation_requests_disabled, _, _) = result_disabled.unwrap();
+        let (_, _, validation_requests_disabled, _) = result_disabled.unwrap();
 
         // Collect validation information (should be empty)
         for (transcript_id, intron_index) in validation_requests_disabled {

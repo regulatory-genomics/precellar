@@ -2,6 +2,7 @@ use super::quantification::GeneAlignment;
 use crate::transcript::annotate::AnnotationRegion;
 
 use std::collections::{BTreeMap, HashMap, HashSet};
+use super::annotate::SpliceState;
 
 type Gene = usize;
 
@@ -9,10 +10,16 @@ type Gene = usize;
 pub(crate) struct DeDupResult {
     exon_uniq_umi: BTreeMap<Gene, usize>,
     intron_uniq_umi: BTreeMap<Gene, usize>,
+    spliced_uniq_umi: BTreeMap<Gene, usize>,
+    unspliced_uniq_umi: BTreeMap<Gene, usize>,
+    ambiguous_uniq_umi: BTreeMap<Gene, usize>,
     pub total_umi: u64,
     pub unique_umi: u64,
     pub uniq_exon: u64,
     pub uniq_intron: u64,
+    pub uniq_spliced: u64,
+    pub uniq_unspliced: u64,
+    pub uniq_ambiguous: u64,
     pub uniq_mito: u64,
 }
 
@@ -27,31 +34,113 @@ impl DeDupResult {
             });
         self.intron_uniq_umi.into_iter().map(|(gene, c)| (gene, c as u64))
     }
+    
+
+    /// Get spliced counts for each gene
+    pub fn into_spliced_counts(self) -> impl Iterator<Item = (Gene, u64)> {
+        self.spliced_uniq_umi.into_iter().map(|(gene, c)| (gene, c as u64))
+    }
+
+    /// Get unspliced counts for each gene
+    pub fn into_unspliced_counts(self) -> impl Iterator<Item = (Gene, u64)> {
+        self.unspliced_uniq_umi.into_iter().map(|(gene, c)| (gene, c as u64))
+    }
+
+    /// Get ambiguous counts for each gene
+    pub fn into_ambiguous_counts(self) -> impl Iterator<Item = (Gene, u64)> {
+        self.ambiguous_uniq_umi.into_iter().map(|(gene, c)| (gene, c as u64))
+    }
+
+    /// Get all splice-state-specific counts as separate iterators
+    pub fn into_splice_counts(self) -> (
+        impl Iterator<Item = (Gene, u64)>,
+        impl Iterator<Item = (Gene, u64)>,
+        impl Iterator<Item = (Gene, u64)>,
+    ) {
+        let spliced = self.spliced_uniq_umi.iter().map(|(gene, c)| (*gene, *c as u64)).collect::<Vec<_>>();
+        let unspliced = self.unspliced_uniq_umi.iter().map(|(gene, c)| (*gene, *c as u64)).collect::<Vec<_>>();
+        let ambiguous = self.ambiguous_uniq_umi.iter().map(|(gene, c)| (*gene, *c as u64)).collect::<Vec<_>>();
+
+        (spliced.into_iter(), unspliced.into_iter(), ambiguous.into_iter())
+    }
+
+    /// Get spliced counts as Vec (non-consuming)
+    pub fn get_spliced_counts(&self) -> Vec<(Gene, u64)> {
+        self.spliced_uniq_umi.iter().map(|(gene, c)| (*gene, *c as u64)).collect()
+    }
+
+    /// Get unspliced counts as Vec (non-consuming)
+    pub fn get_unspliced_counts(&self) -> Vec<(Gene, u64)> {
+        self.unspliced_uniq_umi.iter().map(|(gene, c)| (*gene, *c as u64)).collect()
+    }
+
+    /// Get ambiguous counts as Vec (non-consuming)
+    pub fn get_ambiguous_counts(&self) -> Vec<(Gene, u64)> {
+        self.ambiguous_uniq_umi.iter().map(|(gene, c)| (*gene, *c as u64)).collect()
+    }
+
+    /// Get combined counts as Vec (non-consuming)
+    pub fn get_combined_counts(&self) -> Vec<(Gene, u64)> {
+        let mut combined = std::collections::BTreeMap::new();
+
+        // Add exon counts
+        for (gene, count) in &self.exon_uniq_umi {
+            *combined.entry(*gene).or_insert(0) += *count as u64;
+        }
+
+        // Add intron counts
+        for (gene, count) in &self.intron_uniq_umi {
+            *combined.entry(*gene).or_insert(0) += *count as u64;
+        }
+
+        combined.into_iter().collect()
+    }
 }
 
-pub fn count_unique_umi<I>(alignments: I, mito_genes: &HashSet<usize>) -> DeDupResult
+pub fn count_unique_umi<I>(alignments: I, mito_genes: &HashSet<usize>, splice_aware: bool) -> DeDupResult
 where
     I: IntoIterator<Item = GeneAlignment>,
 {
     let mut result = DeDupResult::default();
     let mut umigene_counts_exon = HashMap::new();
     let mut umigene_counts_intron = HashMap::new();
+    let mut umigene_counts_ambiguous = HashMap::new();
+    let mut umigene_counts_splice = HashMap::new();
+    let mut umigene_counts_unspliced = HashMap::new();
 
     alignments.into_iter().for_each(|alignment| {
         let gene = alignment.idx;
         // We use empty vector to represent empty UMI
         let umi = alignment.umi.map(|x| x.into_bytes()).unwrap_or(Vec::new());
-        
-        match alignment.align_type {
-            AnnotationRegion::Exonic => {
-                *umigene_counts_exon.entry((umi, gene)).or_insert(0) += 1u64;
+
+        if splice_aware {
+            match alignment.splice_state {
+                SpliceState::Spliced => {
+                    *umigene_counts_splice.entry((umi, gene)).or_insert(0) += 1u64;
+                }
+                SpliceState::Unspliced => {
+                    *umigene_counts_unspliced.entry((umi, gene)).or_insert(0) += 1u64;
+                }
+                SpliceState::Ambiguous => {
+                    *umigene_counts_ambiguous.entry((umi, gene)).or_insert(0) += 1u64;
+                },
+                SpliceState::Undetermined => {},
+                SpliceState::Intergenic => {},
             }
-            AnnotationRegion::Intronic => {
-                *umigene_counts_intron.entry((umi, gene)).or_insert(0) += 1u64;
+        }
+        else{
+            match alignment.align_type {
+                AnnotationRegion::Exonic => {
+                    *umigene_counts_exon.entry((umi, gene)).or_insert(0) += 1u64;
+                }
+                AnnotationRegion::Intronic => {
+                    *umigene_counts_intron.entry((umi, gene)).or_insert(0) += 1u64;
+                }
+                AnnotationRegion::Intergenic => {},
             }
-            AnnotationRegion::Intergenic => {},
         }
     });
+
 
     let umi_correction= correct_umis(&umigene_counts_exon);
     let mut uniq_counts: HashMap<Gene, HashSet<&[u8]>> = HashMap::new();
@@ -107,6 +196,92 @@ where
         result.intron_uniq_umi.entry(gene).and_modify(|x| *x += c).or_insert(c);
     });
 
+    // Process splice-state-specific counts if splice_aware is enabled
+    if splice_aware {
+        // Process spliced counts
+        let umi_correction = correct_umis(&umigene_counts_splice);
+        let mut uniq_counts: HashMap<Gene, HashSet<&[u8]>> = HashMap::new();
+        umigene_counts_splice.iter().for_each(|((umi, gene), c)| {
+            result.total_umi += c;
+
+            // Empty UMI
+            if umi.is_empty() {
+                result.unique_umi += c;
+                if mito_genes.contains(&gene) {
+                    result.uniq_mito += c;
+                }
+                result.spliced_uniq_umi.insert(*gene, *c as usize);
+            } else {
+                let corrected_umi = umi_correction.get(&(umi, *gene)).unwrap_or(umi);
+                uniq_counts.entry(*gene).or_insert(HashSet::new()).insert(corrected_umi);
+            }
+        });
+        uniq_counts.into_iter().for_each(|(gene, umis)| {
+            let c = umis.len();
+            result.unique_umi += c as u64;
+            result.uniq_spliced += c as u64;
+            if mito_genes.contains(&gene) {
+                result.uniq_mito += c as u64;
+            }
+            result.spliced_uniq_umi.entry(gene).and_modify(|x| *x += c).or_insert(c);
+        });
+
+        // Process unspliced counts
+        let umi_correction = correct_umis(&umigene_counts_unspliced);
+        let mut uniq_counts: HashMap<Gene, HashSet<&[u8]>> = HashMap::new();
+        umigene_counts_unspliced.iter().for_each(|((umi, gene), c)| {
+            result.total_umi += c;
+
+            // Empty UMI
+            if umi.is_empty() {
+                result.unique_umi += c;
+                if mito_genes.contains(&gene) {
+                    result.uniq_mito += c;
+                }
+                result.unspliced_uniq_umi.insert(*gene, *c as usize);
+            } else {
+                let corrected_umi = umi_correction.get(&(umi, *gene)).unwrap_or(umi);
+                uniq_counts.entry(*gene).or_insert(HashSet::new()).insert(corrected_umi);
+            }
+        });
+        uniq_counts.into_iter().for_each(|(gene, umis)| {
+            let c = umis.len();
+            result.unique_umi += c as u64;
+            result.uniq_unspliced += c as u64;
+            if mito_genes.contains(&gene) {
+                result.uniq_mito += c as u64;
+            }
+            result.unspliced_uniq_umi.entry(gene).and_modify(|x| *x += c).or_insert(c);
+        });
+
+        // Process ambiguous counts
+        let umi_correction = correct_umis(&umigene_counts_ambiguous);
+        let mut uniq_counts: HashMap<Gene, HashSet<&[u8]>> = HashMap::new();
+        umigene_counts_ambiguous.iter().for_each(|((umi, gene), c)| {
+            result.total_umi += c;
+
+            // Empty UMI
+            if umi.is_empty() {
+                result.unique_umi += c;
+                if mito_genes.contains(&gene) {
+                    result.uniq_mito += c;
+                }
+                result.ambiguous_uniq_umi.insert(*gene, *c as usize);
+            } else {
+                let corrected_umi = umi_correction.get(&(umi, *gene)).unwrap_or(umi);
+                uniq_counts.entry(*gene).or_insert(HashSet::new()).insert(corrected_umi);
+            }
+        });
+        uniq_counts.into_iter().for_each(|(gene, umis)| {
+            let c = umis.len();
+            result.unique_umi += c as u64;
+            result.uniq_ambiguous += c as u64;
+            if mito_genes.contains(&gene) {
+                result.uniq_mito += c as u64;
+            }
+            result.ambiguous_uniq_umi.entry(gene).and_modify(|x| *x += c).or_insert(c);
+        });
+    }
     result
 }
 

@@ -265,6 +265,32 @@ impl AlignmentAnnotator {
         let mut intron_mapping = std::collections::HashMap::new();
 
         if splice_aware {
+            // Collect from sense alignments (stored in transcripts map)
+            for aln in transcripts.values() {
+                all_splice_states.push(aln.splice_state());
+
+                // For validation requests, use transcript ID if available, otherwise use gene ID
+                for &intron_idx in &aln.validation_requests() {
+                    let id = if let Some(transcript_id) = aln.transcript_id() {
+                        transcript_id.to_string()
+                    } else {
+                        aln.gene.id.clone()
+                    };
+                    all_validation_requests.insert((id.clone(), intron_idx));
+                    intron_mapping.entry(id)
+                        .or_insert_with(std::collections::HashSet::new)
+                        .insert(intron_idx);
+                }
+
+                // Use gene.id since transcript_id might be None
+                for &intron_idx in &aln.intron_mapped {
+                    let id = aln.gene.id.clone();
+                    intron_mapping.entry(id)
+                        .or_insert_with(std::collections::HashSet::new)
+                        .insert(intron_idx);
+                }
+            }
+            
             // Collect from antisense alignments
             for aln in antisense.values() {
                 all_splice_states.push(aln.splice_state());
@@ -293,8 +319,12 @@ impl AlignmentAnnotator {
         }
 
         // Determine aggregated splice state
-        let aggregated_splice_state = if all_splice_states.is_empty() {
-            SpliceState::Ambiguous
+        let aggregated_splice_state = if !splice_aware {
+            SpliceState::Undetermined
+        } else if annotation_region == AnnotationRegion::Intergenic {
+            SpliceState::Intergenic
+        } else if all_splice_states.is_empty() {
+            SpliceState::Undetermined // This case should never happen
         } else if all_splice_states.iter().any(|&state| state == SpliceState::Spliced) {
             SpliceState::Spliced
         } else if all_splice_states.iter().all(|&state| state == SpliceState::Unspliced) {
@@ -338,13 +368,17 @@ impl AlignmentAnnotator {
         } else {
             (false, Vec::new(), Vec::new())
         };
-        let splice_state = if is_spanning {
-            SpliceState::Spliced
-        } else if intron_mapped.is_empty() {
-            SpliceState::Unspliced
+        let splice_state = if splice_aware {
+            if is_spanning {
+                SpliceState::Spliced
+            } else if intron_mapped.is_empty() {
+                SpliceState::Unspliced
+            } else {
+                SpliceState::Ambiguous
+            }
         } else {
-            SpliceState::Ambiguous
-        }; 
+            SpliceState::Undetermined
+        };
         let is_exonic = splice_segments.is_exonic(transcript, self.region_min_overlap);
         if is_exonic || get_overlap(genomic_start, genomic_end, tx_start, tx_end) >= 1.0 {
             // compute strand and intron mapped
@@ -550,6 +584,8 @@ pub enum SpliceState {
     Spliced,
     Unspliced,
     Ambiguous,
+    Intergenic,
+    Undetermined,
 }
 
 #[derive(Eq, PartialEq, Debug, Clone)]
