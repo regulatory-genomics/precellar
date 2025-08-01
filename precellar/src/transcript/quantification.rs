@@ -77,6 +77,25 @@ impl IntronValidationCollector {
         requests
     }
 
+        /// Validate introns in the provided transcripts based on collected requests
+    /// Returns a set of (transcript_id, intron_index) pairs that were validated
+    pub fn validate_introns(&self, transcripts: &mut [crate::transcript::Transcript]) -> HashSet<(String, usize)> {
+        let mut validated_introns = HashSet::new();
+
+        for transcript in transcripts.iter_mut() {
+            if let Some(intron_indices) = self.validation_requests.get(&transcript.id) {
+                for &intron_index in intron_indices {
+                    if transcript.validate_intron(intron_index) {
+                        validated_introns.insert((transcript.id.clone(), intron_index));
+                    }
+                }
+            }
+        }
+
+        validated_introns
+    }
+
+
 
     /// Extract validation requests from ALL transcript alignments (both intronic and exonic)
     /// This aggregates validation information regardless of final alignment classification
@@ -230,8 +249,34 @@ impl Quantifier {
                     validation_collector.add_validation_request(transcript_id, intron_index);
                 }
             }
+
+            
+            // Step: Update splice states based on validated introns
+            let mut updated_gene_alignments = gene_alignments;
+            if splice_aware && !validation_collector.is_empty() {
+                // Validate introns based on collected requests
+                let mut transcripts = self.annotator.transcripts().to_vec();
+                let validated_introns = validation_collector.validate_introns(&mut transcripts);
+
+                // Update splice states for alignments that have validated introns
+                updated_gene_alignments = updated_gene_alignments.into_iter().map(|(barcode, mut gene_alignment)| {
+                    // For intronic alignments, check if any introns are validated for this gene
+                    if gene_alignment.splice_state == SpliceState::Ambiguous {
+                        // Check if there are any validated introns for this gene
+                        let gene_name = &self.genes.get_index(gene_alignment.idx).unwrap().0;
+                        let has_validated_introns = validated_introns.iter()
+                            .any(|(transcript_id, _)| transcript_id.contains(gene_name.as_str()));
+
+                        if has_validated_introns {
+                            gene_alignment.splice_state = SpliceState::Unspliced;
+                        }
+                    }
+                    (barcode, gene_alignment)
+                }).collect();
+            }
+            
             let tx_alignments_chunks =
-                sort_alignments(gene_alignments.into_iter(), temp_dir.as_ref(), chunk_size)
+                sort_alignments(updated_gene_alignments.into_iter(), temp_dir.as_ref(), chunk_size)
                     .chunk_by(|x| x.0.clone());
             let tx_alignments_chunks = tx_alignments_chunks
                 .into_iter()
@@ -479,10 +524,8 @@ mod tests {
     use noodles::sam::{self as sam, header::record::value::{map::ReferenceSequence, Map}};
     use bstr::BString;
     use std::num::NonZeroUsize;
-    use bed_utils::bed::Strand;
     use crate::transcript::transcriptome::{Transcript, Exons, Introns};
     use noodles::sam::record::data::field::value::base_modifications::group::Strand as NoodlesStrand;
-    use tempfile::TempDir;
 
     fn create_test_gene() -> Gene {
         Gene {

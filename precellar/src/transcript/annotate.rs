@@ -126,6 +126,12 @@ impl AlignmentAnnotator {
         }
     }
 
+    /// Get all transcripts as a vector
+    pub fn transcripts(&self) -> Vec<Transcript> {
+        self.transcripts.iter().map(|(_, transcript)| transcript.clone()).collect()
+    }
+    
+
 
     /// Annotate the alignments by mapping them to the transcriptome. If multiple
     /// alignments are present, we will try to find the confident ones and promote

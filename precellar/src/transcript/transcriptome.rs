@@ -194,6 +194,7 @@ impl Exon {
 
 
 /// I try to make intron struct to store the validated intron information
+/// I found Intron maybe can be removed later for simplicity
 #[derive(Eq, PartialEq, Debug, Clone, Ord, PartialOrd)]
 pub struct Intron {
     start: u64,
