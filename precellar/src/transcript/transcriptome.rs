@@ -1057,7 +1057,7 @@ mod tests {
 
         // Verify that the alignment was processed and extract validation requests
         assert!(result.is_some(), "Alignment should be processed successfully");
-        let (barcode, gene_alignment, validation_requests) = result.unwrap();
+        let (barcode, gene_alignment, validation_requests, splice_state, intron_mapping) = result.unwrap();
         println!("Debug: Barcode: {:?}", barcode);
         println!("Debug: Gene alignment: {:?}", gene_alignment);
         println!("Debug: Validation requests count: {}", validation_requests.len());
@@ -1089,7 +1089,7 @@ mod tests {
         let mut validation_collector_disabled = IntronValidationCollector::new();
         let result_disabled = quantifier.make_gene_alignment(&header, Some(multi_map_clone), None, false);
         assert!(result_disabled.is_some(), "Alignment should be processed successfully");
-        let (_, _, validation_requests_disabled) = result_disabled.unwrap();
+        let (_, _, validation_requests_disabled, _, _) = result_disabled.unwrap();
 
         // Collect validation information (should be empty)
         for (transcript_id, intron_index) in validation_requests_disabled {

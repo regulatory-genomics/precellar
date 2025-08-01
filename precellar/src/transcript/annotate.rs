@@ -24,6 +24,9 @@ pub struct Annotation {
     pub region: AnnotationRegion,
     pub rescued: bool,
     pub chrom: String,
+    pub splice_state: SpliceState,
+    pub validation_requests: Vec<(String, usize)>,
+    pub intron_mapping: std::collections::HashMap<String, std::collections::HashSet<usize>>,
 }
 
 /// Represents an annotated BAM record.
@@ -256,6 +259,49 @@ impl AlignmentAnnotator {
                     }
                 });
         }
+        // Collect aggregated information from all alignments
+        let mut all_splice_states = Vec::new();
+        let mut all_validation_requests = std::collections::HashSet::new();
+        let mut intron_mapping = std::collections::HashMap::new();
+
+        if splice_aware {
+            // Collect from antisense alignments
+            for aln in antisense.values() {
+                all_splice_states.push(aln.splice_state());
+
+                // For validation requests, use transcript ID if available, otherwise use gene ID
+                for &intron_idx in &aln.validation_requests() {
+                    let id = if let Some(transcript_id) = aln.transcript_id() {
+                        transcript_id.to_string()
+                    } else {
+                        aln.gene.id.clone()
+                    };
+                    all_validation_requests.insert((id.clone(), intron_idx));
+                    intron_mapping.entry(id)
+                        .or_insert_with(std::collections::HashSet::new)
+                        .insert(intron_idx);
+                }
+
+                // Use gene.id since transcript_id might be None
+                for &intron_idx in &aln.intron_mapped {
+                    let id = aln.gene.id.clone();
+                    intron_mapping.entry(id)
+                        .or_insert_with(std::collections::HashSet::new)
+                        .insert(intron_idx);
+                }
+            }
+        }
+
+        // Determine aggregated splice state
+        let aggregated_splice_state = if all_splice_states.is_empty() {
+            SpliceState::Ambiguous
+        } else if all_splice_states.iter().any(|&state| state == SpliceState::Spliced) {
+            SpliceState::Spliced
+        } else if all_splice_states.iter().all(|&state| state == SpliceState::Unspliced) {
+            SpliceState::Unspliced
+        } else {
+            SpliceState::Ambiguous
+        };
 
         let mut annotation = Annotation {
             aln_sense: transcripts.into_values().collect::<Vec<_>>(),
@@ -264,6 +310,9 @@ impl AlignmentAnnotator {
             region: annotation_region,
             rescued: false,
             chrom,
+            splice_state: aggregated_splice_state,
+            validation_requests: all_validation_requests.into_iter().collect(),
+            intron_mapping,
         };
         // Sorting this makes life easier later.
         annotation.genes.sort_unstable();
@@ -289,6 +338,13 @@ impl AlignmentAnnotator {
         } else {
             (false, Vec::new(), Vec::new())
         };
+        let splice_state = if is_spanning {
+            SpliceState::Spliced
+        } else if intron_mapped.is_empty() {
+            SpliceState::Unspliced
+        } else {
+            SpliceState::Ambiguous
+        }; 
         let is_exonic = splice_segments.is_exonic(transcript, self.region_min_overlap);
         if is_exonic || get_overlap(genomic_start, genomic_end, tx_start, tx_end) >= 1.0 {
             // compute strand and intron mapped
@@ -310,12 +366,14 @@ impl AlignmentAnnotator {
 
             let gene = transcript.gene.clone();
             let validation_requests_clone = validation_requests.clone();
+            let intron_mapped_clone = intron_mapped.clone();
             let mut alignment = TranscriptAlignment {
                 gene: gene.clone(),
                 strand: tx_strand,
                 exon_align: None,
-                is_spanning,
+                splice_state,
                 validation_requests,
+                intron_mapped,
             };
 
             if is_exonic {
@@ -344,8 +402,9 @@ impl AlignmentAnnotator {
                             cigar: tx_cigar,
                             alen: tx_aligned_bases,
                         }),
-                        is_spanning,
+                        splice_state,
                         validation_requests: validation_requests_clone,
+                        intron_mapped: intron_mapped_clone,
                     };
                 }
             }
@@ -356,8 +415,9 @@ impl AlignmentAnnotator {
                         gene: transcript.gene.clone(),
                         strand: Strand::Reverse, // placeholder
                         exon_align: None,
-                        is_spanning,
+                        splice_state,
                         validation_requests,
+                        intron_mapped,
                 };
                 return Some(alignment);
             }
@@ -485,13 +545,21 @@ pub enum AnnotationRegion {
     Intergenic,
 }
 
+#[derive(Encode, Decode, Eq, PartialEq, Ord, PartialOrd, Debug, Clone, Copy, Hash)]
+pub enum SpliceState {
+    Spliced,
+    Unspliced,
+    Ambiguous,
+}
+
 #[derive(Eq, PartialEq, Debug, Clone)]
 pub struct TranscriptAlignment {
     pub gene: Gene,
     pub strand: Strand,
     pub exon_align: Option<TxAlignProperties>,
-    pub is_spanning: bool,
+    pub splice_state: SpliceState,
     pub validation_requests: Vec<usize>,
+    pub intron_mapped: Vec<usize>,
 }
 
 impl TranscriptAlignment {
@@ -504,8 +572,8 @@ impl TranscriptAlignment {
     }
     
     /// Check if this alignment spans validated junctions
-    pub fn is_spanning(&self) -> bool {
-        self.is_spanning
+    pub fn splice_state(&self) -> SpliceState {
+        self.splice_state
     }
 
     /// Get validation requests from this alignment

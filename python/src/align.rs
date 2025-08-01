@@ -119,14 +119,16 @@ pub fn make_bwa_index(fasta: PathBuf, genome_prefix: PathBuf) -> Result<()> {
         assay, aligner, *,
         output, modality=None, output_type="alignment",
         mito_dna=vec!["chrM".to_owned(), "M".to_owned()],
-        shift_left=4, shift_right=-5, compute_snv=false,
+        shift_left=4, shift_right=-5, 
+        compute_snv=false, splice_aware=false,
         compression=None, compression_level=None,
         temp_dir=None, num_threads=8, chunk_size=10000000,
     ),
     text_signature = "(assay, aligner, *,
         output, modality=None, output_type='alignment',
         mito_dna=['chrM', 'M'],
-        shift_left=4, shift_right=-5, compute_snv=False,
+        shift_left=4, shift_right=-5, 
+        compute_snv=False, splice_aware=False,
         compression=None, compression_level=None,
         temp_dir=None, num_threads=8, chunk_size=10000000)"
 )]

@@ -17,7 +17,7 @@ use crate::{align::MultiMapR, qc::QcGeneQuant, transcript::Gene};
 use bed_utils::bed::map::GIntervalMap;
 use crate::transcript::annotate::GIntervalMapExt;
 use super::{
-    annotate::{AnnotationRegion, TranscriptAlignment}, de_dups::count_unique_umi, AlignmentAnnotator, AnnotatedAlignment
+    annotate::{AnnotationRegion, TranscriptAlignment, SpliceState}, de_dups::count_unique_umi, AlignmentAnnotator, AnnotatedAlignment
 };
 
 
@@ -189,7 +189,7 @@ impl Quantifier {
                     qc.total_reads += recs.len() as u64;
                     recs.into_par_iter()
                         .filter_map(|(r1, r2)| {
-                            self.make_gene_alignment(header, r1, r2, splice_aware).map(|(barcode, gene_alignment, validation_requests)| {
+                            self.make_gene_alignment(header, r1, r2, splice_aware).map(|(barcode, gene_alignment, validation_requests, splice_state, intron_mapping)| {
                                 (barcode, gene_alignment, validation_requests)
                             })
                         })
@@ -210,7 +210,7 @@ impl Quantifier {
                     qc.total_reads += recs.len() as u64;
                     recs.into_par_iter()
                         .filter_map(|(r1, r2)| {
-                            self.make_gene_alignment(header, r1, r2, splice_aware).map(|(barcode, gene_alignment, _)| {
+                            self.make_gene_alignment(header, r1, r2, splice_aware).map(|(barcode, gene_alignment, _, _, _)| {
                                 (barcode, gene_alignment)
                             })
                         })
@@ -286,14 +286,14 @@ impl Quantifier {
         Ok(qc)
     }
 
-    /// I make it public for testing purposes. Better to be removed latter
+    /// I make it public for testing purposes. Better to be private later
     pub fn make_gene_alignment(
         &self,
         header: &Header,
         rec1: Option<MultiMapR>,
         rec2: Option<MultiMapR>,
         splice_aware: bool,
-    ) -> Option<(String, GeneAlignment, Vec<(String, usize)>)> {
+    ) -> Option<(String, GeneAlignment, Vec<(String, usize)>,  SpliceState, std::collections::HashMap<String, std::collections::HashSet<usize>>)> {
         let barcode;
         let umi;
         let anno = if rec1.is_some() && rec2.is_some() {
@@ -312,6 +312,8 @@ impl Quantifier {
         let gene_id;
         let align_type;
         let mut validation_requests = Vec::new();
+        let mut splice_state = SpliceState::Unspliced;
+        let mut intron_mapping = std::collections::HashMap::new();
 
         match anno {
             AnnotatedAlignment::PeMapped(a1, a2, anno) => {
@@ -327,12 +329,34 @@ impl Quantifier {
                 };
                 gene_id = self.genes.get_full(&gene.id).unwrap().0;
                 
+               
                 // Extract validation information only if splice_aware is enabled
                 if splice_aware {
-                    validation_requests.extend(IntronValidationCollector::extract_validation_requests(&a1.aln_sense));
-                    validation_requests.extend(IntronValidationCollector::extract_validation_requests(&a1.aln_antisense));
-                    validation_requests.extend(IntronValidationCollector::extract_validation_requests(&a2.aln_sense));
-                    validation_requests.extend(IntronValidationCollector::extract_validation_requests(&a2.aln_antisense));
+                    // Extract validation requests from aggregated annotation data
+                    validation_requests.extend(a1.validation_requests.iter().cloned());
+                    validation_requests.extend(a2.validation_requests.iter().cloned());
+
+                    // Aggregate splice states: if any is Spliced, result is Spliced
+                    let states = vec![a1.splice_state, a2.splice_state];
+                    splice_state = if states.iter().any(|&s| s == SpliceState::Spliced) {
+                        SpliceState::Spliced
+                    } else if states.iter().all(|&s| s == SpliceState::Unspliced) {
+                        SpliceState::Unspliced
+                    } else {
+                        SpliceState::Ambiguous
+                    };
+
+                    // Merge intron mappings from both annotations
+                    for (transcript_id, intron_set) in &a1.intron_mapping {
+                        intron_mapping.entry(transcript_id.clone())
+                            .or_insert_with(std::collections::HashSet::new)
+                            .extend(intron_set);
+                    }
+                    for (transcript_id, intron_set) in &a2.intron_mapping {
+                        intron_mapping.entry(transcript_id.clone())
+                            .or_insert_with(std::collections::HashSet::new)
+                            .extend(intron_set);
+                    }
                 }
             }
             AnnotatedAlignment::SeMapped(anno) => {
@@ -344,9 +368,16 @@ impl Quantifier {
                 align_type = anno.region;
                 gene_id = self.genes.get_full(&gene.id).unwrap().0;
                 // Extract validation information only if splice_aware is enabled
+                // Extract validation information only if splice_aware is enabled
                 if splice_aware {
-                    validation_requests.extend(IntronValidationCollector::extract_validation_requests(&anno.aln_sense));
-                    validation_requests.extend(IntronValidationCollector::extract_validation_requests(&anno.aln_antisense));
+                    // Extract validation requests from aggregated annotation data
+                    validation_requests.extend(anno.validation_requests.iter().cloned());
+
+                    // Extract splice state
+                    splice_state = anno.splice_state;
+
+                    // Extract intron mapping
+                    intron_mapping = anno.intron_mapping.clone();
                 }
             }
         }
@@ -356,7 +387,7 @@ impl Quantifier {
             umi,
             align_type,
         };
-        Some((barcode, alignment, validation_requests))
+        Some((barcode, alignment, validation_requests, splice_state, intron_mapping))
     }
 }
 
