@@ -284,14 +284,14 @@ impl AlignmentAnnotator {
         let genomic_start = read.alignment_start().unwrap().get() as u64;
         let genomic_end = read.alignment_end().unwrap().get() as u64;
         let splice_segments = SpliceSegments::from(read);
-        let (is_spanning, validation_requests) = if splice_aware {
+        let (is_spanning, validation_requests, intron_mapped) = if splice_aware {
             splice_segments.annotate_splice(transcript).unwrap()
         } else {
-            (false, Vec::new())
+            (false, Vec::new(), Vec::new())
         };
         let is_exonic = splice_segments.is_exonic(transcript, self.region_min_overlap);
         if is_exonic || get_overlap(genomic_start, genomic_end, tx_start, tx_end) >= 1.0 {
-            // compute strand
+            // compute strand and intron mapped
             let tx_reverse_strand = transcript.strand == Strand::Reverse;
             let flags = read.flags();
             let mut read_reverse_strand = flags.is_reverse_complemented();

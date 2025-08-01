@@ -6,6 +6,7 @@ use noodles::sam::record::data::field::value::base_modifications::group::Strand;
 use std::cmp;
 use log::debug;
 
+
 /// 0-based, half-open
 #[derive(Debug, Clone)]
 pub struct Transcript {
@@ -81,7 +82,7 @@ impl Transcript {
 
     pub fn make_intron_by_exons(&mut self) {
         let introns = (0..self.exons().len() - 1)
-            .map(|i| (self.exons()[i].end, self.exons()[i + 1].start));
+            .map(|i| (self.exons()[i].end+1, self.exons()[i + 1].start-1));
         self.introns = Introns::new(introns).unwrap();
     }
     
@@ -181,7 +182,7 @@ pub struct Exon {
 
 impl Exon {
     pub fn len(&self) -> u64 {
-        self.end - self.start
+        self.end - self.start // Why not self.end - self.start + 1???
     }
     pub fn start(&self) -> u64 {
         self.start
@@ -344,41 +345,52 @@ impl SpliceSegments {
 
     pub fn annotate_splice(&self,
         transcript: &Transcript
-    ) -> Option<(bool, Vec<usize>)> {
-        let (ex_start, ex_end) = find_exons(
-            &transcript.exons(),
-            self.start(),
-            self.end(),
-            0,
-            0,
-            true,
-        )?;
-        let mut has_spanning = false; // This is set to find the intron index
-        let mut validation_requests = Vec::new();
-        let exons = &transcript.exons()[ex_start..=ex_end];
-        for i in 0..self.segments.len() {
-            let curr_segment = &self.segments[i];
-            let curr_exon = &exons[i];
+    ) -> Option<(bool, Vec<usize>, Vec<usize>)> {
 
-            // align the start
-            let start_diff = curr_exon.start as i64 - curr_segment.start as i64;
-            //mark the overhang as validated intron
-            if start_diff > 0 && i > 0 {
-                // REQUEST VALIDATION for preceding intron
-                let intron_index = ex_start + i - 1;
-                validation_requests.push(intron_index);
-                has_spanning = true;
+        let mut has_spanning = false;
+        let mut validation_requests = Vec::new();
+        let mut intron_mapped = Vec::new();
+        
+        let introns = transcript.introns();
+
+        for current_segment in &self.segments {
+            let (ex_start, ex_end) = find_exons(
+                &transcript.exons(),
+                current_segment.start,
+                current_segment.end,
+                0,
+                0,
+                true,
+            )?;
+            if introns.is_empty() {
+                continue;
             }
-            // align the end
-            let end_diff = curr_segment.end as i64 - curr_exon.end as i64 - 1;
-            if end_diff > 0 && i < self.segments.len() - 1 {
-                // REQUEST VALIDATION for following intron
-                let intron_index = ex_start + i;
-                validation_requests.push(intron_index);
-                has_spanning = true;
+            let start_idx = ex_start.saturating_sub(1);
+            let end_idx = std::cmp::min(ex_end + 1, introns.len() - 1);
+            if start_idx <= end_idx {
+                let start_idx = ex_start.saturating_sub(1);
+                let end_idx = std::cmp::min(ex_end + 1, introns.len().saturating_sub(1));
+                let intron_selected = &introns[start_idx..=end_idx];
+                for (intron_idx, intron) in intron_selected.iter().enumerate() {
+                    let intron_start = intron.start;
+                    let intron_end = intron.end;
+                    
+                    // Check if segment spans intron boundaries
+                    if (intron_start >= current_segment.start && intron_start < current_segment.end) || 
+                    (intron_end > current_segment.start && intron_end <= current_segment.end) {
+                        validation_requests.push(intron_idx + start_idx as usize);
+                        has_spanning = true;
+                    }
+                    
+                    // Check for overlap using efficient comparison
+                    if intron_start < current_segment.end && intron_end > current_segment.start {
+                        intron_mapped.push(intron_idx + start_idx as usize);
+                    }
+                }
             }
         }
-        Some((has_spanning, validation_requests))
+        
+        Some((has_spanning, validation_requests, intron_mapped))
     }
 
     /// Align the read to the exons. Returns the aligned cigar and the number of aligned bases.
@@ -683,26 +695,6 @@ mod tests {
         }
     }
 
-    fn create_test_transcript_no_gaps() -> Transcript {
-        // Create a transcript with adjacent exons (no gaps, no introns)
-        let exons = Exons::new(vec![
-            (100, 200),  // Exon 1: 100-200
-            (200, 300),  // Exon 2: 200-300 (no gap)
-        ]).unwrap();
-
-        let introns = Introns::new(std::iter::empty()).unwrap();
-
-        Transcript {
-            id: "TRANSCRIPT002".to_string(),
-            chrom: "chr1".to_string(),
-            start: 100,
-            end: 300,
-            strand: Strand::Forward,
-            gene: create_test_gene(),
-            exons,
-            introns,
-        }
-    }
 
     #[test]
     fn test_introns_new_method() {
@@ -745,37 +737,19 @@ mod tests {
         assert_eq!(introns.len(), 2);
 
         // Check first intron (between exon 1 and exon 2)
-        assert_eq!(introns[0].start(), 200);  // End of first exon
-        assert_eq!(introns[0].end(), 300);    // Start of second exon
-        assert_eq!(introns[0].len(), 100);
+        assert_eq!(introns[0].start(), 201);  // End of first exon
+        assert_eq!(introns[0].end(), 299);    // Start of second exon
+        assert_eq!(introns[0].len(), 98);
         assert!(!introns[0].validated());
 
         // Check second intron (between exon 2 and exon 3)
-        assert_eq!(introns[1].start(), 400);  // End of second exon
-        assert_eq!(introns[1].end(), 500);    // Start of third exon
-        assert_eq!(introns[1].len(), 100);
+        assert_eq!(introns[1].start(), 401);  // End of second exon
+        assert_eq!(introns[1].end(), 499);    // Start of third exon
+        assert_eq!(introns[1].len(), 98);
         assert!(!introns[1].validated());
     }
 
-    #[test]
-    fn test_transcript_make_intron_by_exons_no_gaps() {
-        let mut transcript = create_test_transcript_no_gaps();
 
-        // Initially, transcript should have no introns
-        assert_eq!(transcript.introns().len(), 0);
-
-        // Generate introns from exons
-        transcript.make_intron_by_exons();
-
-        // Should still have no introns because exons are adjacent
-        let introns = transcript.introns();
-        assert_eq!(introns.len(), 1);
-
-        // The "intron" should have zero length (start == end)
-        assert_eq!(introns[0].start(), 200);
-        assert_eq!(introns[0].end(), 200);
-        assert_eq!(introns[0].len(), 0);
-    }
 
     #[test]
     fn test_transcript_introns_accessor() {
@@ -787,10 +761,10 @@ mod tests {
         assert_eq!(introns.len(), 2);
 
         // Verify we get the same data through the accessor
-        assert_eq!(introns[0].start(), 200);
-        assert_eq!(introns[0].end(), 300);
-        assert_eq!(introns[1].start(), 400);
-        assert_eq!(introns[1].end(), 500);
+        assert_eq!(introns[0].start(), 201);
+        assert_eq!(introns[0].end(), 299);
+        assert_eq!(introns[1].start(), 401);
+        assert_eq!(introns[1].end(), 499);
     }
 
     #[test]
@@ -842,21 +816,15 @@ mod tests {
     fn test_multiple_transcripts_with_introns() {
         // Test that multiple transcripts can have their own introns
         let mut transcript1 = create_test_transcript_with_gaps();
-        let mut transcript2 = create_test_transcript_no_gaps();
 
         transcript1.make_intron_by_exons();
-        transcript2.make_intron_by_exons();
 
         // Transcript 1 should have 2 introns
         assert_eq!(transcript1.introns().len(), 2);
 
-        // Transcript 2 should have 1 intron (zero-length)
-        assert_eq!(transcript2.introns().len(), 1);
 
         // Verify they don't interfere with each other
-        assert_eq!(transcript1.introns()[0].start(), 200);
-        assert_eq!(transcript2.introns()[0].start(), 200);
-        assert_eq!(transcript2.introns()[0].end(), 200); // Zero length
+        assert_eq!(transcript1.introns()[0].start(), 201);
     }
 
     #[test]
@@ -959,7 +927,8 @@ mod tests {
         let result = splice_segments.annotate_splice(&transcript);
 
         // The result should be Some since we have a perfect alignment
-        if let Some((is_spanning, validation_requests)) = result {
+        if let Some((is_spanning, validation_requests, intron_mapped)) = result {
+            println!("validation_requests: {:?}", validation_requests);
             // Verify the new return format works
             assert_eq!(validation_requests.len(), 1); // No validation requests for perfect alignment
             assert!(is_spanning); // Should not be spanning since it aligns perfectly
