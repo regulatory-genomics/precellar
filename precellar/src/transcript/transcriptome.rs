@@ -81,6 +81,10 @@ impl Transcript {
     }
 
     pub fn make_intron_by_exons(&mut self) {
+        if self.exons().len() < 2 {
+            self.introns = Introns::new(std::iter::empty()).unwrap();
+            return;
+        }
         let introns = (0..self.exons().len() - 1)
             .map(|i| (self.exons()[i].end+1, self.exons()[i + 1].start-1));
         self.introns = Introns::new(introns).unwrap();
@@ -355,14 +359,21 @@ impl SpliceSegments {
         let introns = transcript.introns();
 
         for current_segment in &self.segments {
-            let (ex_start, ex_end) = find_exons(
+            // Handle the case where find_exons returns None gracefully
+            let (ex_start, ex_end) = match find_exons(
                 &transcript.exons(),
                 current_segment.start,
                 current_segment.end,
                 0,
                 0,
                 true,
-            )?;
+            ) {
+                Some(result) => result,
+                None => {
+                    // Skip this segment if find_exons fails (e.g., due to overhang or no overlap)
+                    continue;
+                }
+            };
             if introns.is_empty() {
                 continue;
             }
@@ -377,8 +388,8 @@ impl SpliceSegments {
                     let intron_end = intron.end;
                     
                     // Check if segment spans intron boundaries
-                    if (intron_start >= current_segment.start && intron_start < current_segment.end) || 
-                    (intron_end > current_segment.start && intron_end <= current_segment.end) {
+                    if (intron_start > current_segment.start && intron_start < current_segment.end) || 
+                    (intron_end > current_segment.start && intron_end < current_segment.end) {
                         validation_requests.push(intron_idx + start_idx as usize);
                         has_spanning = true;
                     }

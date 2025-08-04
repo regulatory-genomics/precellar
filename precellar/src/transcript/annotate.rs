@@ -369,11 +369,34 @@ impl AlignmentAnnotator {
         let genomic_start = read.alignment_start().unwrap().get() as u64;
         let genomic_end = read.alignment_end().unwrap().get() as u64;
         let splice_segments = SpliceSegments::from(read);
+        
+        // Add comprehensive debug information
+        println!("=== Transcript Alignment Debug ===");
+        println!("Read name: {:?}", read.name());
+        println!("Transcript ID: {}", transcript.id);
+        println!("Gene ID: {}", transcript.gene.id);
+        println!("Chromosome: {}", transcript.chrom);
+        println!("Transcript coordinates: start={}, end={}", tx_start, tx_end);
+        println!("Read genomic coordinates: start={}, end={}", genomic_start, genomic_end);
+        println!("Splice aware: {}", splice_aware);
+        println!("Transcript exons: {:?}", transcript.exons().iter().map(|e| (e.start(), e.end())).collect::<Vec<_>>());
+        println!("Transcript introns: {:?}", transcript.introns().iter().map(|i| (i.start(), i.end())).collect::<Vec<_>>());
+        
         let (is_spanning, validation_requests, intron_mapped) = if splice_aware {
-            splice_segments.annotate_splice(transcript).unwrap()
+            let result = splice_segments.annotate_splice(transcript);
+            println!("Splice annotation result: {:?}", result);
+            result.unwrap_or_else(|| {
+                println!("Warning: annotate_splice returned None, using defaults");
+                (false, Vec::new(), Vec::new())
+            })
         } else {
+            println!("Splice awareness disabled, using default values");
             (false, Vec::new(), Vec::new())
         };
+        
+        println!("Final splice annotation: is_spanning={}, validation_requests={:?}, intron_mapped={:?}", 
+                 is_spanning, validation_requests, intron_mapped);
+        println!("=== End Debug ===\n");
         let splice_state = if splice_aware {
             if is_spanning {
                 SpliceState::Spliced

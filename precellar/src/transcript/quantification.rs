@@ -45,16 +45,6 @@ impl IntronValidationCollector {
             .insert(intron_index);
     }
 
-    /// Add multiple validation requests from transcript alignments
-    pub fn collect_from_alignments(&mut self, alignments: &[TranscriptAlignment]) {
-        for alignment in alignments {
-            if let Some(transcript_id) = alignment.transcript_id() {
-                for &intron_index in &alignment.validation_requests() {
-                    self.add_validation_request(transcript_id.to_string(), intron_index);
-                }
-            }
-        }
-    }
 
     /// Get the total number of validation requests
     pub fn total_requests(&self) -> usize {
@@ -83,19 +73,16 @@ impl IntronValidationCollector {
         let mut validated_introns = HashSet::new();
 
         for transcript in transcripts.iter_mut() {
-            if let Some(intron_indices) = self.validation_requests.get(&transcript.id) {
+            if let Some(intron_indices) = self.validation_requests.get(&transcript.gene.name) {
                 for &intron_index in intron_indices {
                     if transcript.validate_intron(intron_index) {
                         validated_introns.insert((transcript.id.clone(), intron_index));
-                    }
+                    } 
                 }
             }
         }
-
         validated_introns
     }
-
-
 
     /// Extract validation requests from ALL transcript alignments (both intronic and exonic)
     /// This aggregates validation information regardless of final alignment classification

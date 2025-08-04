@@ -24,6 +24,29 @@ pub(crate) struct DeDupResult {
 }
 
 impl DeDupResult {
+    /// Helper function to convert BTreeMap<Gene, usize> to Vec<(Gene, u64)>
+    fn map_to_vec(map: &BTreeMap<Gene, usize>) -> Vec<(Gene, u64)> {
+        map.iter().map(|(gene, count)| (*gene, *count as u64)).collect()
+    }
+    /// Get spliced counts as Vec (non-consuming)
+    pub fn get_spliced_counts(&self) -> Vec<(Gene, u64)> {
+        Self::map_to_vec(&self.spliced_uniq_umi)
+    }
+
+    /// Get unspliced counts as Vec (non-consuming)
+    pub fn get_unspliced_counts(&self) -> Vec<(Gene, u64)> {
+        Self::map_to_vec(&self.unspliced_uniq_umi)
+    }
+
+    /// Get ambiguous counts as Vec (non-consuming)
+    pub fn get_ambiguous_counts(&self) -> Vec<(Gene, u64)> {
+        Self::map_to_vec(&self.ambiguous_uniq_umi)
+    }
+    /// Helper function to convert consuming BTreeMap<Gene, usize> to Iterator<(Gene, u64)>
+    fn map_to_iter(map: BTreeMap<Gene, usize>) -> impl Iterator<Item = (Gene, u64)> {
+        map.into_iter().map(|(gene, count)| (gene, count as u64))
+    }
+
     /// Merge the intron and exon counts into a single count for each gene
     pub fn into_counts(mut self) -> impl Iterator<Item = (Gene, u64)> {
         self.exon_uniq_umi
@@ -32,71 +55,24 @@ impl DeDupResult {
                 let val = self.intron_uniq_umi.entry(*gene).or_insert(0);
                 *val += *c;
             });
-        self.intron_uniq_umi.into_iter().map(|(gene, c)| (gene, c as u64))
+        Self::map_to_iter(self.intron_uniq_umi)
     }
-    
-
-    /// Get spliced counts for each gene
-    pub fn into_spliced_counts(self) -> impl Iterator<Item = (Gene, u64)> {
-        self.spliced_uniq_umi.into_iter().map(|(gene, c)| (gene, c as u64))
-    }
-
-    /// Get unspliced counts for each gene
-    pub fn into_unspliced_counts(self) -> impl Iterator<Item = (Gene, u64)> {
-        self.unspliced_uniq_umi.into_iter().map(|(gene, c)| (gene, c as u64))
-    }
-
-    /// Get ambiguous counts for each gene
-    pub fn into_ambiguous_counts(self) -> impl Iterator<Item = (Gene, u64)> {
-        self.ambiguous_uniq_umi.into_iter().map(|(gene, c)| (gene, c as u64))
-    }
-
-    /// Get all splice-state-specific counts as separate iterators
-    pub fn into_splice_counts(self) -> (
-        impl Iterator<Item = (Gene, u64)>,
-        impl Iterator<Item = (Gene, u64)>,
-        impl Iterator<Item = (Gene, u64)>,
-    ) {
-        let spliced = self.spliced_uniq_umi.iter().map(|(gene, c)| (*gene, *c as u64)).collect::<Vec<_>>();
-        let unspliced = self.unspliced_uniq_umi.iter().map(|(gene, c)| (*gene, *c as u64)).collect::<Vec<_>>();
-        let ambiguous = self.ambiguous_uniq_umi.iter().map(|(gene, c)| (*gene, *c as u64)).collect::<Vec<_>>();
-
-        (spliced.into_iter(), unspliced.into_iter(), ambiguous.into_iter())
-    }
-
-    /// Get spliced counts as Vec (non-consuming)
-    pub fn get_spliced_counts(&self) -> Vec<(Gene, u64)> {
-        self.spliced_uniq_umi.iter().map(|(gene, c)| (*gene, *c as u64)).collect()
-    }
-
-    /// Get unspliced counts as Vec (non-consuming)
-    pub fn get_unspliced_counts(&self) -> Vec<(Gene, u64)> {
-        self.unspliced_uniq_umi.iter().map(|(gene, c)| (*gene, *c as u64)).collect()
-    }
-
-    /// Get ambiguous counts as Vec (non-consuming)
-    pub fn get_ambiguous_counts(&self) -> Vec<(Gene, u64)> {
-        self.ambiguous_uniq_umi.iter().map(|(gene, c)| (*gene, *c as u64)).collect()
-    }
-
     /// Get combined counts as Vec (non-consuming)
+    /// There might be memory and time difference compared to the original implementation
     pub fn get_combined_counts(&self) -> Vec<(Gene, u64)> {
         let mut combined = std::collections::BTreeMap::new();
 
-        // Add exon counts
+        // Merge exon and intron counts
         for (gene, count) in &self.exon_uniq_umi {
-            *combined.entry(*gene).or_insert(0) += *count as u64;
+            *combined.entry(*gene).or_insert(0) += *count;
         }
-
-        // Add intron counts
         for (gene, count) in &self.intron_uniq_umi {
-            *combined.entry(*gene).or_insert(0) += *count as u64;
+            *combined.entry(*gene).or_insert(0) += *count;
         }
 
-        combined.into_iter().collect()
+        Self::map_to_vec(&combined)
     }
 }
-
 pub fn count_unique_umi<I>(alignments: I, mito_genes: &HashSet<usize>, splice_aware: bool) -> DeDupResult
 where
     I: IntoIterator<Item = GeneAlignment>,
