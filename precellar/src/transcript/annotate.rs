@@ -399,9 +399,9 @@ impl AlignmentAnnotator {
         println!("=== End Debug ===\n");
         let splice_state = if splice_aware {
             if is_spanning {
-                SpliceState::Spliced
-            } else if intron_mapped.is_empty() {
                 SpliceState::Unspliced
+            } else if intron_mapped.is_empty() {
+                SpliceState::Spliced
             } else {
                 SpliceState::Ambiguous
             }
