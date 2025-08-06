@@ -298,7 +298,6 @@ impl SpliceSegments {
                         false,
                     );
 
-
                 } else if start_diff < 0 {
                     // underhang -> decrement aligned bases
                     aligned_bases -= start_diff.unsigned_abs();

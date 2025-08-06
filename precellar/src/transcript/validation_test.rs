@@ -50,59 +50,12 @@ struct TranscriptBuilder {
 }
 
 impl IntronValidationTest {
-    /// Create a new validation test with STAR transcriptome
-    pub fn new(star_reference_path: &str) -> Result<Self> {
-        use star_aligner::{StarAligner, StarOpts};
-        use std::path::PathBuf;
-
-        println!("Loading transcripts from STAR reference: {}", star_reference_path);
-
-        // Create STAR aligner to access transcriptome
-        let opts = StarOpts::new(PathBuf::from(star_reference_path));
-
-        // Add better error handling for STAR aligner initialization
-        let aligner = match StarAligner::new(opts) {
-            Ok(aligner) => aligner,
-            Err(e) => {
-                eprintln!("Failed to create STAR aligner: {:?}", e);
-                return Err(e.into());
-            }
-        };
-
-        // Get transcriptome and convert to our Transcript format
-        let star_transcripts = match aligner.get_transcriptome() {
-            Ok(transcripts) => transcripts,
-            Err(e) => {
-                eprintln!("Failed to get transcriptome from STAR aligner: {:?}", e);
-                return Err(e.into());
-            }
-        };
-
-        let transcripts: Result<Vec<_>> = star_transcripts
-            .iter()
-            .map(|t| Transcript::try_from(t.clone()))
-            .collect();
-
-        let mut transcripts = transcripts?;
-
-
-        // Create annotator with the transcripts
-        let annotator = AlignmentAnnotator::new(transcripts);
-
-
-        Ok(Self {
-            annotator,
-        })
-    }
-
     /// Create a new validation test with GTF transcriptome
     pub fn new_from_gtf(gtf_path: &str) -> Result<Self> {
         println!("Loading transcripts from GTF file: {}", gtf_path);
 
         let transcripts = Self::load_transcripts_from_gtf(gtf_path)?;
         let annotator = AlignmentAnnotator::new(transcripts);
-
-
 
         Ok(Self {
             annotator,
@@ -150,7 +103,6 @@ impl IntronValidationTest {
             if records_processed % 500000 == 0 {
                 println!("Processed {} records, found {} transcripts", records_processed, transcript_data.len());
             }
-
 
             // Skip header lines and non-feature records
             if record.reference_sequence_name().is_empty() {
@@ -237,7 +189,6 @@ impl IntronValidationTest {
         // Convert transcript builders to Transcript objects
         let mut transcripts = Vec::new();
         let mut skipped_no_exons = pre_filtered;  // Start with pre-filtered count
-        let mut skipped_invalid_exons = 0;
 
         for (transcript_id, mut builder) in transcript_data {
             // Skip transcripts with no exons (invalid)
@@ -269,7 +220,6 @@ impl IntronValidationTest {
                 exons,
             };
 
-
             // Final validation: Ensure transcript has exons before adding to list
             if transcript.exons().is_empty() {
                 skipped_no_exons += 1;
@@ -288,61 +238,6 @@ impl IntronValidationTest {
         Ok(transcripts)
     }
 
-    // Removed inefficient extract_attribute_from_gtf function - now using direct attribute access
-
-    /// Debug wrapper for annotate_splice to identify problematic transcripts
-    pub fn debug_annotate_splice(
-        splice_segments: &crate::transcript::transcriptome::SpliceSegments,
-        transcript: &Transcript,
-        transcript_id: &str,
-    ) -> Option<(bool, Vec<usize>)> {
-        let result = splice_segments.annotate_splice(transcript);
-
-        if result.is_none() {
-            // Debug information removed for cleaner code
-        }
-        result
-    }
-    
-
-    
-    /// Convert BAM record to MultiMapR (simplified)
-    fn convert_to_multimap(record: sam::alignment::RecordBuf) -> Option<MultiMapR> {
-        // Create a MultiMapR with the primary record and no secondary alignments
-        Some(MultiMapR::new(record, None))
-    }
-    
- 
-    /// Write validated introns to output file
-    fn write_output(&self, validated_introns: &[ValidatedIntron], output_path: &str) -> Result<()> {
-        let file = File::create(output_path)?;
-        let mut writer = BufWriter::new(file);
-        
-        // Write header
-        writeln!(writer, "chromosome\tstart\tend\tstrand\tgene_id\tgene_name\ttranscript_id\ttranscript_name\tintron_number\tlength\tvalidation_status")?;
-        
-        // Write data
-        for intron in validated_introns {
-            writeln!(
-                writer,
-                "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
-                intron.chromosome,
-                intron.start,
-                intron.end,
-                intron.strand,
-                intron.gene_id,
-                intron.gene_name,
-                intron.transcript_id,
-                intron.transcript_name,
-                intron.intron_number,
-                intron.length,
-                intron.validation_status
-            )?;
-        }
-        
-        writer.flush()?;
-        Ok(())
-    }
 }
 
 /// Represents a classified read with all annotation details
@@ -359,7 +254,6 @@ pub struct ReadClassification {
     pub gene_name: String,
     pub classification: String,  // spliced/unspliced/ambiguous/intergenic
     pub is_spliced: bool,
-
 }
 
 impl IntronValidationTest {
