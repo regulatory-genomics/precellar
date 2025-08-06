@@ -6,7 +6,7 @@ pub(crate) mod de_dups;
 mod validation_test;
 
 pub use quantification::Quantifier;
-pub use transcriptome::{Transcript, Gene, SpliceSegments, Exon, Exons, Intron, Introns};
+pub use transcriptome::{Transcript, Gene, SpliceSegments, Exon, Exons,};
 pub use annotate::{AlignmentAnnotator, AnnotatedAlignment};
 
 #[cfg(test)]

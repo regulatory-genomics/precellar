@@ -4,7 +4,6 @@ use noodles::sam::alignment::record::cigar::Op;
 use noodles::sam::alignment::record_buf::{Cigar, RecordBuf};
 use noodles::sam::record::data::field::value::base_modifications::group::Strand;
 use std::cmp;
-use log::debug;
 
 
 /// 0-based, half-open
@@ -17,7 +16,6 @@ pub struct Transcript {
     pub strand: Strand,
     pub gene: Gene,
     pub exons: Exons, // make public for test purpose
-    pub introns: Introns, // make public for test purpose
 }
 
 impl TryFrom<star_aligner::transcript::Transcript> for Transcript {
@@ -48,7 +46,6 @@ impl TryFrom<star_aligner::transcript::Transcript> for Transcript {
                 name: transcript.gene_name,
             },
             exons,
-            introns: Introns::new(std::iter::empty()).unwrap(),
         })
     }
 }
@@ -62,11 +59,6 @@ impl Transcript {
     pub fn exons(&self) -> &[Exon] {
         self.exons.as_ref()
     }
-
-    pub fn introns(&self) -> &[Intron] {
-        self.introns.as_ref()
-    }
-
     /// Convert a coordinate in the genome to a coordinate in the exons/transcript.
     /// The coordinate starts at the beginning of the transcript.
     pub fn get_offset(&self, coord: u64) -> Option<i64> {
@@ -79,47 +71,9 @@ impl Transcript {
         }
         None
     }
-
-    pub fn make_intron_by_exons(&mut self) {
-        if self.exons().len() < 2 {
-            self.introns = Introns::new(std::iter::empty()).unwrap();
-            return;
-        }
-        let introns = (0..self.exons().len() - 1)
-            .map(|i| (self.exons()[i].end+1, self.exons()[i + 1].start-1));
-        self.introns = Introns::new(introns).unwrap();
-    }
-    
-
-        /// Validate a specific intron by index
-    pub fn validate_intron(&mut self, index: usize) -> bool {
-        if let Some(intron) = self.introns.0.get_mut(index) {
-            intron.set_validated(true);
-            true
-        } else {
-            false
-        }
-    }
-
-    pub fn is_intron_validated(&self, index: usize) -> bool {
-        self.introns.0.get(index)
-            .map(|intron| intron.validated())
-            .unwrap_or(false)
-    }
-
-
-    /// Get count of validated introns
-    pub fn validated_intron_count(&self) -> usize {
-        self.introns.0.iter()
-            .filter(|intron| intron.validated())
-            .count()
-    }
-
-    /// Get total intron count
-    pub fn total_intron_count(&self) -> usize {
-        self.introns.0.len()
-    }
 }
+
+
 #[derive(Debug, Clone)]
 pub struct Exons(Vec<Exon>);
 
@@ -169,53 +123,6 @@ impl Exon {
         self.end
     }
 }
-
-
-/// I try to make intron struct to store the validated intron information
-/// I found Intron maybe can be removed later for simplicity
-#[derive(Eq, PartialEq, Debug, Clone, Ord, PartialOrd)]
-pub struct Intron {
-    start: u64,
-    end: u64,
-    validated: bool,
-}
-
-impl Intron {
-    pub fn len(&self) -> u64 {
-        self.end - self.start
-    }
-    pub fn start(&self) -> u64 {
-        self.start
-    }
-
-    pub fn end(&self) -> u64 {
-        self.end
-    }
-
-    pub fn validated(&self) -> bool {
-        self.validated
-    }
-
-    pub fn set_validated(&mut self, validated: bool) {
-        self.validated = validated;
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct Introns(Vec<Intron>);
-
-impl Introns {
-    pub fn new(iter: impl IntoIterator<Item = (u64, u64)>) -> Result<Self> {
-        let introns = iter.into_iter().map(|(start, end)| Intron { start, end, validated: false }).collect();
-        Ok(Self(introns))
-    }
-}
-impl AsRef<[Intron]> for Introns {
-    fn as_ref(&self) -> &[Intron] {
-        &self.0
-    }
-}
-
 
 #[derive(Hash, Eq, PartialEq, Debug, Clone, Ord, PartialOrd)]
 pub struct Gene {
@@ -309,12 +216,17 @@ impl SpliceSegments {
         let mut has_spanning = false;
         let mut intron_mapped = Vec::new();
         
-        let introns = transcript.introns();
+        let exons = transcript.exons();
+        
+        // If transcript has fewer than 2 exons, no introns exist
+        if exons.len() < 2 {
+            return Some((has_spanning, intron_mapped));
+        }
 
-        for (seg_idx, current_segment) in self.segments.iter().enumerate() {
+        for current_segment in &self.segments {
             // Handle the case where find_exons returns None gracefully
             let (ex_start, ex_end) = match find_exons(
-                &transcript.exons(),
+                exons,
                 current_segment.start,
                 current_segment.end,
                 0,
@@ -328,33 +240,25 @@ impl SpliceSegments {
                 }
             };
             
-            if introns.is_empty() {
-                continue;
-            }
+            // Check introns around the overlapping exons
+            // For n exons, there are n-1 introns: intron i is between exon i and exon i+1
+            let intron_start_idx = ex_start.saturating_sub(1);
+            let intron_end_idx = std::cmp::min(ex_end, exons.len() - 2); // max intron index is exons.len() - 2
             
-            let start_idx = ex_start.saturating_sub(1);
-            let end_idx = std::cmp::min(ex_end + 1, introns.len() - 1);
-            
-            if start_idx <= end_idx {
-                let start_idx = ex_start.saturating_sub(1);
-                let end_idx = std::cmp::min(ex_end + 1, introns.len().saturating_sub(1));
-                let intron_selected = &introns[start_idx..=end_idx];
+            for intron_idx in intron_start_idx..=intron_end_idx {
+                // Intron i is between exon i and exon i+1
+                let intron_start = exons[intron_idx].end() + 1;
+                let intron_end = exons[intron_idx + 1].start() - 1;
                 
-                for (intron_idx, intron) in intron_selected.iter().enumerate() {
-                    let intron_start = intron.start;
-                    let intron_end = intron.end;
-                    let global_intron_idx = intron_idx + start_idx as usize;
-                    
-                    // Check if segment spans intron boundaries
-                    if (intron_start > current_segment.start && intron_start < current_segment.end) || 
-                       (intron_end > current_segment.start && intron_end < current_segment.end) {
-                        has_spanning = true;
-                    }
-                    
-                    // Check for overlap using efficient comparison
-                    if intron_start < current_segment.end && intron_end > current_segment.start {
-                        intron_mapped.push(global_intron_idx);
-                    }
+                // Check if segment spans intron boundaries
+                if (intron_start > current_segment.start && intron_start < current_segment.end) || 
+                   (intron_end > current_segment.start && intron_end < current_segment.end) {
+                    has_spanning = true;
+                }
+                
+                // Check for overlap using efficient comparison
+                if intron_start < current_segment.end && intron_end > current_segment.start {
+                    intron_mapped.push(intron_idx);
                 }
             }
         }
@@ -624,179 +528,5 @@ fn mark_deleted_ref_bases(cigar: &mut Cigar, del_len: usize, reverse: bool) -> C
         let mut new_cigar = cigar.clone();
         new_cigar.as_mut().push(del);
         new_cigar
-    }
-}
-
-
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::transcript::{Transcript, Gene, Exons, Introns};
-    use noodles::sam::record::data::field::value::base_modifications::group::Strand;
-
-    fn create_test_gene() -> Gene {
-        Gene {
-            id: "GENE001".to_string(),
-            name: "TestGene".to_string(),
-        }
-    }
-
-    fn create_test_transcript_with_gaps() -> Transcript {
-        // Create a transcript with 3 exons that have gaps between them (will create introns)
-        let exons = Exons::new(vec![
-            (100, 200),  // Exon 1: 100-200
-            (300, 400),  // Exon 2: 300-400 (gap: 200-300)
-            (500, 600),  // Exon 3: 500-600 (gap: 400-500)
-        ]).unwrap();
-
-        let introns = Introns::new(std::iter::empty()).unwrap(); // Start with empty introns
-
-        Transcript {
-            id: "TRANSCRIPT001".to_string(),
-            chrom: "chr1".to_string(),
-            start: 100,
-            end: 600,
-            strand: Strand::Forward,
-            gene: create_test_gene(),
-            exons,
-            introns,
-        }
-    }
-
-
-    #[test]
-    fn test_introns_new_method() {
-        // Test creating introns from coordinate pairs
-        let intron_coords = vec![
-            (200, 300),
-            (400, 500),
-        ];
-
-        let introns = Introns::new(intron_coords).unwrap();
-        let intron_slice = introns.as_ref();
-
-        assert_eq!(intron_slice.len(), 2);
-
-        // Check first intron
-        assert_eq!(intron_slice[0].start(), 200);
-        assert_eq!(intron_slice[0].end(), 300);
-        assert_eq!(intron_slice[0].len(), 100);
-        assert!(!intron_slice[0].validated());
-
-        // Check second intron
-        assert_eq!(intron_slice[1].start(), 400);
-        assert_eq!(intron_slice[1].end(), 500);
-        assert_eq!(intron_slice[1].len(), 100);
-        assert!(!intron_slice[1].validated());
-    }
-
-    #[test]
-    fn test_transcript_make_intron_by_exons_with_gaps() {
-        let mut transcript = create_test_transcript_with_gaps();
-
-        // Initially, transcript should have no introns
-        assert_eq!(transcript.introns().len(), 0);
-
-        // Generate introns from exons
-        transcript.make_intron_by_exons();
-
-        // Should now have 2 introns
-        let introns = transcript.introns();
-        assert_eq!(introns.len(), 2);
-
-        // Check first intron (between exon 1 and exon 2)
-        assert_eq!(introns[0].start(), 201);  // End of first exon
-        assert_eq!(introns[0].end(), 299);    // Start of second exon
-        assert_eq!(introns[0].len(), 98);
-        assert!(!introns[0].validated());
-
-        // Check second intron (between exon 2 and exon 3)
-        assert_eq!(introns[1].start(), 401);  // End of second exon
-        assert_eq!(introns[1].end(), 499);    // Start of third exon
-        assert_eq!(introns[1].len(), 98);
-        assert!(!introns[1].validated());
-    }
-
-
-
-    #[test]
-    fn test_transcript_introns_accessor() {
-        let mut transcript = create_test_transcript_with_gaps();
-        transcript.make_intron_by_exons();
-
-        // Test that we can access introns through the accessor method
-        let introns = transcript.introns();
-        assert_eq!(introns.len(), 2);
-
-        // Verify we get the same data through the accessor
-        assert_eq!(introns[0].start(), 201);
-        assert_eq!(introns[0].end(), 299);
-        assert_eq!(introns[1].start(), 401);
-        assert_eq!(introns[1].end(), 499);
-    }
-
-    #[test]
-    fn test_single_exon_transcript() {
-        // Test transcript with only one exon (should have no introns)
-        let exons = Exons::new(vec![(100, 200)]).unwrap();
-        let introns = Introns::new(std::iter::empty()).unwrap();
-
-        let mut transcript = Transcript {
-            id: "TRANSCRIPT_SINGLE".to_string(),
-            chrom: "chr1".to_string(),
-            start: 100,
-            end: 200,
-            strand: Strand::Forward,
-            gene: create_test_gene(),
-            exons,
-            introns,
-        };
-
-        transcript.make_intron_by_exons();
-
-        // Should have no introns
-        assert_eq!(transcript.introns().len(), 0);
-    }
-
-    #[test]
-    fn test_empty_introns() {
-        let introns = Introns::new(vec![]).unwrap();
-        let intron_slice = introns.as_ref();
-
-        assert_eq!(intron_slice.len(), 0);
-        assert!(intron_slice.is_empty());
-    }
-
-    #[test]
-    fn test_multiple_transcripts_with_introns() {
-        // Test that multiple transcripts can have their own introns
-        let mut transcript1 = create_test_transcript_with_gaps();
-
-        transcript1.make_intron_by_exons();
-
-        // Transcript 1 should have 2 introns
-        assert_eq!(transcript1.introns().len(), 2);
-
-
-        // Verify they don't interfere with each other
-        assert_eq!(transcript1.introns()[0].start(), 201);
-    }
-
-
-    #[test]
-    fn test_intron_length_calculation() {
-        let intron_coords = vec![
-            (100, 200),   // Length: 100
-            (500, 1000),  // Length: 500
-            (2000, 2001), // Length: 1
-        ];
-
-        let introns = Introns::new(intron_coords).unwrap();
-        let intron_slice = introns.as_ref();
-
-        assert_eq!(intron_slice[0].len(), 100);
-        assert_eq!(intron_slice[1].len(), 500);
-        assert_eq!(intron_slice[2].len(), 1);
     }
 }

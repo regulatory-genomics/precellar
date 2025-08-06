@@ -85,10 +85,6 @@ impl IntronValidationTest {
 
         let mut transcripts = transcripts?;
 
-        // Generate introns for all transcripts
-        for transcript in &mut transcripts {
-            transcript.make_intron_by_exons();
-        }
 
         // Create annotator with the transcripts
         let annotator = AlignmentAnnotator::new(transcripts);
@@ -137,7 +133,7 @@ impl IntronValidationTest {
         use std::collections::HashMap;
         use std::fs::File;
         use std::io::BufReader;
-        use crate::transcript::transcriptome::{Exons, Introns};
+        use crate::transcript::transcriptome::{Exons};
         use crate::transcript::Gene;
         use noodles::sam::record::data::field::value::base_modifications::group::Strand;
 
@@ -263,7 +259,6 @@ impl IntronValidationTest {
             // Create Exons object
             let exons = Exons::new(builder.exons.into_iter())?;
 
-            let introns = Introns::new(std::iter::empty())?;
 
             let mut transcript = Transcript {
                 id: builder.id,
@@ -276,11 +271,8 @@ impl IntronValidationTest {
                     name: builder.gene_name,
                 },
                 exons,
-                introns,
             };
 
-            // Generate introns from exons
-            transcript.make_intron_by_exons();
 
             // Final validation: Ensure transcript has exons before adding to list
             if transcript.exons().is_empty() {
@@ -291,15 +283,6 @@ impl IntronValidationTest {
                 continue;
             }
 
-            // Debug: Log transcript details for first transcript only (reduced verbosity)
-            if transcripts.len() == 0 {
-                println!("Debug: First transcript {} - exons: {}, introns: {}, span: {}-{}",
-                         transcript.id,
-                         transcript.exons().len(),
-                         transcript.introns().len(),
-                         transcript.start,
-                         transcript.end);
-            }
 
             transcripts.push(transcript);
         }
@@ -334,52 +317,6 @@ impl IntronValidationTest {
     }
     
  
-    
-    /// Extract detailed information for validated introns
-    fn extract_validated_intron_details(
-        &self,
-        transcripts: &[Transcript],
-        validated_set: &HashSet<(String, usize)>,
-    ) -> Result<Vec<ValidatedIntron>> {
-        let mut validated_introns = Vec::new();
-        
-        for transcript in transcripts {
-            let introns = transcript.introns();
-            
-            for (intron_idx, intron) in introns.iter().enumerate() {
-                // Check if this intron is validated
-                if validated_set.contains(&(transcript.id.clone(), intron_idx)) {
-                    let validated_intron = ValidatedIntron {
-                        chromosome: transcript.chrom.clone(),
-                        start: intron.start(),
-                        end: intron.end(),
-                        strand: match transcript.strand {
-                            noodles::sam::record::data::field::value::base_modifications::group::Strand::Forward => "+".to_string(),
-                            noodles::sam::record::data::field::value::base_modifications::group::Strand::Reverse => "-".to_string(),
-                        },
-                        gene_id: transcript.gene.id.clone(),
-                        gene_name: transcript.gene.name.clone(),
-                        transcript_id: transcript.id.clone(),
-                        transcript_name: transcript.id.clone(), // Assuming same as ID
-                        intron_number: intron_idx + 1, // 1-based indexing
-                        length: intron.end() - intron.start() + 1,
-                        validation_status: "validated".to_string(),
-                    };
-                    
-                    validated_introns.push(validated_intron);
-                }
-            }
-        }
-        
-        // Sort by chromosome, then by start position
-        validated_introns.sort_by(|a, b| {
-            a.chromosome.cmp(&b.chromosome)
-                .then(a.start.cmp(&b.start))
-        });
-        
-        Ok(validated_introns)
-    }
-    
     /// Write validated introns to output file
     fn write_output(&self, validated_introns: &[ValidatedIntron], output_path: &str) -> Result<()> {
         let file = File::create(output_path)?;
@@ -616,13 +553,6 @@ impl IntronValidationTest {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::transcript::{Transcript, Gene};
-    use noodles::sam::record::data::field::value::base_modifications::group::Strand as NoodlesStrand;
-    use crate::transcript::transcriptome::{Exons, Introns};
-
-    #[test]
-
-
 
     #[test]
     fn test_read_classification() {

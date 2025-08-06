@@ -1,8 +1,7 @@
 use anndata::{
     data::utils::{from_csr_data, to_csr_data},
-    AnnData, AnnDataOp,ArrayData,AxisArraysOp
+    AnnData, AnnDataOp,AxisArraysOp
 };
-use ndarray::Array2;
 use anndata_hdf5::H5;
 use anyhow::Result;
 use bed_utils::extsort::ExternalSorterBuilder;
@@ -15,15 +14,9 @@ use rayon::iter::{IntoParallelIterator, ParallelIterator};
 use std::{collections::HashSet, path::PathBuf};
 
 use crate::{align::MultiMapR, qc::QcGeneQuant, transcript::Gene};
-use bed_utils::bed::map::GIntervalMap;
-use crate::transcript::annotate::GIntervalMapExt;
 use super::{
-    annotate::{AnnotationRegion, TranscriptAlignment, SpliceState}, de_dups::count_unique_umi, AlignmentAnnotator, AnnotatedAlignment
+    annotate::{AnnotationRegion, SpliceState}, de_dups::count_unique_umi, AlignmentAnnotator, AnnotatedAlignment
 };
-
-
-
-
 
 #[derive(Debug, Encode, Decode)]
 pub struct GeneAlignment {
@@ -35,7 +28,7 @@ pub struct GeneAlignment {
 
 #[derive(Debug)]
 pub struct Quantifier {
-    pub annotator: AlignmentAnnotator, // make it public for testing purposes
+    annotator: AlignmentAnnotator, 
     genes: IndexMap<String, Gene>,
     temp_dir: Option<PathBuf>,
     chunk_size: usize,
@@ -72,15 +65,15 @@ impl Quantifier {
         self.mito_genes.extend(iter);
     }
 
-    pub fn quantify<'a, I, P>(
-        &'a mut self,
-        header: &'a Header,
+    pub fn quantify<I, P>(
+        self,
+        header: &Header,
         records: I,
         output: P,
         splice_aware: bool,
     ) -> Result<QcGeneQuant>
     where
-        I: Iterator<Item = Vec<(Option<MultiMapR>, Option<MultiMapR>)>> + 'a,
+        I: Iterator<Item = Vec<(Option<MultiMapR>, Option<MultiMapR>)>>,
         P: AsRef<std::path::Path>,
     {
         let mut qc = QcGeneQuant::default();
@@ -97,16 +90,6 @@ impl Quantifier {
         let mut ambiguous_count: Vec<u64> = Vec::new();
 
         {
-            if splice_aware {
-                // Extract transcripts, modify them, and rebuild the map
-                let transcripts = std::mem::replace(&mut self.annotator.transcripts, GIntervalMap::new());
-                let updated_transcripts = transcripts.map_values_mut(|transcript| {
-                    transcript.make_intron_by_exons();
-                });
-
-                // Update the annotator's transcripts
-                self.annotator.transcripts = updated_transcripts;
-            }
             let temp_dir = self.temp_dir.clone();
             let chunk_size = self.chunk_size;
             let mito_genes = self.mito_genes.clone();
@@ -243,8 +226,7 @@ impl Quantifier {
         Ok(qc)
     }
 
-    /// I make it public for testing purposes. Better to be private later
-    pub fn make_gene_alignment(
+    fn make_gene_alignment(
         &self,
         header: &Header,
         rec1: Option<MultiMapR>,
@@ -371,7 +353,7 @@ mod tests {
     use noodles::sam::{self as sam, header::record::value::{map::ReferenceSequence, Map}};
     use bstr::BString;
     use std::num::NonZeroUsize;
-    use crate::transcript::transcriptome::{Transcript, Exons, Introns};
+    use crate::transcript::transcriptome::{Transcript, Exons};
     use noodles::sam::record::data::field::value::base_modifications::group::Strand as NoodlesStrand;
 
     fn create_test_gene() -> Gene {
@@ -389,8 +371,6 @@ mod tests {
             (500, 600),  // Exon 3: 500-600 (gap: 400-500)
         ]).unwrap();
 
-        let introns = Introns::new(std::iter::empty()).unwrap(); // Start with empty introns
-
         Transcript {
             id: "transcript1".to_string(),
             chrom: "chr1".to_string(),
@@ -399,7 +379,6 @@ mod tests {
             strand: NoodlesStrand::Forward,
             gene: create_test_gene(),
             exons,
-            introns,
         }
     }
 
@@ -420,7 +399,6 @@ mod tests {
         // Create test data
         let transcript = create_test_transcript();
         let annotator = AlignmentAnnotator::new(vec![transcript]);
-        let mut quantifier = Quantifier::new(annotator);
 
         // Create test alignments with different splice states
         let alignments = vec![
@@ -507,154 +485,5 @@ mod tests {
         assert_eq!(result.uniq_exon, 1, "Should have 1 exonic UMI");
         assert_eq!(result.uniq_intron, 1, "Should have 1 intronic UMI");
     }
-    #[test]
-    fn test_quantify_with_splice_layers() {
-        use noodles::sam::{self as sam, header::record::value::{map::ReferenceSequence, Map}};
-        use bstr::BString;
-        use std::num::NonZeroUsize;
-        use crate::align::MultiMapR;
-        use noodles::sam::alignment::record::data::field::Tag;
-        use noodles::sam::alignment::record_buf::data::field::Value;
-        use tempfile::TempDir;
 
-        // Create a test transcript with multiple exons that will generate introns
-        let exons = Exons::new(vec![
-            (100, 200),  // Exon 1: 100-200 (101bp)
-            (300, 400),  // Exon 2: 300-400 (101bp) 
-            (500, 600),  // Exon 3: 500-600 (101bp)
-        ]).unwrap();
-
-        let introns = Introns::new(std::iter::empty()).unwrap();
-
-        let mut transcript = Transcript {
-            id: "TRANSCRIPT001".to_string(),
-            chrom: "chr1".to_string(),
-            start: 100,
-            end: 600,
-            strand: NoodlesStrand::Forward,
-            gene: Gene {
-                id: "GENE001".to_string(),
-                name: "TestGene".to_string(),
-            },
-            exons,
-            introns,
-        };
-
-        // Generate introns from exons
-        transcript.make_intron_by_exons();
-
-        let annotator = AlignmentAnnotator::new(vec![transcript]);
-        let mut quantifier = Quantifier::new(annotator);
-
-        // Create a SAM header with proper reference sequence
-        let reference_sequences = [(
-            BString::from("chr1"),
-            Map::<ReferenceSequence>::new(NonZeroUsize::try_from(248956422).unwrap()),
-        )]
-        .into_iter()
-        .collect();
-        let header = sam::Header::builder()
-            .set_reference_sequences(reference_sequences)
-            .build();
-
-        // Create a temporary directory for output
-        let temp_dir = TempDir::new().unwrap();
-        let output_path = temp_dir.path().join("test_output.h5ad");
-
-        // Create mock records with realistic SAM alignments
-        let mut mock_records = Vec::new();
-        
-        // Record 1: Spliced alignment spanning all exons
-        let sequence1 = "A".repeat(303); // 101 + 101 + 101 bases
-        let quality1 = "I".repeat(303);
-        let sam_line1 = format!(
-            "read1\t0\tchr1\t100\t60\t101M99N101M99N101M\t*\t0\t0\t{}\t{}",
-            sequence1, quality1
-        );
-        
-        let sam_record1 = noodles::sam::Record::try_from(sam_line1.as_bytes()).unwrap();
-        let mut record1 = noodles::sam::alignment::RecordBuf::try_from_alignment_record(&header, &sam_record1).unwrap();
-        record1.data_mut().insert(Tag::from([b'C', b'B']), Value::String(BString::from("AAACCTGAGAAACCAT")));
-        record1.data_mut().insert(Tag::from([b'U', b'B']), Value::String(BString::from("AAAAAAAAAA")));
-        let multi_map1 = Some(MultiMapR::new(record1, None));
-
-        // Record 2: Unspliced alignment within first exon
-        let sequence2 = "T".repeat(50);
-        let quality2 = "I".repeat(50);
-        let sam_line2 = format!(
-            "read2\t0\tchr1\t120\t60\t50M\t*\t0\t0\t{}\t{}",
-            sequence2, quality2
-        );
-        
-        let sam_record2 = noodles::sam::Record::try_from(sam_line2.as_bytes()).unwrap();
-        let mut record2 = noodles::sam::alignment::RecordBuf::try_from_alignment_record(&header, &sam_record2).unwrap();
-        record2.data_mut().insert(Tag::from([b'C', b'B']), Value::String(BString::from("AAACCTGAGAAACCAT")));
-        record2.data_mut().insert(Tag::from([b'U', b'B']), Value::String(BString::from("TTTTTTTTTT")));
-        let multi_map2 = Some(MultiMapR::new(record2, None));
-
-        // Record 3: Intronic alignment
-        let sequence3 = "G".repeat(30);
-        let quality3 = "I".repeat(30);
-        let sam_line3 = format!(
-            "read3\t0\tchr1\t250\t60\t30M\t*\t0\t0\t{}\t{}",
-            sequence3, quality3
-        );
-        
-        let sam_record3 = noodles::sam::Record::try_from(sam_line3.as_bytes()).unwrap();
-        let mut record3 = noodles::sam::alignment::RecordBuf::try_from_alignment_record(&header, &sam_record3).unwrap();
-        record3.data_mut().insert(Tag::from([b'C', b'B']), Value::String(BString::from("AAACCTGAGAAACCAT")));
-        record3.data_mut().insert(Tag::from([b'U', b'B']), Value::String(BString::from("CCCCCCCCCC")));
-        let multi_map3 = Some(MultiMapR::new(record3, None));
-
-        mock_records.push((multi_map1, None));
-        mock_records.push((multi_map2, None));
-        mock_records.push((multi_map3, None));
-
-        let records = std::iter::once(mock_records).into_iter();
-
-        // Test quantification with splice_aware = true
-        let result = quantifier.quantify(&header, records, &output_path, true);
-        
-        // The test should complete without errors
-        match result {
-            Ok(_) => {
-                // Verify the output file exists
-                assert!(output_path.exists(), "Output file should be created");
-                
-                // Additional verification that splice-aware quantification worked
-                println!("Quantification completed successfully with splice-aware mode enabled");
-                println!("Output file created at: {:?}", output_path);
-            },
-            Err(e) => {
-                panic!("Quantification failed with error: {:?}", e);
-            }
-        }
-
-        // Test quantification with splice_aware = false for comparison
-        let output_path_no_splice = temp_dir.path().join("test_output_no_splice.h5ad");
-        
-        // Recreate records for second test
-        let mut mock_records_2 = Vec::new();
-        
-        let sam_record1_copy = noodles::sam::Record::try_from(sam_line1.as_bytes()).unwrap();
-        let mut record1_copy = noodles::sam::alignment::RecordBuf::try_from_alignment_record(&header, &sam_record1_copy).unwrap();
-        record1_copy.data_mut().insert(Tag::from([b'C', b'B']), Value::String(BString::from("AAACCTGAGAAACCAT")));
-        record1_copy.data_mut().insert(Tag::from([b'U', b'B']), Value::String(BString::from("AAAAAAAAAA")));
-        let multi_map1_copy = Some(MultiMapR::new(record1_copy, None));
-        
-        mock_records_2.push((multi_map1_copy, None));
-        let records_no_splice = std::iter::once(mock_records_2).into_iter();
-
-        let result_no_splice = quantifier.quantify(&header, records_no_splice, &output_path_no_splice, false);
-        
-        match result_no_splice {
-            Ok(_) => {
-                assert!(output_path_no_splice.exists(), "Output file without splice-aware should be created");
-                println!("Quantification completed successfully with splice-aware mode disabled");
-            },
-            Err(e) => {
-                panic!("Quantification without splice-aware failed with error: {:?}", e);
-            }
-        }
-    }
 }
