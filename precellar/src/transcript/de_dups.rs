@@ -92,29 +92,28 @@ where
         if splice_aware {
             match alignment.splice_state {
                 SpliceState::Spliced => {
-                    *umigene_counts_splice.entry((umi, gene)).or_insert(0) += 1u64;
+                    *umigene_counts_splice.entry((umi.clone(), gene)).or_insert(0) += 1u64;
                 }
                 SpliceState::Unspliced => {
-                    *umigene_counts_unspliced.entry((umi, gene)).or_insert(0) += 1u64;
+                    *umigene_counts_unspliced.entry((umi.clone(), gene)).or_insert(0) += 1u64;
                 }
                 SpliceState::Ambiguous => {
-                    *umigene_counts_ambiguous.entry((umi, gene)).or_insert(0) += 1u64;
+                    *umigene_counts_ambiguous.entry((umi.clone(), gene)).or_insert(0) += 1u64;
                 },
                 SpliceState::Undetermined => {},
                 SpliceState::Intergenic => {},
             }
         }
-        else{
-            match alignment.align_type {
-                AnnotationRegion::Exonic => {
-                    *umigene_counts_exon.entry((umi, gene)).or_insert(0) += 1u64;
-                }
-                AnnotationRegion::Intronic => {
-                    *umigene_counts_intron.entry((umi, gene)).or_insert(0) += 1u64;
-                }
-                AnnotationRegion::Intergenic => {},
+        match alignment.align_type {
+            AnnotationRegion::Exonic => {
+                *umigene_counts_exon.entry((umi, gene)).or_insert(0) += 1u64;
             }
+            AnnotationRegion::Intronic => {
+                *umigene_counts_intron.entry((umi, gene)).or_insert(0) += 1u64;
+            }
+            AnnotationRegion::Intergenic => {},
         }
+        
     });
 
 

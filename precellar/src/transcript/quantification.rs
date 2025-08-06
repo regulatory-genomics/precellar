@@ -277,7 +277,7 @@ impl Quantifier {
                     .into_par_iter()
                     .map(|alignments| count_unique_umi(alignments, &mito_genes, splice_aware))
                     .collect()
-            }).collect();
+            }).collect(); 
 
             // Process results for QC metrics
             all_results.iter().for_each(|chunk_results| {

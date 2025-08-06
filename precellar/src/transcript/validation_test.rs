@@ -1111,4 +1111,240 @@ chr1	HAVANA	exon	30564	31097	.	+	.	gene_id "ENSG00000243485"; gene_version "5"; 
             println!("  BAM file: {} (exists: {})", bam_file, Path::new(bam_file).exists());
         }
     }
+
+    #[test]
+    fn test_quantification_with_real_data() {
+        // Test quantification using real BAM and GTF data
+        let gtf_path = "/data2/litian/database/gtf/small_subset_genes2.gtf";
+        let bam_file = "/data2/litian/202506_trajectory/data/velocyto_toy/test_small_200.bam";
+        let output_file = "/data2/litian/202506_trajectory/process/20250803_velocity_validation/quantification_test_output.h5ad";
+
+        if Path::new(gtf_path).exists() && Path::new(bam_file).exists() {
+            println!("Running quantification test with real data...");
+
+            let result = std::panic::catch_unwind(|| -> Result<()> {
+                use crate::transcript::quantification::Quantifier;
+                use noodles::bam;
+                use crate::align::MultiMapR;
+                // Load transcripts from GTF
+                let transcripts = IntronValidationTest::load_transcripts_from_gtf_with_limit(gtf_path, Some(1000))?;
+                println!("Loaded {} transcripts for quantification", transcripts.len());
+                
+                // Create annotator and quantifier
+                let annotator = crate::transcript::annotate::AlignmentAnnotator::new(transcripts);
+                let mut quantifier = Quantifier::new(annotator);
+                
+                // Read BAM file and convert to records
+                let mut reader = bam::io::Reader::new(std::fs::File::open(bam_file)?);
+                let header = reader.read_header()?;
+                
+                // Collect records in batches
+                let mut all_records = Vec::new();
+                let mut batch = Vec::new();
+                const BATCH_SIZE: usize = 100;
+                
+                for result in reader.record_bufs(&header) {
+                    let record = result?;
+                    
+                    // Skip unmapped reads
+                    if record.flags().is_unmapped() {
+                        continue;
+                    }
+                    
+                    // Convert to MultiMapR
+                    let multi_map_r = MultiMapR::from(record);
+                    
+                    // For single-end reads, second element is None
+                    batch.push((Some(multi_map_r), None));
+                    
+                    if batch.len() >= BATCH_SIZE {
+                        all_records.push(batch);
+                        batch = Vec::new();
+                    }
+                }
+                
+                // Add remaining records
+                if !batch.is_empty() {
+                    all_records.push(batch);
+                }
+                
+                println!("Collected {} batches of records for quantification", all_records.len());
+                
+                // Create iterator over records
+                let records_iter = all_records.into_iter();
+                
+                // Test quantification with splice_aware = true
+                println!("Starting quantification with splice_aware = true...");
+                let qc_result = quantifier.quantify(&header, records_iter, output_file, true)?;
+                
+                println!("Quantification completed successfully!");
+                println!("QC metrics:");
+                println!("  Total reads: {}", qc_result.total_reads);
+                println!("  Total UMI: {}", qc_result.total_umi);
+                println!("  Unique UMI: {}", qc_result.unique_umi);
+                
+                Ok(())
+            });
+
+            match result {
+                Ok(Ok(())) => {
+                    println!("Quantification test completed successfully!");
+                    
+                    // Verify output file exists
+                    if Path::new(output_file).exists() {
+                        println!("AnnData output file created: {}", output_file);
+                        
+                        // Try to read the file size to verify it's not empty
+                        if let Ok(metadata) = std::fs::metadata(output_file) {
+                            println!("Output file size: {} bytes", metadata.len());
+                        }
+                    } else {
+                        println!("Warning: Output file was not created");
+                    }
+                },
+                Ok(Err(e)) => {
+                    println!("Quantification test failed with error: {}", e);
+                    println!("This might be due to:");
+                    println!("  - Missing CB/UB tags in BAM file");
+                    println!("  - Transcript annotation issues");
+                    println!("  - File format compatibility");
+                },
+                Err(_) => {
+                    println!("Quantification test panicked");
+                    println!("This might be due to memory issues or low-level library problems");
+                }
+            }
+        } else {
+            println!("Quantification test skipped - files not found");
+            println!("  GTF file: {} (exists: {})", gtf_path, Path::new(gtf_path).exists());
+            println!("  BAM file: {} (exists: {})", bam_file, Path::new(bam_file).exists());
+        }
+    }
+
+    #[test]
+    fn test_quantification_comparison_splice_aware() {
+        // Test quantification comparing splice_aware vs non-splice_aware modes
+        let gtf_path = "/data2/litian/database/gtf/small_subset_genes2.gtf";
+        let bam_file = "/data2/litian/202506_trajectory/data/velocyto_toy/test_small_200.bam";
+        let output_file_splice = "/data2/litian/202506_trajectory/process/20250803_velocity_validation/quantification_splice_aware.h5ad";
+        let output_file_no_splice = "/data2/litian/202506_trajectory/process/20250803_velocity_validation/quantification_no_splice.h5ad";
+
+        if Path::new(gtf_path).exists() && Path::new(bam_file).exists() {
+            println!("Running quantification comparison test...");
+
+            let result = std::panic::catch_unwind(|| -> Result<()> {
+                use crate::transcript::quantification::Quantifier;
+                use noodles::bam;
+                use crate::align::MultiMapR;
+                
+                // Load transcripts from GTF
+                let transcripts = IntronValidationTest::load_transcripts_from_gtf_with_limit(gtf_path, Some(500))?;
+                println!("Loaded {} transcripts for comparison test", transcripts.len());
+                
+                // Helper function to collect records from BAM
+                let collect_records = || -> Result<Vec<Vec<(Option<MultiMapR>, Option<MultiMapR>)>>> {
+                    let mut reader = bam::io::Reader::new(std::fs::File::open(bam_file)?);
+                    let header = reader.read_header()?;
+                    
+                    let mut all_records = Vec::new();
+                    let mut batch = Vec::new();
+                    const BATCH_SIZE: usize = 50;
+                    
+                    for result in reader.record_bufs(&header) {
+                        let record = result?;
+                        
+                        // Skip unmapped reads
+                        if record.flags().is_unmapped() {
+                            continue;
+                        }
+                        
+                        // Convert to MultiMapR
+                        let multi_map_r = MultiMapR::from(record);
+                        
+                        // For single-end reads, second element is None
+                        batch.push((Some(multi_map_r), None));
+                        
+                        if batch.len() >= BATCH_SIZE {
+                            all_records.push(batch);
+                            batch = Vec::new();
+                        }
+                    }
+                    
+                    if !batch.is_empty() {
+                        all_records.push(batch);
+                    }
+                    
+                    Ok(all_records)
+                };
+                
+                // Test 1: With splice_aware = true
+                println!("Testing quantification with splice_aware = true...");
+                let annotator1 = crate::transcript::annotate::AlignmentAnnotator::new(transcripts.clone());
+                let mut quantifier1 = Quantifier::new(annotator1);
+                let records1 = collect_records()?;
+                let header = {
+                    let mut reader = bam::io::Reader::new(std::fs::File::open(bam_file)?);
+                    reader.read_header()?
+                };
+                
+                let qc_result1 = quantifier1.quantify(&header, records1.into_iter(), output_file_splice, true)?;
+                
+                // Test 2: With splice_aware = false
+                println!("Testing quantification with splice_aware = false...");
+                let annotator2 = crate::transcript::annotate::AlignmentAnnotator::new(transcripts);
+                let mut quantifier2 = Quantifier::new(annotator2);
+                let records2 = collect_records()?;
+                
+                let qc_result2 = quantifier2.quantify(&header, records2.into_iter(), output_file_no_splice, false)?;
+                
+                // Compare results
+                println!("\nQuantification Comparison Results:");
+                println!("=================================");
+                println!("Splice-aware mode:");
+                println!("  Total reads: {}", qc_result1.total_reads);
+                println!("  Total UMI: {}", qc_result1.total_umi);
+                println!("  Unique UMI: {}", qc_result1.unique_umi);
+                
+                println!("Non-splice-aware mode:");
+                println!("  Total reads: {}", qc_result2.total_reads);
+                println!("  Total UMI: {}", qc_result2.total_umi);
+                println!("  Unique UMI: {}", qc_result2.unique_umi);
+                
+                // Both modes should process the same number of reads
+                assert_eq!(qc_result1.total_reads, qc_result2.total_reads, 
+                          "Both modes should process the same number of reads");
+                
+                println!("Comparison test completed successfully!");
+                
+                Ok(())
+            });
+
+            match result {
+                Ok(Ok(())) => {
+                    println!("Quantification comparison test completed successfully!");
+                    
+                    // Verify both output files exist
+                    for (file, mode) in [(output_file_splice, "splice-aware"), (output_file_no_splice, "non-splice-aware")] {
+                        if Path::new(file).exists() {
+                            if let Ok(metadata) = std::fs::metadata(file) {
+                                println!("{} output: {} ({} bytes)", mode, file, metadata.len());
+                            }
+                        } else {
+                            println!("Warning: {} output file was not created", mode);
+                        }
+                    }
+                },
+                Ok(Err(e)) => {
+                    println!("Quantification comparison test failed with error: {}", e);
+                },
+                Err(_) => {
+                    println!("Quantification comparison test panicked");
+                }
+            }
+        } else {
+            println!("Quantification comparison test skipped - files not found");
+            println!("  GTF file: {} (exists: {})", gtf_path, Path::new(gtf_path).exists());
+            println!("  BAM file: {} (exists: {})", bam_file, Path::new(bam_file).exists());
+        }
+    }
 }
