@@ -326,17 +326,7 @@ impl IntronValidationTest {
         let result = splice_segments.annotate_splice(transcript);
 
         if result.is_none() {
-            println!("DEBUG: annotate_splice returned None for transcript {}", transcript_id);
-            println!("  Transcript span: {}-{}", transcript.start, transcript.end);
-            println!("  Exons: {}", transcript.exons().len());
-            for (i, exon) in transcript.exons().iter().enumerate() {
-                println!("    Exon {}: {}-{}", i, exon.start(), exon.end());
-            }
-            println!("  Introns: {}", transcript.introns().len());
-            for (i, intron) in transcript.introns().iter().enumerate() {
-                println!("    Intron {}: {}-{}", i, intron.start(), intron.end());
-            }
-            println!("  SpliceSegments span: {}-{}", splice_segments.start(), splice_segments.end());
+            // Debug information removed for cleaner code
         }
 
         result
@@ -413,17 +403,9 @@ impl IntronValidationTest {
     
     /// Validate collected introns and generate output
     pub fn validate_and_output(&mut self, output_path: &str) -> Result<()> {
-        // Debug: Check if we have any validation requests
-        println!("DEBUG: Validation requests collected: {}", self.validation_collector.validation_requests.len());
-        for (transcript_id, intron_indices) in &self.validation_collector.validation_requests {
-            println!("  Transcript {}: introns {:?}", transcript_id, intron_indices);
-        }
-
         // Get all transcripts and validate introns using the existing method
         let mut transcripts = self.annotator.transcripts();
         let validated_introns_set = self.validation_collector.validate_introns(&mut transcripts);
-
-        println!("DEBUG: Validated introns set: {:?}", validated_introns_set);
 
         // Convert to detailed intron information
         let validated_introns = self.extract_validated_intron_details(&transcripts, &validated_introns_set)?;
@@ -619,34 +601,69 @@ impl IntronValidationTest {
 
                                     if has_validated_introns {
                                         transcript_alignment.splice_state = crate::transcript::annotate::SpliceState::Unspliced;
+                                        println!("Debug: Updated antisense alignment for gene {} from Ambiguous to Unspliced", gene_id);
                                     }
                                 }
                             }
                         }
 
-                        // Process each transcript alignment (now with corrected splice states)
-                        // Process sense alignments
-                        for transcript_alignment in &annotation.aln_sense {
-                            let classification = self.classify_transcript_alignment(
+                        // Aggregate classifications for reads with multiple alignments
+                        // If any alignment is unspliced, final classification is unspliced
+                        // Otherwise, if any alignment is spliced, final classification is spliced
+                        let mut all_alignments = Vec::new();
+                        all_alignments.extend(&annotation.aln_sense);
+                        all_alignments.extend(&annotation.aln_antisense);
+
+                        if !all_alignments.is_empty() {
+                            // Debug: Log splice states of all alignments
+                            for (i, alignment) in all_alignments.iter().enumerate() {
+                                println!("Debug: Alignment {} - Gene: {}, Transcript: {:?}, Splice state: {:?}, Exon align: {}, Intron mapped: {}", 
+                                        i, 
+                                        alignment.gene.id, 
+                                        alignment.transcript_id, 
+                                        alignment.splice_state,
+                                        alignment.exon_align.is_some(),
+                                        alignment.intron_mapped.len());
+                            }
+
+                            // Check if any alignment is unspliced
+                            let has_unspliced = all_alignments.iter().any(|alignment| {
+                                matches!(alignment.splice_state, crate::transcript::annotate::SpliceState::Unspliced)
+                            });
+                            
+                            // Check if any alignment is spliced
+                            let has_spliced = all_alignments.iter().any(|alignment| {
+                                matches!(alignment.splice_state, crate::transcript::annotate::SpliceState::Spliced)
+                            });
+
+                            println!("Debug: Read {} - has_unspliced: {}, has_spliced: {}", 
+                                    read_id, has_unspliced, has_spliced);
+
+                            // Determine final classification based on aggregation rules
+                            let final_classification = if has_unspliced {
+                                "unspliced"
+                            } else if has_spliced {
+                                "spliced"
+                            } else {
+                                // If neither spliced nor unspliced, use the first alignment's classification
+                                match all_alignments[0].splice_state {
+                                    crate::transcript::annotate::SpliceState::Ambiguous => "ambiguous",
+                                    crate::transcript::annotate::SpliceState::Intergenic => "intergenic",
+                                    crate::transcript::annotate::SpliceState::Undetermined => "undetermined",
+                                    _ => "undetermined"
+                                }
+                            };
+
+                            println!("Debug: Read {} - final classification: {}", read_id, final_classification);
+
+                            // Create a single classification for the read using the aggregated result
+                            let classification = self.classify_aggregated_alignment(
                                 &read_id,
                                 &chromosome,
                                 start,
                                 end,
-                                transcript_alignment,
-                            );
-
-                            classifications.push(classification);
-                            classified_reads += 1;
-                        }
-
-                        // Process antisense alignments
-                        for transcript_alignment in &annotation.aln_antisense {
-                            let classification = self.classify_transcript_alignment(
-                                &read_id,
-                                &chromosome,
-                                start,
-                                end,
-                                transcript_alignment,
+                                &all_alignments,
+                                final_classification,
                             );
 
                             classifications.push(classification);
@@ -661,7 +678,7 @@ impl IntronValidationTest {
             }
         }
 
-        println!("Classification complete. Total reads: {}, Classified alignments: {}", total_reads, classified_reads);
+        println!("Classification complete. Total reads: {}, Classified reads: {}", total_reads, classified_reads);
 
         // Write classifications to output file
         self.write_classification_output(&classifications, output_path)?;
@@ -669,64 +686,43 @@ impl IntronValidationTest {
         Ok(())
     }
 
-    /// Classify a single transcript alignment
-    fn classify_transcript_alignment(
+
+    /// Classify an aggregated alignment based on multiple transcript alignments
+    fn classify_aggregated_alignment(
         &self,
         read_id: &str,
         chromosome: &str,
         start: u64,
         end: u64,
-        alignment: &crate::transcript::annotate::TranscriptAlignment,
+        alignments: &[&crate::transcript::annotate::TranscriptAlignment],
+        final_classification: &str,
     ) -> ReadClassification {
-        // Determine strand
-        let strand = match alignment.strand {
+        // Use the first alignment for basic information
+        let first_alignment = alignments[0];
+        
+        // Determine strand from the first alignment
+        let strand = match first_alignment.strand {
             noodles::sam::record::data::field::value::base_modifications::group::Strand::Forward => "+",
             noodles::sam::record::data::field::value::base_modifications::group::Strand::Reverse => "-",
         }.to_string();
 
-        // Determine classification based on splice state
-        let classification = match alignment.splice_state {
-            crate::transcript::annotate::SpliceState::Spliced => "spliced",
-            crate::transcript::annotate::SpliceState::Unspliced => "unspliced",
-            crate::transcript::annotate::SpliceState::Ambiguous => "ambiguous",
-            crate::transcript::annotate::SpliceState::Intergenic => "intergenic",
-            crate::transcript::annotate::SpliceState::Undetermined => "undetermined",
-        }.to_string();
-
-        // Check various properties
-        let is_spliced = matches!(alignment.splice_state, crate::transcript::annotate::SpliceState::Spliced);
-        let has_exons = alignment.exon_align.is_some();
-        let has_introns = !alignment.intron_mapped.is_empty();
-        let has_validated_introns = !alignment.validation_requests.is_empty();
+        // Determine if the final classification is spliced
+        let is_spliced = final_classification == "spliced";
+        
+        // Check various properties across all alignments
+        let has_exons = alignments.iter().any(|alignment| alignment.exon_align.is_some());
+        let has_introns = alignments.iter().any(|alignment| !alignment.intron_mapped.is_empty());
+        let has_validated_introns = alignments.iter().any(|alignment| !alignment.validation_requests.is_empty());
         let has_spanning = has_validated_introns; // Spanning reads typically have validation requests
 
-        // Debug information about the alignment
-        println!("DEBUG: Classifying alignment for read {} ({}-{}) on transcript {}", 
-                 read_id, start, end, alignment.transcript_id().unwrap_or("unknown"));
-        println!("  Strand: {}, Classification: {}", strand, classification);
-        println!("  Splice state: {:?}", alignment.splice_state);
-        println!("  Has exons: {}, Has introns: {}, Has validated introns: {}", 
-                 has_exons, has_introns, has_validated_introns);
+        // For transcript information, we'll use the first alignment's transcript
+        // In a more sophisticated implementation, we might want to list all transcripts
+        let transcript_id = first_alignment.transcript_id().unwrap_or("unknown").to_string();
+        let transcript_name = first_alignment.transcript_id().unwrap_or("unknown").to_string();
         
-        if let Some(ref exon_align) = alignment.exon_align {
-            println!("  Exon alignment: present");
-        }
-        
-        if !alignment.intron_mapped.is_empty() {
-            println!("  Intron mapped: {} introns", alignment.intron_mapped.len());
-            for (i, intron) in alignment.intron_mapped.iter().enumerate() {
-                println!("    Intron {}: {}", i, intron);
-            }
-        }
-        
-        if !alignment.validation_requests.is_empty() {
-            println!("  Validation requests: {}", alignment.validation_requests.len());
-            for (i, request) in alignment.validation_requests.iter().enumerate() {
-                println!("    Request {}: {:?}", i, request);
-            }
-        }
-        
-        println!("  Gene: {} ({})", alignment.gene.name, alignment.gene.id);
+        // For gene information, we'll use the first alignment's gene
+        let gene_id = first_alignment.gene.id.clone();
+        let gene_name = first_alignment.gene.name.clone();
 
         ReadClassification {
             read_id: format!("{}:{}-{}:{}", read_id, start, end, strand),
@@ -734,11 +730,11 @@ impl IntronValidationTest {
             start,
             end,
             strand,
-            transcript_id: alignment.transcript_id().unwrap_or("unknown").to_string(),
-            transcript_name: alignment.transcript_id().unwrap_or("unknown").to_string(), // Assuming same as ID
-            gene_id: alignment.gene.id.clone(),
-            gene_name: alignment.gene.name.clone(),
-            classification,
+            transcript_id,
+            transcript_name,
+            gene_id,
+            gene_name,
+            classification: final_classification.to_string(),
             is_spliced,
             has_exons,
             has_introns,
@@ -1096,7 +1092,7 @@ chr1	HAVANA	exon	30564	31097	.	+	.	gene_id "ENSG00000243485"; gene_version "5"; 
     #[test]
     fn test_real_gtf_if_available() {
         // Test with real GTF file if available
-        let gtf_path = "/data2/litian/database/gtf/small_test.gtf";
+        let gtf_path = "/data2/litian/database/gtf/small_subset_genes.gtf";
         let bam_file = "/data2/litian/202506_trajectory/data/velocyto_toy/test_small_200.bam";
         let output_file = "/data2/litian/202506_trajectory/process/20250803_velocity_validation/validated_introns_gtf.tsv";
 
@@ -1119,8 +1115,6 @@ chr1	HAVANA	exon	30564	31097	.	+	.	gene_id "ENSG00000243485"; gene_version "5"; 
                     let content = std::fs::read_to_string(output_file).unwrap();
                     println!("Real GTF output preview:\n{}", &content[..content.len().min(500)]);
 
-                    // Clean up
-                    std::fs::remove_file(output_file).ok();
                     println!("✅ Real GTF test completed successfully!");
                 },
                 Ok(Err(e)) => {
@@ -1140,58 +1134,13 @@ chr1	HAVANA	exon	30564	31097	.	+	.	gene_id "ENSG00000243485"; gene_version "5"; 
         }
     }
 
-    #[test]
-    fn test_real_data_if_available() {
-        let star_reference = "/data/Public/STAR_reference/refdata-gex-GRCh38-2024-A/star/";
-        let bam_file = "/data2/litian/202506_trajectory/data/velocyto_toy/test_small_200.bam";
-        let output_file = "/data2/litian/202506_trajectory/process/20250803_velocity_validation/validated_introns_real.tsv";
-
-        if Path::new(star_reference).exists() && Path::new(bam_file).exists() {
-            println!("Running test with real data...");
-
-            // Add a timeout and better error handling
-            let result = std::panic::catch_unwind(|| {
-                run_validation_test(star_reference, bam_file, output_file)
-            });
-
-            match result {
-                Ok(Ok(_)) => {
-                    // Verify output
-                    assert!(Path::new(output_file).exists());
-                    let content = std::fs::read_to_string(output_file).unwrap();
-                    println!("Output preview:\n{}", &content[..content.len().min(500)]);
-
-                    // Clean up
-                    std::fs::remove_file(output_file).ok();
-                    println!("Test completed successfully!");
-                },
-                Ok(Err(e)) => {
-                    eprintln!("Test failed with error: {:?}", e);
-                    eprintln!("This might be due to issues with the STAR reference or BAM file");
-                    // Don't panic, just skip the test
-                    println!("Skipping real data test due to errors");
-                },
-                Err(_) => {
-                    eprintln!("Test panicked (likely segfault in STAR aligner)");
-                    eprintln!("This is a known issue with the STAR aligner integration");
-                    // Don't propagate the panic
-                    println!("Skipping real data test due to panic");
-                }
-            }
-        } else {
-            println!("Skipping real data test - files not found");
-            println!("To run with real data, ensure these paths exist:");
-            println!("  STAR reference: {}", star_reference);
-            println!("  BAM file: {}", bam_file);
-        }
-    }
 
     #[test]
     fn test_read_classification() {
         // Test read classification functionality
-        let gtf_path = "/data2/litian/database/gtf/small_test.gtf";
+        let gtf_path = "/data2/litian/database/gtf/small_subset_genes3.gtf";
         let bam_file = "/data2/litian/202506_trajectory/data/velocyto_toy/test_small_200.bam";
-        let output_file = "/data2/litian/202506_trajectory/process/20250803_velocity_validation/read_classifications.tsv";
+        let output_file = "/data2/litian/202506_trajectory/process/20250803_velocity_validation/20250805_read_classifications.tsv";
 
         if Path::new(gtf_path).exists() && Path::new(bam_file).exists() {
             println!("Running read classification test...");

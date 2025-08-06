@@ -73,7 +73,7 @@ impl IntronValidationCollector {
         let mut validated_introns = HashSet::new();
 
         for transcript in transcripts.iter_mut() {
-            if let Some(intron_indices) = self.validation_requests.get(&transcript.gene.name) {
+            if let Some(intron_indices) = self.validation_requests.get(&transcript.id) {
                 for &intron_index in intron_indices {
                     if transcript.validate_intron(intron_index) {
                         validated_introns.insert((transcript.id.clone(), intron_index));
@@ -90,16 +90,9 @@ impl IntronValidationCollector {
         let mut validation_requests = Vec::new();
         for alignment in alignments {
             // For exonic alignments, use the transcript ID from exon_align
-            if let Some(transcript_id) = alignment.transcript_id() {
+            if let Some(transcript_id) = alignment.transcript_id.clone() {
                 for &intron_index in &alignment.validation_requests() {
                     validation_requests.push((transcript_id.to_string(), intron_index));
-                }
-            } else {
-                // For intronic alignments, we still want to collect validation requests
-                // but we don't have a transcript ID. We'll use the gene ID as a fallback.
-                // This ensures we don't lose validation information from intronic alignments.
-                for &intron_index in &alignment.validation_requests() {
-                    validation_requests.push((alignment.gene.id.clone(), intron_index));
                 }
             }
         }
@@ -250,9 +243,14 @@ impl Quantifier {
                     // For intronic alignments, check if any introns are validated for this gene
                     if gene_alignment.splice_state == SpliceState::Ambiguous {
                         // Check if there are any validated introns for this gene
-                        let gene_name = &self.genes.get_index(gene_alignment.idx).unwrap().0;
+                        let gene = &self.genes.get_index(gene_alignment.idx).unwrap().1;
+                        // Check if there are any validated introns for any transcript of this gene
                         let has_validated_introns = validated_introns.iter()
-                            .any(|(transcript_id, _)| transcript_id.contains(gene_name.as_str()));
+                            .any(|(transcript_id, _)| {
+                                // Check if this transcript belongs to the current gene
+                                // We need to find the transcript and check its gene
+                                transcripts.iter().any(|t| &t.id == transcript_id && t.gene.id == gene.id)
+                            });
 
                         if has_validated_introns {
                             gene_alignment.splice_state = SpliceState::Unspliced;
