@@ -89,7 +89,6 @@ impl IntronValidationTest {
         // Create annotator with the transcripts
         let annotator = AlignmentAnnotator::new(transcripts);
 
-        println!("Loaded {} transcripts from STAR reference", annotator.transcripts().len());
 
         Ok(Self {
             annotator,
@@ -104,7 +103,6 @@ impl IntronValidationTest {
         let annotator = AlignmentAnnotator::new(transcripts);
 
 
-        println!("Loaded {} transcripts from GTF file", annotator.transcripts().len());
 
         Ok(Self {
             annotator,
@@ -114,8 +112,6 @@ impl IntronValidationTest {
     /// Create a new validation test from a vector of transcripts
     pub fn new_from_transcripts(transcripts: Vec<Transcript>) -> Result<Self> {
         let annotator = AlignmentAnnotator::new(transcripts);
-
-        println!("Loaded {} transcripts", annotator.transcripts().len());
 
         Ok(Self {
             annotator,
