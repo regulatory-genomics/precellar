@@ -119,32 +119,6 @@ impl Transcript {
     pub fn total_intron_count(&self) -> usize {
         self.introns.0.len()
     }
-    /// Get validation percentage
-    /// Functions below is not necessary, I keep it for test purpose.
-    /// This should be removed later
-    pub fn intron_validation_percentage(&self) -> f64 {
-        let total = self.total_intron_count();
-        if total == 0 {
-            0.0
-        } else {
-            self.validated_intron_count() as f64 / total as f64
-        }
-    }
-
-    /// Get comprehensive validation summary
-    pub fn validation_summary(&self) -> ValidationSummary {
-        let total = self.total_intron_count();
-        let validated = self.validated_intron_count();
-        let percentage = if total > 0 { validated as f64 / total as f64 } else { 0.0 };
-
-        ValidationSummary {
-            transcript_id: self.id.clone(),
-            total_introns: total,
-            validated_introns: validated,
-            validation_percentage: percentage,
-            is_fully_validated: percentage == 1.0 && total > 0,
-        }
-    }
 }
 #[derive(Debug, Clone)]
 pub struct Exons(Vec<Exon>);
@@ -241,41 +215,8 @@ impl AsRef<[Intron]> for Introns {
         &self.0
     }
 }
-/// Comprehensive validation summary for a transcript
-/// For test purpose. 
-/// This should be deleted later
-#[derive(Debug, Clone)]
-pub struct ValidationSummary {
-    pub transcript_id: String,
-    pub total_introns: usize,
-    pub validated_introns: usize,
-    pub validation_percentage: f64,
-    pub is_fully_validated: bool,
-}
 
-impl ValidationSummary {
-    /// Check if transcript has sufficient validation confidence
-    pub fn is_well_validated(&self, min_percentage: f64) -> bool {
-        self.validation_percentage >= min_percentage && self.total_introns > 0
-    }
 
-    /// Get validation confidence level
-    pub fn confidence_level(&self) -> ValidationConfidence {
-        match self.validation_percentage {
-            p if p >= 0.9 => ValidationConfidence::High,
-            p if p >= 0.7 => ValidationConfidence::Medium,
-            p if p >= 0.3 => ValidationConfidence::Low,
-            _ => ValidationConfidence::None,
-        }
-    }
-}
-#[derive(Debug, Clone, PartialEq)]
-pub enum ValidationConfidence {
-    High,    // >= 90% introns validated
-    Medium,  // >= 70% introns validated
-    Low,     // >= 30% introns validated
-    None,    // < 30% introns validated
-}
 #[derive(Hash, Eq, PartialEq, Debug, Clone, Ord, PartialOrd)]
 pub struct Gene {
     pub id: String,
@@ -363,10 +304,9 @@ impl SpliceSegments {
 
     pub fn annotate_splice(&self,
         transcript: &Transcript
-    ) -> Option<(bool, Vec<usize>, Vec<usize>)> {
+    ) -> Option<(bool, Vec<usize>)> {
 
         let mut has_spanning = false;
-        let mut validation_requests = Vec::new();
         let mut intron_mapped = Vec::new();
         
         let introns = transcript.introns();
@@ -408,7 +348,6 @@ impl SpliceSegments {
                     // Check if segment spans intron boundaries
                     if (intron_start > current_segment.start && intron_start < current_segment.end) || 
                        (intron_end > current_segment.start && intron_end < current_segment.end) {
-                        validation_requests.push(global_intron_idx);
                         has_spanning = true;
                     }
                     
@@ -420,7 +359,7 @@ impl SpliceSegments {
             }
         }
         
-        Some((has_spanning, validation_requests, intron_mapped))
+        Some((has_spanning, intron_mapped))
     }
 
     /// Align the read to the exons. Returns the aligned cigar and the number of aligned bases.
@@ -821,19 +760,6 @@ mod tests {
     }
 
     #[test]
-    fn test_intron_validation_field() {
-        let intron_coords = vec![(200, 300)];
-        let introns = Introns::new(intron_coords).unwrap();
-        let intron_slice = introns.as_ref();
-
-        // All introns should start as unvalidated
-        assert!(!intron_slice[0].validated());
-
-        // Note: The current implementation doesn't provide a way to set validation
-        // This test documents the current behavior
-    }
-
-    #[test]
     fn test_empty_introns() {
         let introns = Introns::new(vec![]).unwrap();
         let intron_slice = introns.as_ref();
@@ -855,62 +781,6 @@ mod tests {
 
         // Verify they don't interfere with each other
         assert_eq!(transcript1.introns()[0].start(), 201);
-    }
-
-
-    #[test]
-    fn test_alignment_with_validation_requests() {
-        use noodles::sam::{self as sam, header::record::value::{map::ReferenceSequence, Map}};
-        use bstr::BString;
-        use std::num::NonZeroUsize;
-
-        // Create a test transcript with multiple exons
-        let mut transcript = create_test_transcript_with_gaps();
-        transcript.make_intron_by_exons();
-
-        // Create a SAM header for proper RecordBuf creation
-        let reference_sequences = [(
-            BString::from("chr1"),
-            Map::<ReferenceSequence>::new(NonZeroUsize::try_from(248956422).unwrap()),
-        )]
-        .into_iter()
-        .collect();
-        let header = sam::Header::builder()
-            .set_reference_sequences(reference_sequences)
-            .build();
-
-        // Create a realistic SAM record that spans multiple exons
-        // Transcript exons: 100-200, 300-400, 500-600
-        // CIGAR: 101M99N101M99N101M (matches exon lengths exactly)
-        // Sequence: 303 bases (3 x 101M)
-        // Quality: 303 high quality scores
-        let sequence = "A".repeat(307);
-        let quality = "I".repeat(307);
-        let sam_line = format!(
-            "test_read\t0\tchr1\t100\t60\t105M95N101M99N101M\t*\t0\t0\t{}\t{}",
-            sequence, quality
-        );
-
-        // Parse the SAM line into a RecordBuf
-        let sam_record = noodles::sam::Record::try_from(sam_line.as_bytes()).unwrap();
-        let record = noodles::sam::alignment::RecordBuf::try_from_alignment_record(&header, &sam_record).unwrap();
-
-        // Test that align_junctions now returns validation information
-        let splice_segments = SpliceSegments::from(&record);
-        let result = splice_segments.annotate_splice(&transcript);
-
-        // The result should be Some since we have a perfect alignment
-        if let Some((is_spanning, validation_requests, intron_mapped)) = result {
-            println!("validation_requests: {:?}", validation_requests);
-            // Verify the new return format works
-            assert_eq!(validation_requests.len(), 1); // No validation requests for perfect alignment
-            assert!(is_spanning); // Should not be spanning since it aligns perfectly
-            println!("Test passed: is_spanning={}, validation_requests={:?}",
-                    is_spanning, validation_requests);
-        } else {
-            // If alignment fails, that's not expected for this perfect alignment
-            panic!("Alignment should succeed for perfect alignment but returned None");
-        }
     }
 
 

@@ -110,26 +110,21 @@ impl Quantifier {
             let temp_dir = self.temp_dir.clone();
             let chunk_size = self.chunk_size;
             let mito_genes = self.mito_genes.clone();
-            let (gene_alignments, all_validation_requests) = if splice_aware {
-                // When splice_aware is true, collect both alignments and validation requests
+            let (gene_alignments) = if splice_aware {
                 let tx_alignments = records.flat_map(|recs| {
                     qc.total_reads += recs.len() as u64;
                     recs.into_par_iter()
                         .filter_map(|(r1, r2)| {
-                            self.make_gene_alignment(header, r1, r2, splice_aware).map(|(barcode, gene_alignment, validation_requests, intron_mapping)| {
-                                (barcode, gene_alignment, validation_requests)
+                            self.make_gene_alignment(header, r1, r2, splice_aware).map(|(barcode, gene_alignment, intron_mapping)| {
+                                (barcode, gene_alignment, intron_mapping)
                             })
                         })
                         .collect::<Vec<_>>()
                 });
-
-                let mut all_validation_requests = Vec::new();
-                let gene_alignments: Vec<_> = tx_alignments.into_iter().map(|(barcode, gene_alignment, validation_requests)| {
-                    all_validation_requests.extend(validation_requests);
+                let gene_alignments: Vec<_> = tx_alignments.into_iter().map(|(barcode, gene_alignment, _)| {
                     (barcode, gene_alignment)
                 }).collect();
-
-                (gene_alignments, all_validation_requests)
+                (gene_alignments)
             } else {
                 // When splice_aware is false, only collect alignments (no validation overhead)
                 // There might be a minimal time cost compared to the original function, but I think it's acceptable
@@ -137,13 +132,13 @@ impl Quantifier {
                     qc.total_reads += recs.len() as u64;
                     recs.into_par_iter()
                         .filter_map(|(r1, r2)| {
-                            self.make_gene_alignment(header, r1, r2, splice_aware).map(|(barcode, gene_alignment, _, _)| {
+                            self.make_gene_alignment(header, r1, r2, splice_aware).map(|(barcode, gene_alignment, _)| {
                                 (barcode, gene_alignment)
                             })
                         })
                         .collect::<Vec<_>>()
                 }).collect();
-                (gene_alignments, Vec::new())
+                (gene_alignments)
             };
 
 
@@ -255,7 +250,7 @@ impl Quantifier {
         rec1: Option<MultiMapR>,
         rec2: Option<MultiMapR>,
         splice_aware: bool,
-    ) -> Option<(String, GeneAlignment, Vec<(String, usize)>,  std::collections::HashMap<String, std::collections::HashSet<usize>>)> {
+    ) -> Option<(String, GeneAlignment,  std::collections::HashMap<String, std::collections::HashSet<usize>>)> {
         let barcode;
         let umi;
         let anno = if rec1.is_some() && rec2.is_some() {
@@ -273,7 +268,6 @@ impl Quantifier {
 
         let gene_id;
         let align_type;
-        let mut validation_requests = Vec::new();
         let mut splice_state = SpliceState::Undetermined;
         let mut intron_mapping = std::collections::HashMap::new();
 
@@ -294,10 +288,6 @@ impl Quantifier {
                
                 // Extract validation information only if splice_aware is enabled
                 if splice_aware {
-                    // Extract validation requests from aggregated annotation data
-                    validation_requests.extend(a1.validation_requests.iter().cloned());
-                    validation_requests.extend(a2.validation_requests.iter().cloned());
-
                     // Aggregate splice states: if any is Spliced, result is Spliced
                     let states = vec![a1.splice_state, a2.splice_state];
                     splice_state = if states.iter().any(|&s| s == SpliceState::Spliced) {
@@ -330,14 +320,9 @@ impl Quantifier {
                 align_type = anno.region;
                 gene_id = self.genes.get_full(&gene.id).unwrap().0;
                 // Extract validation information only if splice_aware is enabled
-                // Extract validation information only if splice_aware is enabled
                 if splice_aware {
-                    // Extract validation requests from aggregated annotation data
-                    validation_requests.extend(anno.validation_requests.iter().cloned());
-
                     // Extract splice state
                     splice_state = anno.splice_state;
-
                     // Extract intron mapping
                     intron_mapping = anno.intron_mapping.clone();
                 }
@@ -350,7 +335,7 @@ impl Quantifier {
             align_type,
             splice_state,
         };
-        Some((barcode, alignment, validation_requests, intron_mapping))
+        Some((barcode, alignment, intron_mapping))
     }
 }
 

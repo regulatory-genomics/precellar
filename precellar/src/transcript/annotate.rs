@@ -24,7 +24,6 @@ pub struct Annotation {
     pub rescued: bool,
     pub chrom: String,
     pub splice_state: SpliceState,
-    pub validation_requests: Vec<(String, usize)>,
     pub intron_mapping: std::collections::HashMap<String, std::collections::HashSet<usize>>,
     pub is_any_exon: Vec<bool>,
 }
@@ -131,8 +130,6 @@ impl AlignmentAnnotator {
         self.transcripts.iter().map(|(_, transcript)| transcript.clone()).collect()
     }
     
-
-
     /// Annotate the alignments by mapping them to the transcriptome. If multiple
     /// alignments are present, we will try to find the confident ones and promote
     /// them to primary. A read may align to multiple transcripts and genes, but
@@ -245,7 +242,6 @@ impl AlignmentAnnotator {
         
         // Collect aggregated information from all alignments BEFORE moving them
         let mut all_splice_states = Vec::new();
-        let mut all_validation_requests = std::collections::HashSet::new();
         let mut intron_mapping = std::collections::HashMap::new();
         let mut is_any_exon = Vec::new();
         let mut model = Vec::new();
@@ -261,14 +257,6 @@ impl AlignmentAnnotator {
             for aln in &alignments {
                 all_splice_states.push(aln.splice_state());
 
-                // For validation requests, use transcript_id from the struct
-                for &intron_idx in &aln.validation_requests() {
-                    let id = aln.transcript_id.clone().unwrap();
-                    all_validation_requests.insert((id.clone(), intron_idx));
-                    intron_mapping.entry(id)
-                        .or_insert_with(std::collections::HashSet::new)
-                        .insert(intron_idx);
-                }
 
                 for &intron_idx in &aln.intron_mapped {
                     let id = aln.transcript_id.clone().unwrap();
@@ -356,7 +344,6 @@ impl AlignmentAnnotator {
             rescued: false,
             chrom,
             splice_state: aggregated_splice_state,
-            validation_requests: all_validation_requests.into_iter().collect(),
             intron_mapping,
             is_any_exon,
         };
@@ -381,13 +368,13 @@ impl AlignmentAnnotator {
         let splice_segments = SpliceSegments::from(read);
         
         
-        let (is_spanning, validation_requests, intron_mapped) = if splice_aware {
+        let (is_spanning, intron_mapped) = if splice_aware {
             let result = splice_segments.annotate_splice(transcript);
             result.unwrap_or_else(|| {
-                (false, Vec::new(), Vec::new())
+                (false, Vec::new())
             })
         } else {
-            (false, Vec::new(), Vec::new())
+            (false, Vec::new())
         };
         let is_any_exon = splice_segments.is_exonic(transcript, 0.001, true); //Check whether mapped to any exon
         
@@ -422,7 +409,6 @@ impl AlignmentAnnotator {
             };
 
             let gene = transcript.gene.clone();
-            let validation_requests_clone = validation_requests.clone();
             let intron_mapped_clone = intron_mapped.clone();
             let mut alignment = TranscriptAlignment {
                 gene: gene.clone(),
@@ -430,7 +416,6 @@ impl AlignmentAnnotator {
                 exon_align: None,
                 splice_state,
                 transcript_id: Some(transcript.id.clone()),
-                validation_requests,
                 intron_mapped,
                 is_any_exon,
             };
@@ -463,7 +448,6 @@ impl AlignmentAnnotator {
                         }),
                         splice_state,
                         transcript_id: Some(transcript.id.clone()),
-                        validation_requests: validation_requests_clone,
                         intron_mapped: intron_mapped_clone,
                         is_any_exon,
                     };
@@ -478,7 +462,6 @@ impl AlignmentAnnotator {
                         exon_align: None,
                         splice_state,
                         transcript_id: Some(transcript.id.clone()),
-                        validation_requests,
                         intron_mapped,
                         is_any_exon,
                 };
@@ -624,7 +607,6 @@ pub struct TranscriptAlignment {
     pub exon_align: Option<TxAlignProperties>,
     pub splice_state: SpliceState,
     pub transcript_id: Option<String>,
-    pub validation_requests: Vec<usize>,
     pub intron_mapped: Vec<usize>,
     pub is_any_exon: bool,
 }
@@ -643,10 +625,6 @@ impl TranscriptAlignment {
         self.splice_state
     }
 
-    /// Get validation requests from this alignment
-    pub fn validation_requests(&self) -> Vec<usize> {
-        self.validation_requests.clone()
-    }
 
     /// Get the transcript ID if this is an exonic alignment
     pub fn transcript_id(&self) -> Option<&str> {

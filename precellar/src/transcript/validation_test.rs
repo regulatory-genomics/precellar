@@ -316,13 +316,12 @@ impl IntronValidationTest {
         splice_segments: &crate::transcript::transcriptome::SpliceSegments,
         transcript: &Transcript,
         transcript_id: &str,
-    ) -> Option<(bool, Vec<usize>, Vec<usize>)> {
+    ) -> Option<(bool, Vec<usize>)> {
         let result = splice_segments.annotate_splice(transcript);
 
         if result.is_none() {
             // Debug information removed for cleaner code
         }
-
         result
     }
     
@@ -427,10 +426,7 @@ pub struct ReadClassification {
     pub gene_name: String,
     pub classification: String,  // spliced/unspliced/ambiguous/intergenic
     pub is_spliced: bool,
-    pub has_exons: bool,
-    pub has_introns: bool,
-    pub has_validated_introns: bool,
-    pub has_spanning: bool,
+
 }
 
 impl IntronValidationTest {
@@ -553,12 +549,7 @@ impl IntronValidationTest {
 
         // Determine if the final classification is spliced
         let is_spliced = final_classification == "spliced";
-        
-        // Check various properties across all alignments
-        let has_exons = alignments.iter().any(|alignment| alignment.exon_align.is_some());
-        let has_introns = alignments.iter().any(|alignment| !alignment.intron_mapped.is_empty());
-        let has_validated_introns = alignments.iter().any(|alignment| !alignment.validation_requests.is_empty());
-        let has_spanning = has_validated_introns; // Spanning reads typically have validation requests
+
 
         // For transcript information, we'll use the first alignment's transcript
         // In a more sophisticated implementation, we might want to list all transcripts
@@ -581,10 +572,6 @@ impl IntronValidationTest {
             gene_name,
             classification: final_classification.to_string(),
             is_spliced,
-            has_exons,
-            has_introns,
-            has_validated_introns,
-            has_spanning,
         }
     }
 
@@ -603,7 +590,7 @@ impl IntronValidationTest {
         for classification in classifications {
             writeln!(
                 writer,
-                "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+                "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
                 classification.read_id,
                 classification.chromosome,
                 classification.start,
@@ -615,10 +602,6 @@ impl IntronValidationTest {
                 classification.gene_name,
                 classification.classification,
                 classification.is_spliced,
-                classification.has_exons,
-                classification.has_introns,
-                classification.has_validated_introns,
-                classification.has_spanning
             )?;
         }
 
