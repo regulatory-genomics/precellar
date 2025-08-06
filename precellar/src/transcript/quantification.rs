@@ -23,82 +23,6 @@ use super::{
 
 
 
-/// I use this to collect intron validation information outside
-#[derive(Debug, Clone, Default)]
-pub struct IntronValidationCollector {
-    /// Map of transcript_id -> set of intron indices that need validation
-    pub validation_requests: std::collections::HashMap<String, HashSet<usize>>,
-}
-
-impl IntronValidationCollector {
-    pub fn new() -> Self {
-        Self {
-            validation_requests: std::collections::HashMap::new(),
-        }
-    }
-
-    /// Add a validation request for a specific transcript and intron
-    pub fn add_validation_request(&mut self, transcript_id: String, intron_index: usize) {
-        self.validation_requests
-            .entry(transcript_id)
-            .or_insert_with(HashSet::new)
-            .insert(intron_index);
-    }
-
-
-    /// Get the total number of validation requests
-    pub fn total_requests(&self) -> usize {
-        self.validation_requests.values().map(|set| set.len()).sum()
-    }
-
-    /// Check if there are any validation requests
-    pub fn is_empty(&self) -> bool {
-        self.validation_requests.is_empty()
-    }
-
-    /// Get all validation requests as a vector of (transcript_id, intron_index) pairs
-    pub fn get_all_requests(&self) -> Vec<(String, usize)> {
-        let mut requests = Vec::new();
-        for (transcript_id, intron_indices) in &self.validation_requests {
-            for &intron_index in intron_indices {
-                requests.push((transcript_id.clone(), intron_index));
-            }
-        }
-        requests
-    }
-
-        /// Validate introns in the provided transcripts based on collected requests
-    /// Returns a set of (transcript_id, intron_index) pairs that were validated
-    pub fn validate_introns(&self, transcripts: &mut [crate::transcript::Transcript]) -> HashSet<(String, usize)> {
-        let mut validated_introns = HashSet::new();
-
-        for transcript in transcripts.iter_mut() {
-            if let Some(intron_indices) = self.validation_requests.get(&transcript.id) {
-                for &intron_index in intron_indices {
-                    if transcript.validate_intron(intron_index) {
-                        validated_introns.insert((transcript.id.clone(), intron_index));
-                    } 
-                }
-            }
-        }
-        validated_introns
-    }
-
-    /// Extract validation requests from ALL transcript alignments (both intronic and exonic)
-    /// This aggregates validation information regardless of final alignment classification
-    pub fn extract_validation_requests(alignments: &[TranscriptAlignment]) -> Vec<(String, usize)> {
-        let mut validation_requests = Vec::new();
-        for alignment in alignments {
-            // For exonic alignments, use the transcript ID from exon_align
-            if let Some(transcript_id) = alignment.transcript_id.clone() {
-                for &intron_index in &alignment.validation_requests() {
-                    validation_requests.push((transcript_id.to_string(), intron_index));
-                }
-            }
-        }
-        validation_requests
-    }
-}
 
 
 #[derive(Debug, Encode, Decode)]
@@ -171,7 +95,6 @@ impl Quantifier {
         let mut spliced_count: Vec<u64> = Vec::new();
         let mut unspliced_count: Vec<u64> = Vec::new();
         let mut ambiguous_count: Vec<u64> = Vec::new();
-        let mut validation_collector = IntronValidationCollector::new();
 
         {
             if splice_aware {
@@ -223,45 +146,9 @@ impl Quantifier {
                 (gene_alignments, Vec::new())
             };
 
-            // Process validation requests only if splice_aware is enabled
-            if splice_aware {
-                for (transcript_id, intron_index) in all_validation_requests {
-                    validation_collector.add_validation_request(transcript_id, intron_index);
-                }
-            }
 
-            
-            // Step: Update splice states based on validated introns
-            let mut updated_gene_alignments = gene_alignments;
-            if splice_aware && !validation_collector.is_empty() {
-                // Validate introns based on collected requests
-                let mut transcripts = self.annotator.transcripts().to_vec();
-                let validated_introns = validation_collector.validate_introns(&mut transcripts);
-
-                // Update splice states for alignments that have validated introns
-                updated_gene_alignments = updated_gene_alignments.into_iter().map(|(barcode, mut gene_alignment)| {
-                    // For intronic alignments, check if any introns are validated for this gene
-                    if gene_alignment.splice_state == SpliceState::Ambiguous {
-                        // Check if there are any validated introns for this gene
-                        let gene = &self.genes.get_index(gene_alignment.idx).unwrap().1;
-                        // Check if there are any validated introns for any transcript of this gene
-                        let has_validated_introns = validated_introns.iter()
-                            .any(|(transcript_id, _)| {
-                                // Check if this transcript belongs to the current gene
-                                // We need to find the transcript and check its gene
-                                transcripts.iter().any(|t| &t.id == transcript_id && t.gene.id == gene.id)
-                            });
-
-                        if has_validated_introns {
-                            gene_alignment.splice_state = SpliceState::Unspliced;
-                        }
-                    }
-                    (barcode, gene_alignment)
-                }).collect();
-            }
-            
             let tx_alignments_chunks =
-                sort_alignments(updated_gene_alignments.into_iter(), temp_dir.as_ref(), chunk_size)
+                sort_alignments(gene_alignments.into_iter(), temp_dir.as_ref(), chunk_size)
                     .chunk_by(|x| x.0.clone());
             let tx_alignments_chunks = tx_alignments_chunks
                 .into_iter()
@@ -356,16 +243,6 @@ impl Quantifier {
         adata.set_var(df!(
             "gene_name" => self.genes.values().map(|g| g.name.clone()).collect::<Vec<_>>()
         )?)?;
-
-        
-        // Log validation summary only if splice_aware is enabled
-        if splice_aware && !validation_collector.is_empty() {
-            log::info!(
-                "Collected {} validation requests for {} transcripts",
-                validation_collector.total_requests(),
-                validation_collector.validation_requests.len()
-            );
-        }
 
         adata.close()?;
         Ok(qc)

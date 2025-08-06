@@ -8,7 +8,7 @@ use std::path::Path;
 use anyhow::Result;
 use noodles::sam::{self as sam, Header};
 use noodles::bam;
-use crate::transcript::{AlignmentAnnotator, Transcript, quantification::IntronValidationCollector};
+use crate::transcript::{AlignmentAnnotator, Transcript};
 use crate::align::MultiMapR;
 
 #[cfg(test)]
@@ -17,8 +17,7 @@ use log;
 /// Test structure to extract and output validated intron locations
 #[derive(Debug)]
 pub struct IntronValidationTest {
-    annotator: AlignmentAnnotator,
-    validation_collector: IntronValidationCollector,
+    annotator: AlignmentAnnotator
 }
 
 /// Represents a validated intron with all necessary information
@@ -93,13 +92,11 @@ impl IntronValidationTest {
 
         // Create annotator with the transcripts
         let annotator = AlignmentAnnotator::new(transcripts);
-        let validation_collector = IntronValidationCollector::new();
 
         println!("Loaded {} transcripts from STAR reference", annotator.transcripts().len());
 
         Ok(Self {
             annotator,
-            validation_collector,
         })
     }
 
@@ -109,26 +106,23 @@ impl IntronValidationTest {
 
         let transcripts = Self::load_transcripts_from_gtf(gtf_path)?;
         let annotator = AlignmentAnnotator::new(transcripts);
-        let validation_collector = IntronValidationCollector::new();
+
 
         println!("Loaded {} transcripts from GTF file", annotator.transcripts().len());
 
         Ok(Self {
             annotator,
-            validation_collector,
         })
     }
 
     /// Create a new validation test from a vector of transcripts
     pub fn new_from_transcripts(transcripts: Vec<Transcript>) -> Result<Self> {
         let annotator = AlignmentAnnotator::new(transcripts);
-        let validation_collector = IntronValidationCollector::new();
 
         println!("Loaded {} transcripts", annotator.transcripts().len());
 
         Ok(Self {
             annotator,
-            validation_collector,
         })
     }
 
@@ -332,39 +326,7 @@ impl IntronValidationTest {
         result
     }
     
-    /// Process BAM file and collect validation requests
-    pub fn process_bam_file(&mut self, bam_path: &str) -> Result<()> {
-        let mut reader = File::open(bam_path)
-            .map(bam::io::Reader::new)?;
-        
-        let header = reader.read_header()?;
-        
-        // Process records in batches
-        let mut batch = Vec::new();
-        const BATCH_SIZE: usize = 1000;
-        
-        for result in reader.records() {
-            let record = result?;
-            let record_buf = sam::alignment::RecordBuf::try_from_alignment_record(&header, &record)?;
-            
-            // Convert to MultiMapR format (simplified for this example)
-            if let Some(multi_map) = Self::convert_to_multimap(record_buf) {
-                batch.push(multi_map);
-                
-                if batch.len() >= BATCH_SIZE {
-                    self.process_batch(&header, &batch)?;
-                    batch.clear();
-                }
-            }
-        }
-        
-        // Process remaining records
-        if !batch.is_empty() {
-            self.process_batch(&header, &batch)?;
-        }
-        
-        Ok(())
-    }
+
     
     /// Convert BAM record to MultiMapR (simplified)
     fn convert_to_multimap(record: sam::alignment::RecordBuf) -> Option<MultiMapR> {
@@ -372,52 +334,7 @@ impl IntronValidationTest {
         Some(MultiMapR::new(record, None))
     }
     
-    /// Process a batch of records
-    fn process_batch(&mut self, header: &Header, batch: &[MultiMapR]) -> Result<()> {
-        for record in batch {
-            // Annotate the alignment and collect validation requests
-            if let Some(annotated) = self.annotator.annotate_alignments_se(header, record.clone(), true) {
-                // Extract validation requests from the annotation
-                use crate::transcript::annotate::AnnotatedAlignment;
-                match annotated {
-                                         AnnotatedAlignment::SeMapped(annotation) => {
-                         // Extract validation requests from single-end annotation
-                         for &(ref transcript_id, intron_index) in &annotation.validation_requests {
-                             self.validation_collector.add_validation_request(transcript_id.clone(), intron_index);
-                         }
-                     },
-                     AnnotatedAlignment::PeMapped(a1, a2, _) => {
-                         // Extract validation requests from paired-end annotations
-                         for &(ref transcript_id, intron_index) in &a1.validation_requests {
-                             self.validation_collector.add_validation_request(transcript_id.clone(), intron_index);
-                         }
-                         for &(ref transcript_id, intron_index) in &a2.validation_requests {
-                             self.validation_collector.add_validation_request(transcript_id.clone(), intron_index);
-                         }
-                     }
-                }
-            }
-        }
-        Ok(())
-    }
-    
-    /// Validate collected introns and generate output
-    pub fn validate_and_output(&mut self, output_path: &str) -> Result<()> {
-        // Get all transcripts and validate introns using the existing method
-        let mut transcripts = self.annotator.transcripts();
-        let validated_introns_set = self.validation_collector.validate_introns(&mut transcripts);
-
-        // Convert to detailed intron information
-        let validated_introns = self.extract_validated_intron_details(&transcripts, &validated_introns_set)?;
-
-        // Write to output file
-        self.write_output(&validated_introns, output_path)?;
-
-        println!("Validated intron locations written to: {}", output_path);
-        println!("Total validated introns: {}", validated_introns.len());
-
-        Ok(())
-    }
+ 
     
     /// Extract detailed information for validated introns
     fn extract_validated_intron_details(
@@ -710,51 +627,7 @@ impl IntronValidationTest {
     }
 }
 
-/// Example function to run the validation test with real data
-pub fn run_validation_test(
-    star_reference_path: &str,
-    bam_file_path: &str,
-    output_file_path: &str,
-) -> Result<()> {
-    println!("Starting intron validation test...");
-    println!("STAR reference: {}", star_reference_path);
-    println!("BAM file: {}", bam_file_path);
-    println!("Output file: {}", output_file_path);
 
-    let mut validator = IntronValidationTest::new(star_reference_path)?;
-
-    println!("Processing BAM file...");
-    validator.process_bam_file(bam_file_path)?;
-
-    println!("Validating introns and generating output...");
-    validator.validate_and_output(output_file_path)?;
-
-    println!("Validation test completed successfully!");
-    Ok(())
-}
-
-/// Example function to run the validation test with GTF file
-pub fn run_validation_test_with_gtf(
-    gtf_path: &str,
-    bam_file_path: &str,
-    output_file_path: &str,
-) -> Result<()> {
-    println!("Starting intron validation test with GTF...");
-    println!("GTF file: {}", gtf_path);
-    println!("BAM file: {}", bam_file_path);
-    println!("Output file: {}", output_file_path);
-
-    let mut validator = IntronValidationTest::new_from_gtf(gtf_path)?;
-
-    println!("Processing BAM file...");
-    validator.process_bam_file(bam_file_path)?;
-
-    println!("Validating introns and generating output...");
-    validator.validate_and_output(output_file_path)?;
-
-    println!("Validation test completed successfully!");
-    Ok(())
-}
 
 
 #[cfg(test)]
@@ -765,302 +638,7 @@ mod tests {
     use crate::transcript::transcriptome::{Exons, Introns};
 
     #[test]
-    fn test_intron_validation_with_mock_data() {
-        // Create mock transcripts for testing
-        let mock_transcripts = create_mock_transcripts();
-        let annotator = AlignmentAnnotator::new(mock_transcripts);
-        let mut validation_collector = IntronValidationCollector::new();
 
-        // Add some mock validation requests
-        validation_collector.add_validation_request("ENST00000398216".to_string(), 0);
-        validation_collector.add_validation_request("ENST00000418300".to_string(), 0);
-        validation_collector.add_validation_request("ENST00000629289".to_string(), 5);
-
-        let mut validator = IntronValidationTest {
-            annotator,
-            validation_collector,
-        };
-
-        // Test the validation and output generation
-        let output_file = "test_validated_introns.tsv";
-        validator.validate_and_output(output_file).unwrap();
-
-        // Verify output file was created
-        assert!(Path::new(output_file).exists());
-
-        // Read and verify content
-        let content = std::fs::read_to_string(output_file).unwrap();
-        assert!(content.contains("chromosome\tstart\tend"));
-        assert!(content.contains("validated"));
-
-        // Clean up
-        std::fs::remove_file(output_file).ok();
-    }
-    fn create_mock_transcripts() -> Vec<Transcript> {
-        vec![
-            create_mock_transcript(
-                "ENST00000398216",
-                "ENSG00000241180",
-                "ENSG00000241180",
-                "1",
-                914000,
-                915000,
-                vec![(914000, 914444), (914803, 915000)],
-            ),
-            create_mock_transcript(
-                "ENST00000418300",
-                "ENSG00000242590",
-                "ENSG00000242590",
-                "1",
-                1055000,
-                1056000,
-                vec![(1055000, 1055215), (1055898, 1056000)],
-            ),
-            create_mock_transcript(
-                "ENST00000629289",
-                "ENSG00000248333",
-                "CDK11B",
-                "1",
-                1640000,
-                1660000,
-                vec![
-                    (1640000, 1641000),
-                    (1642000, 1643000),
-                    (1644000, 1645000),
-                    (1645100, 1645508),
-                    (1645773, 1646000),
-                    (1647000, 1648000),
-                    (1649000, 1660000),
-                ],
-            ),
-        ]
-    }
-
-    fn create_mock_transcript(
-        id: &str,
-        gene_id: &str,
-        gene_name: &str,
-        chrom: &str,
-        start: u64,
-        end: u64,
-        exon_coords: Vec<(u64, u64)>,
-    ) -> Transcript {
-        let exons = Exons::new(exon_coords.into_iter()).unwrap();
-        let introns = Introns::new(std::iter::empty()).unwrap();
-
-        let mut transcript = Transcript {
-            id: id.to_string(),
-            chrom: chrom.to_string(),
-            start,
-            end,
-            strand: NoodlesStrand::Forward,
-            gene: Gene {
-                id: gene_id.to_string(),
-                name: gene_name.to_string(),
-            },
-            exons,
-            introns,
-        };
-
-        // Generate introns from exons
-        transcript.make_intron_by_exons();
-        transcript
-    }
-
-    #[test]
-    fn test_gtf_loading() {
-        // Create a mock GTF content for testing
-        let gtf_content = r#"##description: evidence-based annotation of the human genome (GRCh38), version 44 (Ensembl 110)
-##provider: GENCODE
-##format: gtf
-##date: 2023-03-01
-chr1	HAVANA	gene	11869	14409	.	+	.	gene_id "ENSG00000290825"; gene_version "1"; gene_type "lncRNA"; gene_name "DDX11L2"; level 2; tag "overlaps_pseudogene";
-chr1	HAVANA	transcript	11869	14409	.	+	.	gene_id "ENSG00000290825"; gene_version "1"; transcript_id "ENST00000456328"; transcript_version "2"; gene_type "lncRNA"; gene_name "DDX11L2"; transcript_type "lncRNA"; transcript_name "DDX11L2-202"; level 2; transcript_support_level "1"; tag "basic"; tag "Ensembl_canonical"; havana_transcript "OTTHUMT00000362751.1";
-chr1	HAVANA	exon	11869	12227	.	+	.	gene_id "ENSG00000290825"; gene_version "1"; transcript_id "ENST00000456328"; transcript_version "2"; gene_type "lncRNA"; gene_name "DDX11L2"; transcript_type "lncRNA"; transcript_name "DDX11L2-202"; exon_number 1; exon_id "ENSE00002234944"; exon_version "1"; level 2; transcript_support_level "1"; tag "basic"; tag "Ensembl_canonical"; havana_transcript "OTTHUMT00000362751.1";
-chr1	HAVANA	exon	12613	12721	.	+	.	gene_id "ENSG00000290825"; gene_version "1"; transcript_id "ENST00000456328"; transcript_version "2"; gene_type "lncRNA"; gene_name "DDX11L2"; transcript_type "lncRNA"; transcript_name "DDX11L2-202"; exon_number 2; exon_id "ENSE00003582793"; exon_version "1"; level 2; transcript_support_level "1"; tag "basic"; tag "Ensembl_canonical"; havana_transcript "OTTHUMT00000362751.1";
-chr1	HAVANA	exon	13221	14409	.	+	.	gene_id "ENSG00000290825"; gene_version "1"; transcript_id "ENST00000456328"; transcript_version "2"; gene_type "lncRNA"; gene_name "DDX11L2"; transcript_type "lncRNA"; transcript_name "DDX11L2-202"; exon_number 3; exon_id "ENSE00002312635"; exon_version "1"; level 2; transcript_support_level "1"; tag "basic"; tag "Ensembl_canonical"; havana_transcript "OTTHUMT00000362751.1";
-chr1	HAVANA	gene	29554	31109	.	+	.	gene_id "ENSG00000243485"; gene_version "5"; gene_type "lncRNA"; gene_name "MIR1302-2HG"; level 2; hgnc_id "HGNC:52482"; tag "ncRNA_host"; havana_gene "OTTHUMG00000000959.2";
-chr1	HAVANA	transcript	29554	31097	.	+	.	gene_id "ENSG00000243485"; gene_version "5"; transcript_id "ENST00000473358"; transcript_version "1"; gene_type "lncRNA"; gene_name "MIR1302-2HG"; transcript_type "lncRNA"; transcript_name "MIR1302-2HG-202"; level 2; transcript_support_level "5"; hgnc_id "HGNC:52482"; tag "not_best_in_genome_evidence"; tag "dotter_confirmed"; tag "basic"; tag "Ensembl_canonical"; havana_gene "OTTHUMG00000000959.2"; havana_transcript "OTTHUMT00000002840.1";
-chr1	HAVANA	exon	29554	30039	.	+	.	gene_id "ENSG00000243485"; gene_version "5"; transcript_id "ENST00000473358"; transcript_version "1"; gene_type "lncRNA"; gene_name "MIR1302-2HG"; transcript_type "lncRNA"; transcript_name "MIR1302-2HG-202"; exon_number 1; exon_id "ENSE00001947070"; exon_version "1"; level 2; transcript_support_level "5"; hgnc_id "HGNC:52482"; tag "not_best_in_genome_evidence"; tag "dotter_confirmed"; tag "basic"; tag "Ensembl_canonical"; havana_gene "OTTHUMG00000000959.2"; havana_transcript "OTTHUMT00000002840.1";
-chr1	HAVANA	exon	30564	31097	.	+	.	gene_id "ENSG00000243485"; gene_version "5"; transcript_id "ENST00000473358"; transcript_version "1"; gene_type "lncRNA"; gene_name "MIR1302-2HG"; transcript_type "lncRNA"; transcript_name "MIR1302-2HG-202"; exon_number 2; exon_id "ENSE00001922571"; exon_version "1"; level 2; transcript_support_level "5"; hgnc_id "HGNC:52482"; tag "not_best_in_genome_evidence"; tag "dotter_confirmed"; tag "basic"; tag "Ensembl_canonical"; havana_gene "OTTHUMG00000000959.2"; havana_transcript "OTTHUMT00000002840.1";
-"#;
-
-        // Write mock GTF to a temporary file
-        let temp_gtf_path = "test_mock.gtf";
-        std::fs::write(temp_gtf_path, gtf_content).unwrap();
-
-        // Test GTF loading
-        let result = IntronValidationTest::new_from_gtf(temp_gtf_path);
-
-        match result {
-            Ok(validator) => {
-                let transcripts = validator.annotator.transcripts();
-                println!("Successfully loaded {} transcripts from GTF", transcripts.len());
-
-                // Verify we loaded the expected transcripts
-                assert_eq!(transcripts.len(), 2);
-                // Debug: Print actual transcript IDs
-                println!("Loaded transcript IDs:");
-                for transcript in transcripts.iter() {
-                    println!("  - {}", transcript.id);
-                }
-                // Check first transcript (DDX11L2)
-                let ddx11l2 = transcripts.iter().find(|t| t.id == "ENST00000456328").unwrap();
-                assert_eq!(ddx11l2.gene.name, "DDX11L2");
-                assert_eq!(ddx11l2.chrom, "chr1");
-                assert_eq!(ddx11l2.start, 11868); // 0-based
-                assert_eq!(ddx11l2.end, 14409);
-                assert_eq!(ddx11l2.exons().len(), 3);
-
-                // Check that introns were generated
-                let introns = ddx11l2.introns();
-                assert_eq!(introns.len(), 2); // 3 exons = 2 introns
-
-                // Check intron coordinates
-                assert_eq!(introns[0].start(), 12228); // End of first exon
-                assert_eq!(introns[0].end(), 12611); // Start of second exon - 1
-                assert_eq!(introns[1].start(), 12722); // End of second exon
-                assert_eq!(introns[1].end(), 13219); // Start of third exon - 1
-
-                // Check second transcript (MIR1302-2HG)
-                let mir1302 = transcripts.iter().find(|t| t.id == "ENST00000473358").unwrap();
-                assert_eq!(mir1302.gene.name, "MIR1302-2HG");
-                assert_eq!(mir1302.exons().len(), 2);
-                assert_eq!(mir1302.introns().len(), 1); // 2 exons = 1 intron
-
-                println!("✅ GTF loading test passed!");
-
-                // Test validation functionality with GTF-loaded transcripts
-                let mut validation_collector = IntronValidationCollector::new();
-                validation_collector.add_validation_request("ENST00000456328".to_string(), 0);
-                validation_collector.add_validation_request("ENST00000473358".to_string(), 0);
-
-                let mut transcripts_mut = transcripts;
-                let validated_introns = validation_collector.validate_introns(&mut transcripts_mut);
-
-                println!("Validated {} introns", validated_introns.len());
-
-                // Test output generation
-                let output_file = "test_gtf_validated_introns.tsv";
-                write_validated_introns_to_file(&transcripts_mut, &validated_introns, output_file).unwrap();
-
-                // Verify output file
-                assert!(Path::new(output_file).exists());
-                let content = std::fs::read_to_string(output_file).unwrap();
-                println!("GTF validation output:\n{}", content);
-
-                // Clean up
-                std::fs::remove_file(output_file).ok();
-
-                println!("✅ GTF validation workflow test passed!");
-            },
-            Err(e) => {
-                panic!("Failed to load GTF: {:?}", e);
-            }
-        }
-
-        // Clean up
-        std::fs::remove_file(temp_gtf_path).ok();
-    }
-
-    /// Helper function to write validated introns to file
-    fn write_validated_introns_to_file(
-        transcripts: &[Transcript],
-        validated_set: &HashSet<(String, usize)>,
-        output_path: &str,
-    ) -> Result<()> {
-        let file = File::create(output_path)?;
-        let mut writer = BufWriter::new(file);
-
-        // Write header
-        writeln!(writer, "chromosome\tstart\tend\tstrand\tgene_id\tgene_name\ttranscript_id\ttranscript_name\tintron_number\tlength\tvalidation_status")?;
-
-        let mut validated_introns = Vec::new();
-
-        for transcript in transcripts {
-            let introns = transcript.introns();
-
-            for (intron_idx, intron) in introns.iter().enumerate() {
-                if validated_set.contains(&(transcript.id.clone(), intron_idx)) {
-                    validated_introns.push((
-                        transcript.chrom.clone(),
-                        intron.start(),
-                        intron.end(),
-                        match transcript.strand {
-                            noodles::sam::record::data::field::value::base_modifications::group::Strand::Forward => "+",
-                            noodles::sam::record::data::field::value::base_modifications::group::Strand::Reverse => "-",
-                        },
-                        transcript.gene.id.clone(),
-                        transcript.gene.name.clone(),
-                        transcript.id.clone(),
-                        transcript.id.clone(),
-                        intron_idx + 1,
-                        intron.end() - intron.start(),
-                    ));
-                }
-            }
-        }
-
-        // Sort by chromosome, then by start position
-        validated_introns.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
-
-        // Write data
-        for (chrom, start, end, strand, gene_id, gene_name, tx_id, tx_name, intron_num, length) in validated_introns {
-            writeln!(
-                writer,
-                "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\tvalidated",
-                chrom, start, end, strand, gene_id, gene_name, tx_id, tx_name, intron_num, length
-            )?;
-        }
-
-        writer.flush()?;
-        Ok(())
-    }
-
-    #[test]
-    fn test_real_gtf_if_available() {
-        // Test with real GTF file if available
-        let gtf_path = "/data2/litian/database/gtf/small_subset_genes.gtf";
-        let bam_file = "/data2/litian/202506_trajectory/data/velocyto_toy/test_small_200.bam";
-        let output_file = "/data2/litian/202506_trajectory/process/20250803_velocity_validation/validated_introns_gtf.tsv";
-
-        if Path::new(gtf_path).exists() && Path::new(bam_file).exists() {
-            println!("Running test with real GTF data...");
-
-            let result = std::panic::catch_unwind(|| -> Result<()> {
-                // Limit to 100 transcripts for testing to avoid long processing times
-                let transcripts = IntronValidationTest::load_transcripts_from_gtf_with_limit(gtf_path, Some(10000000))?;
-                let mut validator = IntronValidationTest::new_from_transcripts(transcripts)?;
-                validator.process_bam_file(bam_file)?;
-                validator.validate_and_output(output_file)?;
-                Ok(())
-            });
-
-            match result {
-                Ok(Ok(_)) => {
-                    // Verify output
-                    assert!(Path::new(output_file).exists());
-                    let content = std::fs::read_to_string(output_file).unwrap();
-                    println!("Real GTF output preview:\n{}", &content[..content.len().min(500)]);
-
-                    println!("✅ Real GTF test completed successfully!");
-                },
-                Ok(Err(e)) => {
-                    eprintln!("Real GTF test failed with error: {:?}", e);
-                    println!("Skipping real GTF test due to errors");
-                },
-                Err(_) => {
-                    eprintln!("Real GTF test panicked");
-                    println!("Skipping real GTF test due to panic");
-                }
-            }
-        } else {
-            println!("Skipping real GTF test - files not found");
-            println!("To run with real data, ensure these paths exist:");
-            println!("  GTF file: {}", gtf_path);
-            println!("  BAM file: {}", bam_file);
-        }
-    }
 
 
     #[test]

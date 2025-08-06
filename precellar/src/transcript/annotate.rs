@@ -14,7 +14,6 @@ use noodles::sam::alignment::record_buf::RecordBuf;
 use noodles::sam::record::data::field::value::base_modifications::group::Strand;
 use std::cmp;
 use std::collections::{BTreeMap, HashSet};
-use log::debug;
 
 #[derive(Eq, PartialEq, Debug)]
 pub struct Annotation {

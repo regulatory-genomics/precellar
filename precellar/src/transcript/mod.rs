@@ -10,4 +10,4 @@ pub use transcriptome::{Transcript, Gene, SpliceSegments, Exon, Exons, Intron, I
 pub use annotate::{AlignmentAnnotator, AnnotatedAlignment};
 
 #[cfg(test)]
-pub use validation_test::{IntronValidationTest, ValidatedIntron, run_validation_test};
+pub use validation_test::{IntronValidationTest, ValidatedIntron};
