@@ -312,17 +312,30 @@ impl SpliceSegments {
 
     /// Determine if the read aligns to exonic regions of a transcript. A read is considered exonic
     /// if it aligns to all exons with at least `min_overlap_frac` overlap.
-    pub fn is_exonic(&self, transcript: &Transcript, min_overlap_frac: f64) -> bool {
-        self.segments.iter().all(|segment| {
-            // find first exon that ends to the right of the segment start
-            let idx = transcript
-                .exons()
-                .binary_search_by_key(&segment.start, |ex| ex.end - 1)
-                .unwrap_or_else(std::convert::identity);
-            transcript.exons().get(idx).map_or(false, |exon| {
-                get_overlap(segment.start, segment.end, exon.start, exon.end) >= min_overlap_frac
+    pub fn is_exonic(&self, transcript: &Transcript, min_overlap_frac: f64,is_any : bool) -> bool {
+        if is_any {
+            self.segments.iter().any(|segment| {
+                // find first exon that ends to the right of the segment start
+                let idx = transcript
+                    .exons()
+                    .binary_search_by_key(&segment.start, |ex| ex.end - 1)
+                    .unwrap_or_else(std::convert::identity);
+                transcript.exons().get(idx).map_or(false, |exon| {
+                    get_overlap(segment.start, segment.end, exon.start, exon.end) >= min_overlap_frac
+                })
             })
-        })
+        } else {
+            self.segments.iter().all(|segment| {
+                // find first exon that ends to the right of the segment start
+                let idx = transcript
+                    .exons()
+                    .binary_search_by_key(&segment.start, |ex| ex.end - 1)
+                    .unwrap_or_else(std::convert::identity);
+                transcript.exons().get(idx).map_or(false, |exon| {
+                    get_overlap(segment.start, segment.end, exon.start, exon.end) >= min_overlap_frac
+                })
+            })
+        }
     }
 
     /// Align to a transcript. Returns the aligned cigar and the number of aligned bases.
@@ -357,18 +370,8 @@ impl SpliceSegments {
         let mut intron_mapped = Vec::new();
         
         let introns = transcript.introns();
-        
-        dbg!(format!(
-            "Starting splice annotation for transcript {} with {} segments and {} introns", 
-            transcript.id, self.segments.len(), introns.len()
-        ));
 
         for (seg_idx, current_segment) in self.segments.iter().enumerate() {
-            dbg!(format!(
-                "Processing segment {}: {}..{}", 
-                seg_idx, current_segment.start, current_segment.end
-            ));
-            
             // Handle the case where find_exons returns None gracefully
             let (ex_start, ex_end) = match find_exons(
                 &transcript.exons(),
@@ -378,78 +381,44 @@ impl SpliceSegments {
                 0,
                 true,
             ) {
-                Some(result) => {
-                    dbg!(format!(
-                        "Found exons for segment {}: ex_start={}, ex_end={}", 
-                        seg_idx, result.0, result.1
-                    ));
-                    result
-                },
+                Some(result) => result,
                 None => {
-                    dbg!(format!("No exons found for segment {}, skipping", seg_idx));
                     // Skip this segment if find_exons fails (e.g., due to overhang or no overlap)
                     continue;
                 }
             };
             
             if introns.is_empty() {
-                dbg!(format!("No introns in transcript, continuing to next segment"));
                 continue;
             }
             
             let start_idx = ex_start.saturating_sub(1);
             let end_idx = std::cmp::min(ex_end + 1, introns.len() - 1);
             
-            dbg!(format!(
-                "Checking introns from index {} to {} for segment {}", 
-                start_idx, end_idx, seg_idx
-            ));
-            
             if start_idx <= end_idx {
                 let start_idx = ex_start.saturating_sub(1);
                 let end_idx = std::cmp::min(ex_end + 1, introns.len().saturating_sub(1));
                 let intron_selected = &introns[start_idx..=end_idx];
-                
-                dbg!(format!("Selected {} introns for analysis", intron_selected.len()));
                 
                 for (intron_idx, intron) in intron_selected.iter().enumerate() {
                     let intron_start = intron.start;
                     let intron_end = intron.end;
                     let global_intron_idx = intron_idx + start_idx as usize;
                     
-                    dbg!(format!(
-                        "Checking intron {} (global {}): {}..{} against segment {}..{}", 
-                        intron_idx, global_intron_idx, intron_start, intron_end, 
-                        current_segment.start, current_segment.end
-                    ));
-                    
                     // Check if segment spans intron boundaries
                     if (intron_start > current_segment.start && intron_start < current_segment.end) || 
                        (intron_end > current_segment.start && intron_end < current_segment.end) {
-                        dbg!(format!(
-                            "Segment {} spans intron {} boundaries - adding to validation requests", 
-                            seg_idx, global_intron_idx
-                        ));
                         validation_requests.push(global_intron_idx);
                         has_spanning = true;
                     }
                     
                     // Check for overlap using efficient comparison
                     if intron_start < current_segment.end && intron_end > current_segment.start {
-                        dbg!(format!(
-                            "Segment {} overlaps with intron {} - adding to intron_mapped", 
-                            seg_idx, global_intron_idx
-                        ));
                         intron_mapped.push(global_intron_idx);
                     }
                 }
             }
         }
-        
-        dbg!(format!(
-            "Splice annotation complete: has_spanning={}, validation_requests={:?}, intron_mapped={:?}", 
-            has_spanning, validation_requests, intron_mapped
-        ));
         
         Some((has_spanning, validation_requests, intron_mapped))
     }

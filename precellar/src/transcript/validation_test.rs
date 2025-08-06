@@ -568,95 +568,23 @@ impl IntronValidationTest {
                 // Extract transcript alignments from the annotated alignment
                 use crate::transcript::annotate::AnnotatedAlignment;
                 match annotated_alignment {
-                    AnnotatedAlignment::SeMapped(mut annotation) => {
-                        // Step: Update splice states based on validated introns (similar to quantification.rs)
-                        if !self.validation_collector.is_empty() {
-                            // Get validated introns
-                            let mut transcripts = self.annotator.transcripts();
-                            let validated_introns = self.validation_collector.validate_introns(&mut transcripts);
+                    AnnotatedAlignment::SeMapped(annotation) => {
+                        // Use the classification result directly from annotate_alignments_se
+                        let final_classification = match annotation.splice_state {
+                            crate::transcript::annotate::SpliceState::Spliced => "spliced",
+                            crate::transcript::annotate::SpliceState::Unspliced => "unspliced",
+                            crate::transcript::annotate::SpliceState::Ambiguous => "ambiguous",
+                            crate::transcript::annotate::SpliceState::Intergenic => "intergenic",
+                            crate::transcript::annotate::SpliceState::Undetermined => "undetermined",
+                        };
 
-                            // Update splice states for alignments that have validated introns
-                            // Process both sense and antisense alignments
-                            for transcript_alignment in &mut annotation.aln_sense {
-                                // For ambiguous alignments, check if any introns are validated for this transcript
-                                if transcript_alignment.splice_state == crate::transcript::annotate::SpliceState::Ambiguous {
-                                    // Check if there are any validated introns for this gene
-                                    let gene_id = &transcript_alignment.gene.id;
-                                    let has_validated_introns = validated_introns.iter()
-                                        .any(|(validated_transcript_id, _)| validated_transcript_id.contains(gene_id));
-
-                                    if has_validated_introns {
-                                        transcript_alignment.splice_state = crate::transcript::annotate::SpliceState::Unspliced;
-                                    }
-                                }
-                            }
-
-                            for transcript_alignment in &mut annotation.aln_antisense {
-                                // For ambiguous alignments, check if any introns are validated for this transcript
-                                if transcript_alignment.splice_state == crate::transcript::annotate::SpliceState::Ambiguous {
-                                    // Check if there are any validated introns for this gene
-                                    let gene_id = &transcript_alignment.gene.id;
-                                    let has_validated_introns = validated_introns.iter()
-                                        .any(|(validated_transcript_id, _)| validated_transcript_id.contains(gene_id));
-
-                                    if has_validated_introns {
-                                        transcript_alignment.splice_state = crate::transcript::annotate::SpliceState::Unspliced;
-                                        println!("Debug: Updated antisense alignment for gene {} from Ambiguous to Unspliced", gene_id);
-                                    }
-                                }
-                            }
-                        }
-
-                        // Aggregate classifications for reads with multiple alignments
-                        // If any alignment is unspliced, final classification is unspliced
-                        // Otherwise, if any alignment is spliced, final classification is spliced
+                        // Get all alignments for detailed classification
                         let mut all_alignments = Vec::new();
                         all_alignments.extend(&annotation.aln_sense);
                         all_alignments.extend(&annotation.aln_antisense);
 
                         if !all_alignments.is_empty() {
-                            // Debug: Log splice states of all alignments
-                            for (i, alignment) in all_alignments.iter().enumerate() {
-                                println!("Debug: Alignment {} - Gene: {}, Transcript: {:?}, Splice state: {:?}, Exon align: {}, Intron mapped: {}", 
-                                        i, 
-                                        alignment.gene.id, 
-                                        alignment.transcript_id, 
-                                        alignment.splice_state,
-                                        alignment.exon_align.is_some(),
-                                        alignment.intron_mapped.len());
-                            }
-
-                            // Check if any alignment is unspliced
-                            let has_unspliced = all_alignments.iter().any(|alignment| {
-                                matches!(alignment.splice_state, crate::transcript::annotate::SpliceState::Unspliced)
-                            });
-                            
-                            // Check if any alignment is spliced
-                            let has_spliced = all_alignments.iter().any(|alignment| {
-                                matches!(alignment.splice_state, crate::transcript::annotate::SpliceState::Spliced)
-                            });
-
-                            println!("Debug: Read {} - has_unspliced: {}, has_spliced: {}", 
-                                    read_id, has_unspliced, has_spliced);
-
-                            // Determine final classification based on aggregation rules
-                            let final_classification = if has_unspliced {
-                                "unspliced"
-                            } else if has_spliced {
-                                "spliced"
-                            } else {
-                                // If neither spliced nor unspliced, use the first alignment's classification
-                                match all_alignments[0].splice_state {
-                                    crate::transcript::annotate::SpliceState::Ambiguous => "ambiguous",
-                                    crate::transcript::annotate::SpliceState::Intergenic => "intergenic",
-                                    crate::transcript::annotate::SpliceState::Undetermined => "undetermined",
-                                    _ => "undetermined"
-                                }
-                            };
-
-                            println!("Debug: Read {} - final classification: {}", read_id, final_classification);
-
-                            // Create a single classification for the read using the aggregated result
+                            // Create a single classification for the read using the result from annotate_alignments_se
                             let classification = self.classify_aggregated_alignment(
                                 &read_id,
                                 &chromosome,
@@ -1138,7 +1066,7 @@ chr1	HAVANA	exon	30564	31097	.	+	.	gene_id "ENSG00000243485"; gene_version "5"; 
     #[test]
     fn test_read_classification() {
         // Test read classification functionality
-        let gtf_path = "/data2/litian/database/gtf/small_subset_genes3.gtf";
+        let gtf_path = "/data2/litian/database/gtf/small_subset_genes2.gtf";
         let bam_file = "/data2/litian/202506_trajectory/data/velocyto_toy/test_small_200.bam";
         let output_file = "/data2/litian/202506_trajectory/process/20250803_velocity_validation/20250805_read_classifications.tsv";
 
