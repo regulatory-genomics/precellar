@@ -511,7 +511,7 @@ impl FastqAnnotator {
                 }
             } else if segment.contains_target() {
                 if read1.is_some() || read2.is_some() {
-                    panic!("Both Read1 and Read2 are set");
+                    panic!("Multiple target regions found in one fastq record!");
                 } else {
                     let fq = segment.into_fq(record.definition());
                     // TODO: polyA and adapter trimming
