@@ -318,10 +318,7 @@ impl MDKind {
         }
         if s[0] == b'^' {
             // Deletion
-            let mut l = 0;
-            while 1 + l < s.len() && s[1 + l].is_ascii_alphabetic() {
-                l += 1;
-            }
+            let l = s[1..].iter().take_while(|&&c| c.is_ascii_alphabetic()).count() + 1;
             if l == 0 {
                 bail!("Invalid MD tag: Deletion without bases");
             } else {
