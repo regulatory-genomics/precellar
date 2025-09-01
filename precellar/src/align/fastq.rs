@@ -190,6 +190,7 @@ impl FastqProcessor {
     }
 }
 
+/// Iterator that yields alignment results from annotated FASTQ reads with QC metrics.
 pub struct AlignmentResult<'a, A> {
     aligner: &'a mut A,
     pub fastq_reader: AnnotatedFastqReaders,
@@ -198,11 +199,15 @@ pub struct AlignmentResult<'a, A> {
     num_threads: u16,
 }
 
+/// Implement the Iterator trait for AlignmentResult.
+/// The alignment results are yielded as a tuple of two MultiMapR.
+/// If the read is unpaired, the second element is None.
 impl<'a, A: Aligner> Iterator for AlignmentResult<'a, A> {
     type Item = Vec<(Option<MultiMapR>, Option<MultiMapR>)>;
     fn next(&mut self) -> Option<Self::Item> {
         let data = self.fastq_reader.next()?;
 
+        // Align the reads.
         let results: Vec<_> = self.aligner.align_reads(self.num_threads, data);
         let mut qc = self.qc.lock().unwrap();
         results.iter().for_each(|ali| match ali {
@@ -472,6 +477,7 @@ impl FastqAnnotator {
         }
     }
 
+    /// Annotate a single fastq record.
     fn annotate(&self, record: &fastq::Record) -> Result<AnnotatedFastq, SplitError> {
         let mut barcode: Option<Barcode> = None;
         let mut umi = None;
@@ -511,7 +517,7 @@ impl FastqAnnotator {
                 }
             } else if segment.contains_target() {
                 if read1.is_some() || read2.is_some() {
-                    panic!("Both Read1 and Read2 are set");
+                    panic!("Multiple target regions found in one fastq record!");
                 } else {
                     let fq = segment.into_fq(record.definition());
                     // TODO: polyA and adapter trimming

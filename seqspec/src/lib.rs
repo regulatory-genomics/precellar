@@ -23,6 +23,7 @@ use std::{
     sync::{Arc, RwLock},
 };
 
+/// Assay struct contains the information parsed from the sequence spec YAML file
 #[derive(Deserialize, Serialize, Debug, Clone, PartialEq)]
 pub struct Assay {
     #[serde(skip, default)]
@@ -402,7 +403,7 @@ impl Assay {
         Ok(())
     }
 
-    /// Get the index of atomic regions of each read in the sequence spec.
+    /// Get the index of atomic regions contained within each read in the sequence spec.
     pub fn get_segments_by_modality(
         &self,
         modality: Modality,
