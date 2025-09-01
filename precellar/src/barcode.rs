@@ -239,6 +239,7 @@ fn update_best_option<'a>(
     }
 }
 
+/// A whitelist manager that handles barcode validation, counting, and prediction.
 #[derive(Debug, Clone)]
 pub struct Whitelist {
     whitelist_exists: bool,
@@ -291,6 +292,8 @@ impl Whitelist {
         self.total_count += 1;
     }
 
+    /// When there should be a whitelist (SequenceType::Onlist), but it does not exist,
+    /// predict the whitelist from the barcode counts using the OrdMag algorithm.
     pub fn predict_whitelist(&mut self) {
         if !self.whitelist_exists && !self.barcode_counts.is_empty() {
             info!("Predicting whitelist from {} barcode ...", self.barcode_counts.len());
@@ -508,6 +511,8 @@ fn get_empty_drops_range(
     (n_partitions / 2, n_partitions)
 }
 
+/// Use the OrdMag algorithm to compute the threshold for the whitelist prediction,
+/// where UMI counts are above the threshold are considered as cells (i.e., belongs to the whitelist).
 fn compute_cell_filter_threshold(counts: &[usize]) -> usize {
     let nonzero_counts: Vec<_> = counts
         .iter()
