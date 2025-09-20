@@ -367,7 +367,7 @@ impl AnnotatedFastqReader {
                 panic!("Unequal number of reads in the chunk");
             } else {
                 assert!(
-                    records.iter().map(|r| r.name()).all_equal(),
+                    records.iter().map(|r| get_read_name(r)).all_equal(),
                     "read names mismatch"
                 );
                 self.chunk.push(records);
@@ -620,6 +620,14 @@ pub fn extend_fastq_record(this: &mut fastq::Record, other: &fastq::Record) {
     this.sequence_mut().extend_from_slice(other.sequence());
     this.quality_scores_mut()
         .extend_from_slice(other.quality_scores());
+}
+
+/// Get the read name from a Fastq record, stripping any /1 or /2 suffix.
+fn get_read_name(record: &fastq::Record) -> String {
+    let name = record.name().to_string();
+    name.strip_suffix("/1")
+        .or_else(|| name.strip_suffix("/2"))
+        .map(|x| x.to_owned()).unwrap_or(name)
 }
 
 pub struct NameCollatedRecords<'a, R> {
