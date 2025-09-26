@@ -23,6 +23,9 @@ pub struct Annotation {
     pub region: AnnotationRegion,
     pub rescued: bool,
     pub chrom: String,
+    pub splice_state: SpliceState,
+    pub intron_mapping: std::collections::HashMap<String, std::collections::HashSet<usize>>,
+    pub is_any_exon: Vec<bool>,
 }
 
 /// Represents an annotated BAM record.
@@ -95,6 +98,7 @@ impl AlignmentAnnotator {
         }
     }
 
+    
     /// Annotate the alignments by mapping them to the transcriptome. If multiple
     /// alignments are present, we will try to find the confident ones and promote
     /// them to primary. A read may align to multiple transcripts and genes, but
@@ -108,10 +112,11 @@ impl AlignmentAnnotator {
         &self,
         header: &sam::Header,
         rec: MultiMapR,
+        splice_aware: bool,
     ) -> Option<AnnotatedAlignment> {
         let results = rec
             .iter()
-            .filter_map(|rec| self.annotate_alignment_se(header, rec))
+            .filter_map(|rec| self.annotate_alignment_se(header, rec,splice_aware))
             .collect::<Vec<_>>();
         rescue_alignments_se(results)
     }
@@ -127,22 +132,23 @@ impl AlignmentAnnotator {
         header: &sam::Header,
         rec1: MultiMapR,
         rec2: MultiMapR,
+        splice_aware: bool,
     ) -> Option<AnnotatedAlignment> {
         let _pair_improper = rec1.len() != rec2.len();
         let result: Vec<_> = rec1
             .iter()
             .zip(rec2.iter())
-            .filter_map(|(r1, r2)| self.annotate_alignment_pe(header, r1, r2))
+            .filter_map(|(r1, r2)| self.annotate_alignment_pe(header, r1, r2,splice_aware))
             .collect();
         rescue_alignments_pe(result)
     }
 
     /// Annotates a single-end alignment record.
-    fn annotate_alignment_se(&self, header: &sam::Header, rec: &RecordBuf) -> Option<AnnotatedAlignment> {
+    fn annotate_alignment_se(&self, header: &sam::Header, rec: &RecordBuf,splice_aware: bool) -> Option<AnnotatedAlignment> {
         if rec.flags().is_unmapped() {
             None
         } else {
-            let anno = self.annotate_alignment(header, rec).unwrap();
+            let anno = self.annotate_alignment(header, rec, splice_aware).unwrap();
             Some(AnnotatedAlignment::SeMapped(anno))
         }
     }
@@ -153,20 +159,21 @@ impl AlignmentAnnotator {
         header: &sam::Header,
         rec1: &RecordBuf,
         rec2: &RecordBuf,
+        splice_aware: bool,
     ) -> Option<AnnotatedAlignment> {
         // STAR _shouldn't_ return pairs where only a single end is mapped,
         //   but if it does, consider the pair unmapped
         if rec1.flags().is_unmapped() || rec2.flags().is_unmapped() {
             None
         } else {
-            let anno1 = self.annotate_alignment(header, rec1).unwrap();
-            let anno2 = self.annotate_alignment(header, rec2).unwrap();
+            let anno1 = self.annotate_alignment(header, rec1,splice_aware).unwrap();
+            let anno2 = self.annotate_alignment(header, rec2,splice_aware).unwrap();
             let annop = PairAnnotationData::from_pair(&anno1, &anno2);
             Some(AnnotatedAlignment::PeMapped(anno1, anno2, annop))
         }
     }
 
-    fn annotate_alignment(&self, header: &sam::Header, read: &RecordBuf) -> Result<Annotation> {
+    fn annotate_alignment(&self, header: &sam::Header, read: &RecordBuf,splice_aware: bool) -> Result<Annotation> {
         ensure!(
             !read.flags().is_unmapped(),
             "Unmapped alignments cannot be annotated"
@@ -179,20 +186,66 @@ impl AlignmentAnnotator {
             read.alignment_start().unwrap().get() as u64,
             read.alignment_end().unwrap().get() as u64,
         );
+        
+        // Print read information
+        println!("Read information:");
+        println!("  Chromosome: {}", chrom);
+        println!("  Alignment start: {}", read.alignment_start().unwrap().get());
+        println!("  Alignment end: {}", read.alignment_end().unwrap().get());
+        
+        // Find overlapping transcripts and print transcriptome information
+        let overlapping_transcripts: Vec<_> = self.transcripts.find(&region).collect();
+        println!("Transcriptome information:");
+        println!("  Found {} overlapping transcripts", overlapping_transcripts.len());
+
+        
         let alignments = self
             .transcripts
             .find(&region)
-            .flat_map(|(_, transcript)| self.align_to_transcript(read, transcript))
+            .flat_map(|(_, transcript)| self.align_to_transcript(read, transcript, splice_aware))
             .collect::<Vec<_>>();
 
         let mut seen_genes = HashSet::new();
-        let mut transcripts = BTreeMap::new();
-        let mut antisense = BTreeMap::new();
-        let annotation_region;
-        if alignments.is_empty() {
-            annotation_region = AnnotationRegion::Intergenic;
+        let mut transcripts = BTreeMap::<String, TranscriptAlignment>::new();
+        let mut antisense = BTreeMap::<String, TranscriptAlignment>::new();
+        
+        // Collect aggregated information from all alignments BEFORE moving them
+        let mut all_splice_states = Vec::new();
+        let mut intron_mapping = std::collections::HashMap::new();
+        let mut is_any_exon = Vec::new();
+        let mut model = Vec::new();
+        #[derive(Debug, Clone, PartialEq)]
+        enum Model {
+            HasOnlyIntron,
+            HasMixedModel,
+            HasOnlyExon,
+        }
+
+        if splice_aware {
+            // Collect from all alignments before they are moved
+            for aln in &alignments {
+                all_splice_states.push(aln.splice_state());
+                for &intron_idx in &aln.intron_mapped {
+                    let id = aln.transcript_id.clone().unwrap();
+                    intron_mapping.entry(id)
+                        .or_insert_with(std::collections::HashSet::new)
+                        .insert(intron_idx);
+                }
+                is_any_exon.push(aln.is_any_exon);
+                if aln.splice_state == SpliceState::Spliced {
+                    model.push(Model::HasOnlyExon);
+                } else if aln.is_any_exon == false {
+                    model.push(Model::HasOnlyIntron);
+                } else {
+                    model.push(Model::HasMixedModel);
+                }
+            }
+        }
+
+        // Determine annotation region and process alignments
+        let annotation_region = if alignments.is_empty() {
+            AnnotationRegion::Intergenic
         } else if alignments.iter().any(|x| x.is_exonic()) {
-            annotation_region = AnnotationRegion::Exonic;
             // Check if there are transcriptome compatible alignments
             alignments.into_iter().rev().for_each(|aln| {
                 if let Some(tx_align) = &aln.exon_align {
@@ -209,21 +262,46 @@ impl AlignmentAnnotator {
                     }
                 }
             });
+            AnnotationRegion::Exonic
         } else {
-            annotation_region = AnnotationRegion::Intronic;
             alignments
                 .into_iter()
                 .rev()
                 .for_each(|aln| match aln.strand {
                     Strand::Forward => {
                         seen_genes.insert(aln.gene.clone());
-                        transcripts.insert(aln.gene.id.clone(), aln);
+                        transcripts.insert(aln.transcript_id.clone().unwrap(), aln);
                     }
                     Strand::Reverse => {
-                        antisense.insert(aln.gene.id.clone(), aln);
+                        antisense.insert(aln.transcript_id.clone().unwrap(), aln);
                     }
                 });
-        }
+            AnnotationRegion::Intronic
+        };
+
+        // Determine aggregated splice state
+        let aggregated_splice_state = if !splice_aware {
+            println!("Splice-aware mode disabled, setting state to Undetermined");
+            SpliceState::Undetermined
+        } else if annotation_region == AnnotationRegion::Intergenic {
+            println!("Annotation region is Intergenic, setting splice state to Intergenic");
+            SpliceState::Intergenic
+        } else if all_splice_states.is_empty() {
+            println!("No splice states found, setting state to Undetermined (this should not happen)");
+            SpliceState::Undetermined // This case should never happen
+        } else if all_splice_states.iter().any(|&state| state == SpliceState::Unspliced) {
+            println!("Found at least one Unspliced state in {:?}, setting aggregated state to Unspliced", all_splice_states);
+            SpliceState::Unspliced
+        } else if all_splice_states.iter().all(|&state| state == SpliceState::Spliced) {
+            println!("All states are Spliced in {:?}, setting aggregated state to Spliced", all_splice_states);
+            SpliceState::Spliced
+        } else if model.iter().any(|m| *m != model[0]) {
+            println!("Models are inconsistent {:?}, setting splice state to Ambiguous", model);
+            SpliceState::Ambiguous
+        } else {
+            println!("Model {:?}, defaulting to Unspliced", model);
+            SpliceState::Unspliced
+        };
 
         let mut annotation = Annotation {
             aln_sense: transcripts.into_values().collect::<Vec<_>>(),
@@ -232,6 +310,9 @@ impl AlignmentAnnotator {
             region: annotation_region,
             rescued: false,
             chrom,
+            splice_state: aggregated_splice_state,
+            intron_mapping,
+            is_any_exon,
         };
         // Sorting this makes life easier later.
         annotation.genes.sort_unstable();
@@ -244,6 +325,7 @@ impl AlignmentAnnotator {
         &self,
         read: &RecordBuf,
         transcript: &Transcript,
+        splice_aware: bool,
     ) -> Option<TranscriptAlignment> {
         // figure out coordinates
         let tx_start = transcript.start;
@@ -251,10 +333,32 @@ impl AlignmentAnnotator {
         let genomic_start = read.alignment_start().unwrap().get() as u64;
         let genomic_end = read.alignment_end().unwrap().get() as u64;
         let splice_segments = SpliceSegments::from(read);
-
-        let is_exonic = splice_segments.is_exonic(transcript, self.region_min_overlap);
+        
+        
+        let (is_spanning, intron_mapped) = if splice_aware {
+            let result = splice_segments.annotate_splice(transcript);
+            result.unwrap_or_else(|| {
+                (false, Vec::new())
+            })
+        } else {
+            (false, Vec::new())
+        };
+        let is_any_exon = splice_segments.is_exonic(transcript, 0.001, true); //Check whether mapped to any exon
+        
+        let splice_state = if splice_aware {
+            if is_spanning {
+                SpliceState::Unspliced
+            } else if intron_mapped.is_empty() {
+                SpliceState::Spliced
+            } else {
+                SpliceState::Undetermined
+            }
+        } else {
+            SpliceState::Undetermined
+        };
+        let is_exonic = splice_segments.is_exonic(transcript, self.region_min_overlap, false);
         if is_exonic || get_overlap(genomic_start, genomic_end, tx_start, tx_end) >= 1.0 {
-            // compute strand
+            // compute strand and intron mapped
             let tx_reverse_strand = transcript.strand == Strand::Reverse;
             let flags = read.flags();
             let mut read_reverse_strand = flags.is_reverse_complemented();
@@ -272,10 +376,15 @@ impl AlignmentAnnotator {
             };
 
             let gene = transcript.gene.clone();
+            let intron_mapped_clone = intron_mapped.clone();
             let mut alignment = TranscriptAlignment {
                 gene: gene.clone(),
                 strand: tx_strand,
                 exon_align: None,
+                splice_state,
+                transcript_id: Some(transcript.id.clone()),
+                intron_mapped,
+                is_any_exon,
             };
 
             if is_exonic {
@@ -304,11 +413,27 @@ impl AlignmentAnnotator {
                             cigar: tx_cigar,
                             alen: tx_aligned_bases,
                         }),
+                        splice_state,
+                        transcript_id: Some(transcript.id.clone()),
+                        intron_mapped: intron_mapped_clone,
+                        is_any_exon,
                     };
                 }
             }
             Some(alignment)
         } else {
+            if splice_aware {
+                let alignment = TranscriptAlignment {
+                        gene: transcript.gene.clone(),
+                        strand: Strand::Reverse, // placeholder
+                        exon_align: None,
+                        splice_state,
+                        transcript_id: Some(transcript.id.clone()),
+                        intron_mapped,
+                        is_any_exon,
+                };
+                return Some(alignment);
+            }
             None
         }
     }
@@ -433,11 +558,24 @@ pub enum AnnotationRegion {
     Intergenic,
 }
 
-#[derive(Eq, PartialEq, Debug)]
+#[derive(Encode, Decode, Eq, PartialEq, Ord, PartialOrd, Debug, Clone, Copy, Hash)]
+pub enum SpliceState {
+    Spliced,
+    Unspliced,
+    Ambiguous,
+    Intergenic,
+    Undetermined,
+}
+
+#[derive(Eq, PartialEq, Debug, Clone)]
 pub struct TranscriptAlignment {
     pub gene: Gene,
     pub strand: Strand,
     pub exon_align: Option<TxAlignProperties>,
+    pub splice_state: SpliceState,
+    pub transcript_id: Option<String>,
+    pub intron_mapped: Vec<usize>,
+    pub is_any_exon: bool,
 }
 
 impl TranscriptAlignment {
@@ -448,10 +586,21 @@ impl TranscriptAlignment {
     pub fn is_intronic(&self) -> bool {
         !self.is_exonic()
     }
+    
+    /// Check if this alignment spans validated junctions
+    pub fn splice_state(&self) -> SpliceState {
+        self.splice_state
+    }
+
+
+    /// Get the transcript ID if this is an exonic alignment
+    pub fn transcript_id(&self) -> Option<&str> {
+        self.exon_align.as_ref().map(|align| align.id.as_str())
+    }
 }
 
 // These quantities are well defined for a valid transcriptomic alignment
-#[derive(Eq, PartialEq, Debug)]
+#[derive(Eq, PartialEq, Debug, Clone)]
 pub struct TxAlignProperties {
     pub id: String,
     pub pos: u64,

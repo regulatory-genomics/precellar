@@ -5,6 +5,7 @@ use noodles::sam::alignment::record_buf::{Cigar, RecordBuf};
 use noodles::sam::record::data::field::value::base_modifications::group::Strand;
 use std::cmp;
 
+
 /// 0-based, half-open
 #[derive(Debug, Clone)]
 pub struct Transcript {
@@ -14,7 +15,7 @@ pub struct Transcript {
     pub end: u64, // exclusive
     pub strand: Strand,
     pub gene: Gene,
-    exons: Exons,
+    pub exons: Exons, // make public for test purpose
 }
 
 impl TryFrom<star_aligner::transcript::Transcript> for Transcript {
@@ -58,7 +59,6 @@ impl Transcript {
     pub fn exons(&self) -> &[Exon] {
         self.exons.as_ref()
     }
-
     /// Convert a coordinate in the genome to a coordinate in the exons/transcript.
     /// The coordinate starts at the beginning of the transcript.
     pub fn get_offset(&self, coord: u64) -> Option<i64> {
@@ -72,6 +72,7 @@ impl Transcript {
         None
     }
 }
+
 
 #[derive(Debug, Clone)]
 pub struct Exons(Vec<Exon>);
@@ -113,7 +114,13 @@ pub struct Exon {
 
 impl Exon {
     pub fn len(&self) -> u64 {
-        self.end - self.start
+        self.end - self.start // Why not self.end - self.start + 1???
+    }
+    pub fn start(&self) -> u64 {
+        self.start
+    }
+    pub fn end(&self) -> u64 {
+        self.end
     }
 }
 
@@ -153,17 +160,30 @@ impl SpliceSegments {
 
     /// Determine if the read aligns to exonic regions of a transcript. A read is considered exonic
     /// if it aligns to all exons with at least `min_overlap_frac` overlap.
-    pub fn is_exonic(&self, transcript: &Transcript, min_overlap_frac: f64) -> bool {
-        self.segments.iter().all(|segment| {
-            // find first exon that ends to the right of the segment start
-            let idx = transcript
-                .exons()
-                .binary_search_by_key(&segment.start, |ex| ex.end - 1)
-                .unwrap_or_else(std::convert::identity);
-            transcript.exons().get(idx).map_or(false, |exon| {
-                get_overlap(segment.start, segment.end, exon.start, exon.end) >= min_overlap_frac
+    pub fn is_exonic(&self, transcript: &Transcript, min_overlap_frac: f64,is_any : bool) -> bool {
+        if is_any {
+            self.segments.iter().any(|segment| {
+                // find first exon that ends to the right of the segment start
+                let idx = transcript
+                    .exons()
+                    .binary_search_by_key(&segment.start, |ex| ex.end - 1)
+                    .unwrap_or_else(std::convert::identity);
+                transcript.exons().get(idx).map_or(false, |exon| {
+                    get_overlap(segment.start, segment.end, exon.start, exon.end) >= min_overlap_frac
+                })
             })
-        })
+        } else {
+            self.segments.iter().all(|segment| {
+                // find first exon that ends to the right of the segment start
+                let idx = transcript
+                    .exons()
+                    .binary_search_by_key(&segment.start, |ex| ex.end - 1)
+                    .unwrap_or_else(std::convert::identity);
+                transcript.exons().get(idx).map_or(false, |exon| {
+                    get_overlap(segment.start, segment.end, exon.start, exon.end) >= min_overlap_frac
+                })
+            })
+        }
     }
 
     /// Align to a transcript. Returns the aligned cigar and the number of aligned bases.
@@ -173,19 +193,84 @@ impl SpliceSegments {
         tolerance: u64,
         intergenic_trim_bases: u64,
         intronic_trim_bases: u64,
-    ) -> Option<(Cigar, u64)> {
+    ) -> Option<(Cigar, u64)> {  // (cigar, aligned_bases)
         let (ex_start, ex_end) = find_exons(
             &transcript.exons(),
             self.start(),
             self.end(),
             intergenic_trim_bases,
             intronic_trim_bases,
+            false, // I suppose we don't need validate intergenic & intronic trim in intron validation
         )?;
-        self._align_junctions_helper(&transcript.exons()[ex_start..=ex_end], tolerance)
+        let (cigar, aligned_bases) = self._align_junctions_helper(
+            &transcript.exons()[ex_start..=ex_end],
+            tolerance,
+        )?;
+        return Some((cigar, aligned_bases));
+    }
+
+    pub fn annotate_splice(&self,
+        transcript: &Transcript
+    ) -> Option<(bool, Vec<usize>)> {
+
+        let mut has_spanning = false;
+        let mut intron_mapped = Vec::new();
+        
+        let exons = transcript.exons();
+        
+        // If transcript has fewer than 2 exons, no introns exist
+        if exons.len() < 2 {
+            return Some((has_spanning, intron_mapped));
+        }
+
+        for current_segment in &self.segments {
+            // Handle the case where find_exons returns None gracefully
+            let (ex_start, ex_end) = match find_exons(
+                exons,
+                current_segment.start,
+                current_segment.end,
+                0,
+                0,
+                true,
+            ) {
+                Some(result) => result,
+                None => {
+                    // Skip this segment if find_exons fails (e.g., due to overhang or no overlap)
+                    continue;
+                }
+            };
+            
+            // Check introns around the overlapping exons
+            // For n exons, there are n-1 introns: intron i is between exon i and exon i+1
+            let intron_start_idx = ex_start.saturating_sub(1);
+            let intron_end_idx = std::cmp::min(ex_end, exons.len() - 2); // max intron index is exons.len() - 2
+            
+            for intron_idx in intron_start_idx..=intron_end_idx {
+                // Intron i is between exon i and exon i+1
+                let intron_start = exons[intron_idx].end() + 1;
+                let intron_end = exons[intron_idx + 1].start() - 1;
+                
+                // Check if segment spans intron boundaries
+                if (intron_start > current_segment.start && intron_start < current_segment.end) || 
+                   (intron_end > current_segment.start && intron_end < current_segment.end) {
+                    has_spanning = true;
+                }
+                
+                // Check for overlap using efficient comparison
+                if intron_start < current_segment.end && intron_end > current_segment.start {
+                    intron_mapped.push(intron_idx);
+                }
+            }
+        }
+        
+        Some((has_spanning, intron_mapped))
     }
 
     /// Align the read to the exons. Returns the aligned cigar and the number of aligned bases.
-    fn _align_junctions_helper(&self, exons: &[Exon], tolerance: u64) -> Option<(Cigar, u64)> {
+    fn _align_junctions_helper(&self,
+         exons: &[Exon], 
+         tolerance: u64,
+        ) -> Option<(Cigar, u64)> {
         // check if the number of segments matches the number of exons
         if self.segments.len() != exons.len() {
             return None;
@@ -193,7 +278,6 @@ impl SpliceSegments {
 
         let mut full_cigar = self.left_clip.clone();
         let mut aligned_bases = 0;
-
         for i in 0..self.segments.len() {
             let curr_segment = &self.segments[i];
             let curr_exon = &exons[i];
@@ -202,6 +286,8 @@ impl SpliceSegments {
 
             // align the start
             let start_diff = curr_exon.start as i64 - curr_segment.start as i64;
+            //mark the overhang as validated intron
+
             if i == 0 {
                 // first segment
                 if start_diff > 0 {
@@ -211,6 +297,7 @@ impl SpliceSegments {
                         Op::new(Kind::SoftClip, start_diff as usize),
                         false,
                     );
+
                 } else if start_diff < 0 {
                     // underhang -> decrement aligned bases
                     aligned_bases -= start_diff.unsigned_abs();
@@ -348,6 +435,7 @@ fn find_exons(
     read_end: u64, // inclusive
     intergenic_trim_bases: u64,
     intronic_trim_bases: u64,
+    skip_trim_validation: bool, // I suppose we don't need validate intergenic & intronic trim in intron validation
 ) -> Option<(usize, usize)> {
     // find first exon that ends to the right of the read start
     let ex_start = exon_info
@@ -360,7 +448,9 @@ fn find_exons(
     if ex_start >= exon_info.len() {
         return None;
     }
-
+    if skip_trim_validation {
+        return Some((ex_start, ex_end));
+    }
     let starting_exon = &exon_info[ex_start];
     let ending_exon = &exon_info[ex_end];
 

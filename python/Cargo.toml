@@ -12,7 +12,7 @@ crate-type = ["cdylib"]
 anyhow = "1.0"
 bstr = "1.12"
 bwa-mem2 = { git = "https://github.com/regulatory-genomics/bwa-mem2-rust.git", rev = "6408e31ddc202436b978b89f2d11fd788dbf5ff1" }
-star-aligner = { git = "https://github.com/regulatory-genomics/star-aligner", rev = "a8e6249f5f4a3760fcf1aee426eebee6f26446b6" }
+star-aligner = { git = "https://github.com/GilbertHan1011/star-aligner", rev = "2416643dc231ed132f0aee7396ef305f10ce4b4f" }
 glob = "0.3"
 itertools = "0.14"
 noodles = { version = "0.98", features = ["core", "fastq", "bam", "sam", "bgzf"] }
