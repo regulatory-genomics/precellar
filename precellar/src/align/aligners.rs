@@ -6,6 +6,7 @@ use anyhow::{bail, ensure, Result};
 pub use bwa_mem2::BurrowsWheelerAligner;
 use noodles::sam::alignment::Record;
 pub use star_aligner::StarAligner;
+pub use minimap2::Minimap2Aligner;
 
 use log;
 use noodles::sam;
@@ -260,6 +261,80 @@ impl Aligner for StarAligner {
     }
 }
 
+impl Aligner for Minimap2Aligner {
+    fn header(&self) -> sam::Header {
+        self.get_header().clone()
+    }
+
+    fn align_reads(
+        &mut self,
+        num_threads: u16,
+        records: Vec<AnnotatedFastq>,
+    ) -> Vec<(Option<MultiMapR>, Option<MultiMapR>)> {
+        
+        let _ = rayon::ThreadPoolBuilder::new()
+            .num_threads(num_threads as usize)
+            .build_global();
+
+        let chunk_size = get_chunk_size(records.len(), num_threads as usize);
+        
+        let opts = self.get_opts().clone();
+
+        // Use Rayon for parallel processing with chunks
+        records
+            .par_chunks(chunk_size)
+            .flat_map(|chunk| {
+                // Create a new aligner for this thread using the getter methods
+                let mut thread_aligner = match Minimap2Aligner::new(opts.clone()) {
+                    Ok(aligner) => aligner,
+                    Err(_) => {
+                        // If we can't create an aligner, return empty results for this chunk
+                        return vec![(None, None); chunk.len()];
+                    }
+                };
+
+                chunk.iter().map(|rec| {
+                    let bc = rec.barcode.as_ref().expect("Barcode is missing");
+
+                    // --- Align Read 1 independently (if exists) ---
+                    let read1_result = if let Some(read1_record) = rec.read1.as_ref() {
+                        // Call the core alignment function of Minimap2Aligner
+                        let mut alignments = thread_aligner.align_read(read1_record).unwrap_or_default();
+
+                        if !alignments.is_empty() {
+                            // Add Barcode and UMI information to all alignment results
+                            for aln in &mut alignments {
+                                add_cell_barcode(
+                                    aln,
+                                    bc.raw.sequence(),
+                                    bc.raw.quality_scores(),
+                                    bc.corrected.as_deref(),
+                                );
+                                if let Some(umi) = &rec.umi {
+                                    add_umi(aln, umi.sequence(), umi.quality_scores());
+                                }
+                            }
+                            // Convert alignment results Vec<RecordBuf> to MultiMapR
+                            Some(alignments.try_into().expect("Failed to convert Vec<RecordBuf> to MultiMap"))
+                        } else {
+                            None // No alignment found
+                        }
+                    } else {
+                        None // Read 1 does not exist
+                    };
+
+                    // No pair-alignment for long-read data
+                    let read2_result = None;
+
+                    (read1_result, read2_result)
+                }).collect::<Vec<_>>()
+            })
+            .collect()
+    }
+ 
+}
+
+
 fn get_chunk_size(total_length: usize, num_threads: usize) -> usize {
     let chunk_size = total_length / num_threads;
     if chunk_size == 0 {
@@ -296,3 +371,4 @@ fn add_umi(record_buf: &mut RecordBuf, umi: &[u8], qual: &[u8]) {
     data.insert(Tag::UMI_SEQUENCE, Value::String(umi.into()));
     data.insert(Tag::UMI_QUALITY_SCORES, Value::String(qual.into()));
 }
+
