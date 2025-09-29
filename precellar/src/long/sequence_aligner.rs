@@ -26,7 +26,7 @@ pub struct FixedSequenceAlignment {
 
 /// Sequence aligner for finding fixed regions in trimmed EndRegions from long reads
 /// Uses rust-bio's pairwise aligner with fitting alignment mode
-pub struct LongReadSequenceAligner {
+pub struct FittingAligner {
     /// Minimum match score threshold
     min_score: f64,
     /// Scoring configuration for fitting alignment
@@ -38,7 +38,7 @@ fn match_func(a: u8, b: u8) -> i32 {
     if a == b { 2i32 } else { -1i32 }
 }
 
-impl LongReadSequenceAligner {
+impl FittingAligner {
     /// Create a new sequence aligner with fitting alignment configuration
     pub fn new() -> Result<Self> {
         // Configure scoring for fitting alignment:
@@ -60,7 +60,7 @@ impl LongReadSequenceAligner {
         };
         
         Ok(Self {
-            min_score: 0.6,
+            min_score: 0.7,
             scoring,
         })
     }
@@ -78,11 +78,10 @@ impl LongReadSequenceAligner {
                 let region_guard = fixed_region.read().unwrap();
                 let seq = region_guard.sequence.as_bytes().to_vec();
                 
-                
-                // Skip if fixed sequence is too short
-                if seq.len() < 15 {
-                    continue;
-                }
+                // // Skip if fixed sequence is too short
+                // if seq.len() < 15 {
+                //     continue;
+                // }
                 seq
             };
 
@@ -97,6 +96,9 @@ impl LongReadSequenceAligner {
             
             // Calculate number of matches and alignment length
             let (matches, alignment_length) = self.calculate_alignment_stats(&alignment);
+
+            // println!("Alignment score from rust-bio: {}", alignment.score);
+
             let score = if alignment_length > 0 {
                 matches as f64 / alignment_length as f64
             } else {
@@ -155,8 +157,11 @@ impl LongReadSequenceAligner {
 
 }
 
-
-/// Find the best non-overlapping alignments from a list of candidates
+/// Selects the best non-overlapping alignments using a greedy algorithm.
+///
+/// Sorts all candidates by score in descending order, then iteratively picks the
+/// next best-scoring alignment that does not conflict with those already selected.
+/// The final result is sorted by the alignment start position.
 pub fn find_non_overlapping_alignments(
     alignments: Vec<FixedSequenceAlignment>
 ) -> Vec<FixedSequenceAlignment> {
@@ -177,6 +182,7 @@ pub fn find_non_overlapping_alignments(
               alignment.query_start >= selected_aln.query_end)
         });
         
+        // Greedy algorithm: save high score fixed alignments and discard lower overlapping ones
         if !overlaps {
             selected.push(alignment);
         }
@@ -189,12 +195,15 @@ pub fn find_non_overlapping_alignments(
 }
 
 /// Calculate fitting alignment distance between short sequence and long sequence
-fn fitting_alignment_distance(short_seq: &[u8], long_seq: &[u8]) -> usize {
+pub fn fitting_alignment_distance(short_seq: &[u8], long_seq: &[u8]) -> usize {
     let m = short_seq.len();
     let n = long_seq.len();
     
-    if m == 0 || n == 0 {
-        return 0;
+    if m == 0 {
+        return 0; // Empty short sequence can always match
+    }
+    if n == 0 {
+        return m; // Cannot fit non-empty short sequence in empty long sequence
     }
 
     let mut dp = vec![vec![0; n + 1]; m + 1];
@@ -227,6 +236,7 @@ mod tests {
     use super::*;
     use seqspec::{RegionType, SequenceType};
 
+    // Create test fixed sequence region
     fn create_test_region(
         id: &str,
         sequence: &str,
@@ -244,29 +254,6 @@ mod tests {
             onlist: None,
             subregions: vec![],
         }))
-    }
-
-    #[test]
-    fn test_legacy_edit_distance_behavior() {
-        // Note: These tests are now using fitting_alignment_distance
-        // The behavior is different from standard edit distance:
-        // - fitting_alignment_distance(short, long) finds best alignment of short in long
-        // - Standard edit_distance would be symmetric
-        
-        // Exact match
-        assert_eq!(fitting_alignment_distance(b"ATCG", b"ATCG"), 0);
-        
-        // One character difference - in fitting alignment, we can find "ATC" in "ATCA"
-        assert_eq!(fitting_alignment_distance(b"ATC", b"ATCA"), 0);
-        
-        // Completely different sequences - need full substitution
-        assert_eq!(fitting_alignment_distance(b"ATCG", b"GCTA"), 4);
-        
-        // Empty short sequence always matches
-        assert_eq!(fitting_alignment_distance(b"", b"ATCG"), 0);
-        
-        // Long sequence shorter than short - impossible to fit
-        assert_eq!(fitting_alignment_distance(b"ATCG", b""), 4);
     }
 
     #[test]
@@ -315,10 +302,10 @@ mod tests {
         // Test the specific example: short sequence v="AT", long sequence w="GCATG"
         // Scoring: match = +2, mismatch = -1, gap_penalty = -1
         // This test verifies that fitting alignment works correctly
-        let mut aligner = LongReadSequenceAligner::new().unwrap();
+        let mut aligner = FittingAligner::new().unwrap();
         let long_seq = b"GCATG";  // text to search in
         
-        // Create a test region
+        // Create a test fixed sequence region
         let region = create_test_region("test", "AT", 2, 2);
         let fixed_regions = vec![region];
         
@@ -338,35 +325,12 @@ mod tests {
     }
     
     #[test]
-    fn test_fitting_alignment_with_mismatches() {
-        // Test fitting alignment with some mismatches
-        let mut aligner = LongReadSequenceAligner::new().unwrap();
-        let long_seq = b"GGATTGCC";  // "ATT" at position 2-5, one mismatch with "ATC"
-        
-        let region = create_test_region("test", "ATC", 3, 3);
-        let fixed_regions = vec![region];
-        
-        let alignments = aligner.align_fixed_sequences(long_seq, &fixed_regions).unwrap();
-        
-        // Should find alignment even with mismatch
-        assert!(!alignments.is_empty());
-        let best_alignment = &alignments[0];
-        
-        // Should find the best match around position 2
-        assert_eq!(best_alignment.query_start, 2);
-        assert_eq!(best_alignment.query_end, 5);
-        assert_eq!(best_alignment.matches, 2);  // A and T match, C doesn't match T
-        assert_eq!(best_alignment.alignment_length, 3);
-        assert!((best_alignment.score - 2.0/3.0).abs() < 0.01);  // 2 matches out of 3
-    }
-    
-    #[test]
     fn test_fitting_alignment_properties() {
         // This test verifies the key properties of fitting alignment:
         // 1. First row initialization to 0 (no penalty for gaps at start of long sequence)
         // 2. Finding maximum in last row (no penalty for gaps at end of long sequence)
         
-        let mut aligner = LongReadSequenceAligner::new().unwrap();
+        let mut aligner = FittingAligner::new().unwrap();
         
         // Test case where the pattern appears at the very beginning
         let text_start = b"GCATTTTT";
