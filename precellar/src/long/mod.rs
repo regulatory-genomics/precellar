@@ -4,18 +4,15 @@ use std::sync::{Arc, RwLock};
 
 pub mod barcode_extractor;
 pub mod sequence_aligner;
-pub mod examples;
 
-use crate::barcode::{BarcodeCorrector, OligoFrequncy};
+use crate::barcode::OligoFrequncy;
 use seqspec::region::{Region, LibSpec};
 
 /// Long-read barcode extraction result
 #[derive(Debug, Clone)]
 pub struct LongReadBarcodeResult {
-    /// Extracted barcode sequence
+    /// Extracted barcode sequence (standardized from whitelist)
     pub barcode: Option<Vec<u8>>,
-    /// Extracted quality scores
-    pub quality: Option<Vec<u8>>,
     /// Extraction confidence
     pub confidence: f64,
     /// Whether extraction was successful
@@ -25,8 +22,6 @@ pub struct LongReadBarcodeResult {
 /// Main interface for long-read processing
 #[derive(Debug)]
 pub struct LongReadProcessor {
-    /// Barcode corrector
-    corrector: Option<BarcodeCorrector>,
     /// Barcode whitelists
     whitelists: HashMap<String, OligoFrequncy>,
 }
@@ -34,11 +29,9 @@ pub struct LongReadProcessor {
 impl LongReadProcessor {
     /// Create a new long-read processor
     pub fn new(
-        corrector: Option<BarcodeCorrector>,
         whitelists: HashMap<String, OligoFrequncy>,
     ) -> Self {
         Self {
-            corrector,
             whitelists,
         }
     }
@@ -52,7 +45,7 @@ impl LongReadProcessor {
     ) -> Result<LongReadBarcodeResult> {
         let extractor = barcode_extractor::BarcodeExtractor::new(lib_spec, modality)?;
 
-        extractor.extract_barcode(record, &self.whitelists, self.corrector.as_ref())
+        extractor.extract_barcode(record, &self.whitelists)
     }
 }
 
@@ -104,7 +97,7 @@ impl EndRegions {
     pub fn calculate_cut_length(&self) -> usize {
         if self.has_barcode {
             let base_len = self.max_len as f64;
-            (base_len * 1.15) as usize
+            (base_len * 1.15).ceil() as usize
         } else {
             // If no barcode, only cut 100bp
             100
@@ -117,7 +110,7 @@ impl EndRegions {
             .iter()
             .filter(|region| {
                 let r = region.read().unwrap();
-                r.sequence_type.is_fixed() && r.min_len >= 15
+                r.sequence_type.is_fixed() && r.min_len >= 15 // fixed sequence must be at least 15bp
             })
             .cloned()
             .collect()
@@ -133,6 +126,16 @@ impl EndRegions {
             })
             .cloned()
             .collect()
+    }
+
+    /// Build position map: region_id -> position (1-based, outermost is 1)
+    pub fn build_position_map(&self) -> HashMap<String, usize> {
+        let mut position_map = HashMap::new();
+        for (idx, region) in self.regions.iter().enumerate() {
+            let region_guard = region.read().unwrap();
+            position_map.insert(region_guard.region_id.clone(), idx + 1);
+        }
+        position_map
     }
 }
 
@@ -236,7 +239,7 @@ mod tests {
         
         assert!(end_regions.has_barcode);
         assert_eq!(end_regions.max_len, 8);
-        assert_eq!(end_regions.calculate_cut_length(), 9); // 8 * 1.15 = 9.2 -> 9
+        assert_eq!(end_regions.calculate_cut_length(), 10); // 8 * 1.15 = 9.2 -> 10
     }
 
     #[test]
