@@ -305,4 +305,158 @@ mod tests {
         assert_eq!(three_prime.regions.len(), 1);
         assert!(three_prime.has_barcode);
     }
+
+    #[test]
+    fn test_extraction_with_fastq_record() {
+        use noodles::fastq::Record;
+        use crate::barcode::OligoFrequncy;
+        use std::collections::HashSet;
+
+        // Define fixed region sequences
+        let fixed_seq1 = "ACGTACGTACGTACGT"; // 16bp fixed sequence 1
+        let fixed_seq2 = "TGCATGCATGCATGCA"; // 16bp fixed sequence 2
+        
+        // Define barcode whitelist (3 valid barcodes)
+        let barcode1 = "AAAAAAAAAA"; // 10bp
+        let barcode2 = "CCCCCCCCCC"; // 10bp  
+        let barcode3 = "GGGGGGGGGG"; // 10bp
+        
+        // Create barcode whitelist
+        let mut whitelist = HashSet::new();
+        whitelist.insert(barcode1.as_bytes().to_vec());
+        whitelist.insert(barcode2.as_bytes().to_vec());
+        whitelist.insert(barcode3.as_bytes().to_vec());
+        let mut oligo_freq = OligoFrequncy::new();
+        for barcode in whitelist {
+            oligo_freq.insert(barcode, 1);
+        }
+        
+        let mut whitelists = HashMap::new();
+        whitelists.insert("bc1".to_string(), oligo_freq);
+        
+        // Create test library specification
+        let fixed_region1 = Arc::new(RwLock::new(create_test_region(
+            "fixed1",
+            RegionType::Linker,
+            SequenceType::Fixed,
+            16,
+            16,
+            fixed_seq1,
+        )));
+        
+        let barcode_region = Arc::new(RwLock::new(create_test_region(
+            "bc1",
+            RegionType::Barcode,
+            SequenceType::Onlist,
+            10,
+            10,
+            "",
+        )));
+        
+        let fixed_region2 = Arc::new(RwLock::new(create_test_region(
+            "fixed2", 
+            RegionType::Linker,
+            SequenceType::Fixed,
+            16,
+            16,
+            fixed_seq2,
+        )));
+        
+        let cdna = Arc::new(RwLock::new(create_test_region(
+            "cdna",
+            RegionType::Cdna,
+            SequenceType::Random,
+            100,
+            1000,
+            "",
+        )));
+
+        let modality_region = Region {
+            region_id: "rna".to_string(),
+            region_type: RegionType::Modality(Modality::RNA),
+            name: "RNA".to_string(),
+            sequence_type: SequenceType::Joined,
+            sequence: "".to_string(),
+            min_len: 0,
+            max_len: 0,
+            onlist: None,
+            subregions: vec![fixed_region1, barcode_region, fixed_region2, cdna],
+        };
+
+        let lib_spec = LibSpec::new(vec![modality_region]).unwrap();
+        let processor = LongReadProcessor::new(whitelists);
+
+        // Test sequences with indels and mismatches
+        // Record 1: Perfect match with barcode1, 1 mismatch in fixed region
+        let seq1 = format!("{}{}{}ATCGATCGATCGATCGATCGATCGATCG", 
+                          "ACGTACGTACGTACGG", // 1 mismatch in fixed1 (T->G)
+                          barcode1,           // Perfect barcode1
+                          fixed_seq2);        // Perfect fixed2
+        let record1 = Record::new(
+            noodles::fastq::record::Definition::new("read1", ""), 
+            seq1.clone(), 
+            "I".repeat(seq1.len())
+        );
+
+        // Record 2: 1 insertion in fixed region, 1 deletion in barcode2
+        let seq2 = format!("{}{}{}ATCGATCGATCGATCGATCGATCGATCG",
+                          "ACGTACGTACGTACGTA", // 1 insertion in fixed1 (extra A)
+                          "CCCCCCCCC",         // 1 deletion in barcode2 (missing 1 C)
+                          fixed_seq2);         // Perfect fixed2
+        let record2 = Record::new(
+            noodles::fastq::record::Definition::new("read2", ""), 
+            seq2.clone(), 
+            "I".repeat(seq2.len())
+        );
+
+        // Record 3: 2 mismatches in fixed regions, 1 mismatch in barcode3
+        let seq3 = format!("{}{}{}ATCGATCGATCGATCGATCGATCGATCG",
+                          "ACGTACGTACGTACGA", // 1 mismatch in fixed1 (T->A)
+                          "GGGGGGGGTG",       // 1 mismatch in barcode3 (G->T)
+                          "TGCATGCATGCATGCT");// 1 mismatch in fixed2 (A->T)
+        let record3 = Record::new(
+            noodles::fastq::record::Definition::new("read3", ""), 
+            seq3.clone(), 
+            "I".repeat(seq3.len())
+        );
+
+        // Record 4: Too many errors - should not match any barcode
+        let seq4 = format!("{}{}{}ATCGATCGATCGATCGATCGATCGATCG",
+                          "CCCACGTACGTACGTACGTGG", // Multiple insertion in fixed1
+                          "TTTTTTTTTT",            // No match to any barcode
+                          fixed_seq2);             // Perfect fixed2
+        let record4 = Record::new(
+            noodles::fastq::record::Definition::new("read4", ""), 
+            seq4.clone(), 
+            "I".repeat(seq4.len())
+        );
+
+        // Test barcode extraction
+        let result1 = processor.extract_barcode(&record1, &lib_spec, &Modality::RNA).unwrap();
+        let result2 = processor.extract_barcode(&record2, &lib_spec, &Modality::RNA).unwrap();
+        let result3 = processor.extract_barcode(&record3, &lib_spec, &Modality::RNA).unwrap();
+        let result4 = processor.extract_barcode(&record4, &lib_spec, &Modality::RNA).unwrap();
+
+        // Verify results
+        // Record 1 should successfully extract barcode1
+        assert!(result1.success, "Record 1 should successfully extract barcode");
+        assert!(result1.barcode.is_some(), "Record 1 should have extracted barcode");
+        assert_eq!(result1.barcode.unwrap(), barcode1.as_bytes(), "Record 1 should match barcode1");
+        
+        // Record 2 should successfully extract barcode2 (despite deletion)
+        assert!(result2.success, "Record 2 should successfully extract barcode");
+        assert!(result2.barcode.is_some(), "Record 2 should have extracted barcode");
+        assert_eq!(result2.barcode.unwrap(), barcode2.as_bytes(), "Record 2 should match barcode2");
+        
+        // Record 3 should successfully extract barcode3 (despite mismatches)
+        assert!(result3.success, "Record 3 should successfully extract barcode");
+        assert!(result3.barcode.is_some(), "Record 3 should have extracted barcode");
+        assert_eq!(result3.barcode.unwrap(), barcode3.as_bytes(), "Record 3 should match barcode3");
+        
+        // Record 4 should fail to extract any barcode
+        assert!(!result4.success, "Record 4 should fail to extract barcode");
+        assert!(result4.barcode.is_none(), "Record 4 should not have extracted barcode");
+        
+        println!("All barcode extraction tests with indels/mismatches passed!");
+    }
 }
