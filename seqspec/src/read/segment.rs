@@ -2,7 +2,7 @@ use std::ops::Range;
 
 use noodles::fastq::{self, record::Definition};
 
-use crate::{utils::rev_compl, Region, RegionType, SequenceType};
+use crate::{utils::{hamming_distance, rev_compl}, Region, RegionType, SequenceType};
 
 #[derive(Debug, Clone)]
 pub enum SegmentType<'a> {
@@ -323,9 +323,9 @@ impl SegmentInfo {
 
                     if linker_tolerance < 1.0 && segment.sequence_type.is_fixed() {
                         let d = if self.is_reverse {
-                            hamming::distance(&rev_compl(seq), segment.sequence.as_bytes())
+                            hamming_distance(&rev_compl(seq), segment.sequence.as_bytes()).unwrap()
                         } else {
-                            hamming::distance(&seq, segment.sequence.as_bytes())
+                            hamming_distance(&seq, segment.sequence.as_bytes()).unwrap()
                         };
                         if d as f64 > linker_tolerance * seq.len() as f64 {
                             return Err(SplitError::PatternMismatch(d as usize));

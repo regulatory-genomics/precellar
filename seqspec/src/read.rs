@@ -81,7 +81,7 @@ impl Default for Read {
 }
 
 pub struct FastqReader {
-    reader: fastq::Reader<Box<dyn BufRead>>,
+    reader: fastq::io::Reader<Box<dyn BufRead>>,
     min_len: u32,
     max_len: u32,
 }
@@ -89,7 +89,7 @@ pub struct FastqReader {
 impl FastqReader {
     pub fn new(reader: Box<dyn BufRead>, min_len: u32, max_len: u32) -> Self {
         Self {
-            reader: fastq::Reader::new(reader),
+            reader: fastq::io::Reader::new(reader),
             min_len,
             max_len,
         }
@@ -107,7 +107,7 @@ impl FastqReader {
         Ok(n)
     }
 
-    pub fn records(&mut self) -> FastqRecords {
+    pub fn records(&mut self) -> FastqRecords<'_> {
         FastqRecords { inner: self }
     }
 }

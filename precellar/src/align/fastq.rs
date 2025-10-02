@@ -108,11 +108,10 @@ impl FastqProcessor {
         self.qc_align
             .insert(self.modality(), Arc::new(Mutex::new(qc)));
 
-        let formatter = human_format::Formatter::new();
         let n_reads: String = fq_reader
             .readers
             .iter()
-            .map(|r| formatter.format(r.total_reads.unwrap_or(0) as f64))
+            .map(|r| indicatif::HumanCount(r.total_reads.unwrap_or(0) as u64).to_string())
             .intersperse(" + ".to_string())
             .collect();
         info!("Aligning {} reads to reference genome ...", n_reads);
@@ -627,7 +626,8 @@ fn get_read_name(record: &fastq::Record) -> String {
     let name = record.name().to_string();
     name.strip_suffix("/1")
         .or_else(|| name.strip_suffix("/2"))
-        .map(|x| x.to_owned()).unwrap_or(name)
+        .map(|x| x.to_owned())
+        .unwrap_or(name)
 }
 
 pub struct NameCollatedRecords<'a, R> {

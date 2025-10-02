@@ -3,7 +3,6 @@ use itertools::Itertools;
 use noodles::bam;
 use noodles::fastq::{self, io::Writer};
 use noodles::sam::alignment::record::data::field::{Tag, Value};
-use noodles::sam::alignment::record::QualityScores;
 use precellar::utils::rev_compl_fastq_record;
 use pyo3::prelude::*;
 use rayon::slice::ParallelSliceMut;
@@ -42,7 +41,7 @@ pub fn bam_to_fastq(
         let qual: Vec<u8> = bam
             .quality_scores()
             .iter()
-            .map(|x| x.unwrap() + 33)
+            .map(|x| x + 33)
             .collect();
         let fq = fastq::Record::new(fastq::record::Definition::new(name, ""), seq, qual);
         if bam.flags().is_reverse_complemented() {

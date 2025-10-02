@@ -136,11 +136,11 @@ fn make_fastq(
     std::fs::create_dir_all(&out_dir)?;
     let read1_fq = out_dir.join("R1.fq.zst");
     let read1_writer = create_file(read1_fq, Some(Compression::Zstd), None, 8)?;
-    let mut read1_writer = fastq::Writer::new(BufWriter::new(read1_writer));
+    let mut read1_writer = fastq::io::Writer::new(BufWriter::new(read1_writer));
     let mut read2_writer = if fq_reader.is_paired_end()? {
         let read2_fq = out_dir.join("R2.fq.zst");
         let read2_writer = create_file(read2_fq, Some(Compression::Zstd), None, 8)?;
-        let read2_writer = fastq::Writer::new(BufWriter::new(read2_writer));
+        let read2_writer = fastq::io::Writer::new(BufWriter::new(read2_writer));
         Some(read2_writer)
     } else {
         None

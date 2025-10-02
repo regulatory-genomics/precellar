@@ -8,13 +8,12 @@ anyhow = "1.0"
 base16ct = { version = "0.2", features = ["alloc"] }
 file-download = { git = "https://github.com/regulatory-genomics/file-download", rev = "2c41ff28d45c39edc73e144f00255476194ffc9b" }
 flate2 = "1.1"
-indexmap = "2.9"
+indexmap = "2.11"
 log = "0.4"
-hamming = "0.1"
 home = "0.5"
 itertools = "0.14"
 md-5 = "0.10"
-noodles = { version = "0.98", features = ["core", "fastq", "async"] }
+noodles = { version = "0.101", features = ["core", "fastq", "async"] }
 url = "2.5"
 reqwest = { version = "0.12", features = ["stream", "blocking"] }
 serde = { version = "1.0", features = ["derive", "rc"] }

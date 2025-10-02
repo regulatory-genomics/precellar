@@ -5,29 +5,28 @@ edition = "2021"
 
 [dependencies]
 anyhow = "1.0"
-anndata = { git = "https://github.com/kaizhang/anndata-rs.git", rev = "0d27ac475634ed7703ab1a23e01e6a3031a28541"}
-anndata-hdf5 = { git = "https://github.com/kaizhang/anndata-rs.git", rev = "0d27ac475634ed7703ab1a23e01e6a3031a28541"}
-bed-utils = "0.8"
-bwa-mem2 = { git = "https://github.com/regulatory-genomics/bwa-mem2-rust.git", rev = "6408e31ddc202436b978b89f2d11fd788dbf5ff1" }
-star-aligner = { git = "https://github.com/regulatory-genomics/star-aligner", rev = "a8e6249f5f4a3760fcf1aee426eebee6f26446b6" }
+anndata = { git = "https://github.com/kaizhang/anndata-rs.git", rev = "abe4c2cf7ec7af1cc03a9e337b2af8bdf602ef5b"}
+anndata-hdf5 = { git = "https://github.com/kaizhang/anndata-rs.git", rev = "abe4c2cf7ec7af1cc03a9e337b2af8bdf602ef5b"}
+bed-utils = "0.9"
+bwa-mem2 = { git = "https://github.com/regulatory-genomics/bwa-mem2-rust.git", rev = "e3b64904adcb379b3814f6408796fd371d56e5cf" }
+star-aligner = { git = "https://github.com/regulatory-genomics/star-aligner", rev = "ff62b1d7d6ccbade4396398960ffcb1eb3d629e7" }
 smallvec = "1.15"
 bstr = "1.12"
-human_format = "1.1"
 itertools = "0.14"
-indexmap = "2.9"
+indexmap = "2.11"
 log = "0.4"
 lexical = "7.0"
 nalgebra-sparse = "0.10"
-noodles = { version = "0.98", features = ["core", "gtf", "fastq", "bam", "sam", "async"] }
-polars = "0.45"
-rayon = "1.10"
+noodles = { version = "0.101", features = ["core", "gtf", "fastq", "bam", "sam", "async"] }
+polars = "0.51"
+rayon = "1.11"
 bincode = "2.0"
 serde_json = "1.0"
 seqspec = { workspace = true }
 regex = "1.11"
 env_logger = "0.11"
 rand = "0.9.0"
-indicatif = "0.17"
+indicatif = "0.18"
 
 [dev-dependencies]
 flate2 = "1.1"

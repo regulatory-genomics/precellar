@@ -40,10 +40,12 @@ impl<R: Record> MultiMap<R> {
         self.others.as_ref().map_or(0, |x| x.len()) + 1
     }
 
+    /// Return the cell barcode if it exists.
     pub fn barcode(&self) -> Result<Option<String>> {
         get_barcode(&self.primary)
     }
 
+    /// Return the UMI if it exists.
     pub fn umi(&self) -> Result<Option<String>> {
         get_umi(&self.primary)
     }

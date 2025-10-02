@@ -266,6 +266,21 @@ pub fn md5sum<P: AsRef<Path>>(path: P) -> Result<String> {
     Ok(base16ct::lower::encode_string(&digest))
 }
 
+pub fn hamming_distance(seq1: &[u8], seq2: &[u8]) -> Result<usize> {
+    if seq1.len() != seq2.len() {
+        bail!(
+            "sequences must be of the same length: {} != {}",
+            seq1.len(),
+            seq2.len()
+        );
+    }
+    Ok(seq1
+        .iter()
+        .zip(seq2.iter())
+        .filter(|(a, b)| a != b)
+        .count())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

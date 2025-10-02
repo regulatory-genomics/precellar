@@ -174,7 +174,7 @@ pub fn strip_barcode_from_fastq(
             input_compression.map(|x| Compression::from_str(x).unwrap()),
         )
         .await?;
-        let mut reader = fastq::AsyncReader::new(tokio::io::BufReader::new(reader));
+        let mut reader = fastq::r#async::io::Reader::new(tokio::io::BufReader::new(reader));
 
         let mut i = 0u32;
         reader
@@ -259,10 +259,10 @@ pub fn strip_barcode_from_fastq(
 )]
 pub fn merge_fastq_files(
     py: Python<'_>,
-    input1_files: PyObject,
+    input1_files: Py<PyAny>,
     output1_file: String,
     barcode_file: String,
-    input2_files: Option<PyObject>,
+    input2_files: Option<Py<PyAny>>,
     output2_file: Option<String>,
     compression: Option<&str>,
     compression_level: Option<u32>,
@@ -377,7 +377,7 @@ pub fn merge_fastq_files(
             let compression1 = detect_compression_from_path(input1_file);
             let file1 = open_file_async(input1_file, compression1).await?;
             let buf_reader1 = tokio::io::BufReader::new(file1);
-            let mut reader1 = fastq::AsyncReader::new(buf_reader1);
+            let mut reader1 = fastq::r#async::io::Reader::new(buf_reader1);
             let mut records1 = reader1.records();
 
             // Process second input file if provided
@@ -390,7 +390,7 @@ pub fn merge_fastq_files(
                 let compression2 = detect_compression_from_path(input2_file);
                 let file2 = open_file_async(input2_file, compression2).await?;
                 let buf_reader2 = tokio::io::BufReader::new(file2);
-                let reader2 = fastq::AsyncReader::new(buf_reader2);
+                let reader2 = fastq::r#async::io::Reader::new(buf_reader2);
                 Some(reader2)
             } else {
                 None
