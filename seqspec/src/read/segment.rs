@@ -29,6 +29,7 @@ impl core::fmt::Display for SegmentType<'_> {
     }
 }
 
+/// A segment of a read, consisting of a region type, sequence, and quality scores.
 #[derive(Debug, Clone)]
 pub struct Segment<'a> {
     pub region_type: SegmentType<'a>,

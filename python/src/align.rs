@@ -16,7 +16,7 @@ use precellar::{
     align::{FastqProcessor, MultiMapR},
     fragment::{IntoFragOpts, IntoFragments},
     qc::QcFragment,
-    transcript::Quantifier,
+    transcriptome::Quantifier,
 };
 use seqspec::{
     utils::{create_file, Compression},

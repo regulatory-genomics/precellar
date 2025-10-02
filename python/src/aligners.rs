@@ -1,7 +1,7 @@
 use std::{ops::{Deref, DerefMut}, path::PathBuf};
 use anyhow::Result;
 use noodles::sam::Header;
-use precellar::{align::{AnnotatedFastq, Aligner}, transcript::{AlignmentAnnotator, Transcript}};
+use precellar::{align::{AnnotatedFastq, Aligner}, transcriptome::{AlignmentAnnotator, Transcript}};
 use pyo3::prelude::*;
 use star_aligner::{StarAligner, StarOpts};
 use bwa_mem2::{AlignerOpts, BurrowsWheelerAligner, FMIndex};

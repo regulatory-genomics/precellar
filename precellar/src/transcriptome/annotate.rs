@@ -1,8 +1,8 @@
-use crate::align::MultiMapR;
 /// This module provides utilities for annotating bam records by mapping them to a transcriptome.
 /// It supports both single-end and paired-end alignments and uses transcript annotations for gene-level
 /// and exon-level classification.
-use crate::transcript::{Gene, SpliceSegments, Transcript};
+use crate::align::MultiMapR;
+use crate::transcriptome::{SplicedRecord, Transcript};
 
 use anyhow::{ensure, Result};
 use bed_utils::bed::map::GIntervalMap;
@@ -19,7 +19,7 @@ use std::collections::{BTreeMap, HashSet};
 pub struct Annotation {
     pub aln_sense: Vec<TranscriptAlignment>,
     pub aln_antisense: Vec<TranscriptAlignment>,
-    pub genes: Vec<Gene>,
+    pub genes: Vec<String>,
     pub region: AnnotationRegion,
     pub rescued: bool,
     pub chrom: String,
@@ -199,7 +199,7 @@ impl AlignmentAnnotator {
                     match aln.strand {
                         Strand::Forward => {
                             // Transcript sense alignment
-                            seen_genes.insert(aln.gene.clone());
+                            seen_genes.insert(aln.gene_id.clone());
                             transcripts.insert(tx_align.id.clone(), aln);
                         }
                         Strand::Reverse => {
@@ -216,11 +216,11 @@ impl AlignmentAnnotator {
                 .rev()
                 .for_each(|aln| match aln.strand {
                     Strand::Forward => {
-                        seen_genes.insert(aln.gene.clone());
-                        transcripts.insert(aln.gene.id.clone(), aln);
+                        seen_genes.insert(aln.gene_id.clone());
+                        transcripts.insert(aln.gene_id.clone(), aln);
                     }
                     Strand::Reverse => {
-                        antisense.insert(aln.gene.id.clone(), aln);
+                        antisense.insert(aln.gene_id.clone(), aln);
                     }
                 });
         }
@@ -228,7 +228,7 @@ impl AlignmentAnnotator {
         let mut annotation = Annotation {
             aln_sense: transcripts.into_values().collect::<Vec<_>>(),
             aln_antisense: antisense.into_values().collect::<Vec<_>>(),
-            genes: seen_genes.into_iter().collect::<Vec<Gene>>(),
+            genes: seen_genes.into_iter().collect::<Vec<_>>(),
             region: annotation_region,
             rescued: false,
             chrom,
@@ -250,7 +250,7 @@ impl AlignmentAnnotator {
         let tx_end = transcript.end;
         let genomic_start = read.alignment_start().unwrap().get() as u64;
         let genomic_end = read.alignment_end().unwrap().get() as u64;
-        let splice_segments = SpliceSegments::from(read);
+        let splice_segments = SplicedRecord::from(read);
 
         let is_exonic = splice_segments.is_exonic(transcript, self.region_min_overlap);
         if is_exonic || get_overlap(genomic_start, genomic_end, tx_start, tx_end) >= 1.0 {
@@ -271,9 +271,8 @@ impl AlignmentAnnotator {
                 Strand::Forward
             };
 
-            let gene = transcript.gene.clone();
             let mut alignment = TranscriptAlignment {
-                gene: gene.clone(),
+                gene_id: transcript.gene_id.clone(),
                 strand: tx_strand,
                 exon_align: None,
             };
@@ -281,7 +280,7 @@ impl AlignmentAnnotator {
             if is_exonic {
                 // compute offsets
                 let mut tx_offset = transcript.get_offset(genomic_start).unwrap().max(0) as u64;
-                let tx_length = transcript.len();
+                let tx_length = transcript.exon_len();
 
                 // align the read to the exons
                 if let Some((mut tx_cigar, tx_aligned_bases)) = splice_segments.align_junctions(
@@ -296,7 +295,7 @@ impl AlignmentAnnotator {
                         tx_cigar.as_mut().reverse();
                     };
                     alignment = TranscriptAlignment {
-                        gene,
+                        gene_id: transcript.gene_id.clone(),
                         strand: tx_strand,
                         exon_align: Some(TxAlignProperties {
                             id: transcript.id.clone(),
@@ -317,7 +316,7 @@ impl AlignmentAnnotator {
 #[derive(Eq, PartialEq, Debug)]
 pub struct PairAnnotationData {
     /// Genes associated with the pair of alignments.
-    pub genes: Vec<Gene>,
+    pub genes: Vec<String>,
 }
 
 impl PairAnnotationData {
@@ -435,7 +434,7 @@ pub enum AnnotationRegion {
 
 #[derive(Eq, PartialEq, Debug)]
 pub struct TranscriptAlignment {
-    pub gene: Gene,
+    pub gene_id: String,
     pub strand: Strand,
     pub exon_align: Option<TxAlignProperties>,
 }

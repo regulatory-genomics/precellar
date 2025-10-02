@@ -13,7 +13,7 @@ use polars::df;
 use rayon::iter::{IntoParallelIterator, ParallelIterator};
 use std::{collections::HashSet, path::PathBuf};
 
-use crate::{align::MultiMapR, qc::QcGeneQuant, transcript::Gene};
+use crate::{align::MultiMapR, qc::QcGeneQuant};
 
 use super::{
     annotate::AnnotationRegion, de_dups::count_unique_umi, AlignmentAnnotator, AnnotatedAlignment,
@@ -29,7 +29,7 @@ pub struct GeneAlignment {
 #[derive(Debug)]
 pub struct Quantifier {
     annotator: AlignmentAnnotator,
-    genes: IndexMap<String, Gene>,
+    genes: IndexMap<String, String>,
     temp_dir: Option<PathBuf>,
     chunk_size: usize,
     mito_genes: HashSet<usize>,
@@ -40,10 +40,7 @@ impl Quantifier {
         let genes = annotator
             .transcripts
             .iter()
-            .map(|(_, t)| {
-                let g = t.gene.clone();
-                (g.id.clone(), g)
-            })
+            .map(|(_, t)| (t.gene_id.clone(), t.gene_name.clone()))
             .collect();
         Self {
             annotator,
@@ -57,7 +54,7 @@ impl Quantifier {
     pub fn add_mito_dna(&mut self, mito_chr: &str) {
         let iter = self.annotator.transcripts.iter().flat_map(|(_, t)| {
             if t.chrom == mito_chr {
-                Some(self.genes.get_full(&t.gene.id).unwrap().0)
+                Some(self.genes.get_full(&t.gene_id).unwrap().0)
             } else {
                 None
             }
@@ -134,9 +131,9 @@ impl Quantifier {
             "mitochondrial_count" => mito_count
         )?)?;
 
-        adata.set_var_names(self.genes.values().map(|g| g.id.clone()).collect())?;
+        adata.set_var_names(self.genes.keys().map(|g| g.clone()).collect())?;
         adata.set_var(df!(
-            "gene_name" => self.genes.values().map(|g| g.name.clone()).collect::<Vec<_>>()
+            "gene_name" => self.genes.values().map(|g| g.clone()).collect::<Vec<_>>()
         )?)?;
 
         adata.close()?;
@@ -179,7 +176,7 @@ impl Quantifier {
                     (_, AnnotationRegion::Intronic) => AnnotationRegion::Intronic,
                     _ => AnnotationRegion::Exonic,
                 };
-                gene_id = self.genes.get_full(&gene.id).unwrap().0;
+                gene_id = self.genes.get_full(gene).unwrap().0;
             }
             AnnotatedAlignment::SeMapped(anno) => {
                 let genes = anno.genes;
@@ -188,7 +185,7 @@ impl Quantifier {
                 }
                 let gene = genes.iter().next().unwrap();
                 align_type = anno.region;
-                gene_id = self.genes.get_full(&gene.id).unwrap().0;
+                gene_id = self.genes.get_full(gene).unwrap().0;
             }
         }
 

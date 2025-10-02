@@ -1,5 +1,5 @@
 use super::quantification::GeneAlignment;
-use crate::transcript::annotate::AnnotationRegion;
+use crate::transcriptome::annotate::AnnotationRegion;
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 

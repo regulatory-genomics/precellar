@@ -1,3 +1,5 @@
+//! Raw fastq processing and alignment module.
+
 mod aligners;
 mod fastq;
 mod snv;
