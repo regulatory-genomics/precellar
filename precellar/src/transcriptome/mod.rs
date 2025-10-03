@@ -2,10 +2,11 @@
 //! 
 //! Key structs:
 //! * SplicedRecord: represents a spliced BAM/SAM record, split at refskips.
+//! * TranscriptAlignment: represents the alignment of a SplicedRecord to a Transcript.
+//! * AnnotatedAlignment: final annotated alignment, with gene information.
 
 mod quantification;
 mod annotate;
-pub(crate) mod de_dups;
 mod align;
 
 pub use quantification::Quantifier;

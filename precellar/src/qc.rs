@@ -1,5 +1,6 @@
 use crate::align::{AnnotatedFastq, MultiMap};
 use crate::fragment::Fragment;
+use crate::transcriptome::AnnotatedAlignment;
 
 use anyhow::Result;
 use bed_utils::bed::BEDLike;
@@ -436,15 +437,41 @@ impl QcFragment {
 
 #[derive(Debug, Default)]
 pub struct QcGeneQuant {
-    pub(crate) total_reads: u64,
+    total_raw_count: u64,
+    num_antisense: u64,
+    num_intergenic: u64,
+    num_exonic: u64,
+    num_intronic: u64,
     pub(crate) total_umi: u64,
     pub(crate) unique_umi: u64,
+}
+
+impl QcGeneQuant {
+    pub fn update(&mut self, alignment: Option<&AnnotatedAlignment>) {
+        self.total_raw_count += 1;
+        if let Some(anno) = alignment {
+            if anno.is_antisense() {
+                self.num_antisense += 1;
+            } 
+            if anno.is_intergenic() {
+                self.num_intergenic += 1;
+            } else if anno.is_exonic() {
+                self.num_exonic += 1;
+            } else if anno.is_intronic() {
+                self.num_intronic += 1;
+            }
+        }
+    }
 }
 
 impl From<QcGeneQuant> for Value {
     fn from(qc: QcGeneQuant) -> Self {
         json!({
-            "frac_transcriptome": qc.total_umi as f64 / qc.total_reads as f64,
+            "frac_intergenic": qc.num_intergenic as f64 / qc.total_raw_count as f64,
+            "frac_intronic": qc.num_intronic as f64 / qc.total_raw_count as f64,
+            "frac_exonic": qc.num_exonic as f64 / qc.total_raw_count as f64,
+            "frac_antisense": qc.num_antisense as f64 / qc.total_raw_count as f64,
+            //"frac_": (qc.num_intronic + qc.num_exonic) as f64 / qc.total_raw_count as f64,
             "frac_duplicates": 1.0 - qc.unique_umi as f64 / qc.total_umi as f64,
         })
     }

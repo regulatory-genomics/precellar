@@ -1,8 +1,9 @@
 use anyhow::Result;
 use noodles::sam;
-use noodles::sam::alignment::record::cigar::op::Kind;
-use noodles::sam::alignment::record::cigar::Op;
-use noodles::sam::alignment::record_buf::{Cigar, RecordBuf};
+use noodles::sam::alignment::{
+    record::cigar::{op::Kind, Op},
+    record_buf::{Cigar, RecordBuf},
+};
 use noodles::sam::record::data::field::value::base_modifications::group::Strand;
 use std::cmp;
 
@@ -61,6 +62,63 @@ struct Segment {
     cigar: Cigar,
 }
 
+impl bincode::Encode for Segment {
+    fn encode<E: bincode::enc::Encoder>(
+        &self,
+        encoder: &mut E,
+    ) -> core::result::Result<(), bincode::error::EncodeError> {
+        bincode::Encode::encode(&self.start, encoder)?;
+        bincode::Encode::encode(&self.end, encoder)?;
+        bincode::Encode::encode(&encode_cigar(&self.cigar).unwrap(), encoder)?;
+        Ok(())
+    }
+}
+
+impl<Context> bincode::Decode<Context> for Segment {
+    fn decode<D: bincode::de::Decoder<Context = Context>>(
+        decoder: &mut D,
+    ) -> core::result::Result<Self, bincode::error::DecodeError> {
+        let start = bincode::Decode::decode(decoder)?;
+        let end = bincode::Decode::decode(decoder)?;
+        let cigar_bytes: Vec<u8> = bincode::Decode::decode(decoder)?;
+        Ok(Self {
+            start,
+            end,
+            cigar: decode_cigar(&cigar_bytes).unwrap(),
+        })
+    }
+}
+
+impl<'de, Context> bincode::BorrowDecode<'de, Context> for Segment {
+    fn borrow_decode<D: bincode::de::BorrowDecoder<'de, Context = Context>>(
+        decoder: &mut D,
+    ) -> core::result::Result<Self, bincode::error::DecodeError> {
+        let start = bincode::BorrowDecode::borrow_decode(decoder)?;
+        let end = bincode::BorrowDecode::borrow_decode(decoder)?;
+        let cigar_bytes: Vec<u8> = bincode::BorrowDecode::borrow_decode(decoder)?;
+        Ok(Self {
+            start,
+            end,
+            cigar: decode_cigar(&cigar_bytes).unwrap(),
+        })
+    }
+}
+
+fn encode_cigar(cigar: &Cigar) -> Result<Vec<u8>> {
+    let mut buf = Vec::new();
+    sam::io::writer::record::write_cigar(&mut buf, &cigar)?;
+    Ok(buf)
+}
+
+fn decode_cigar(cigar: &[u8]) -> Result<Cigar> {
+    if cigar[0] == b'*' {
+        Ok(Vec::new().into())
+    } else {
+        let cigar = noodles::sam::record::Cigar::new(cigar);
+        Ok(Cigar::try_from(cigar)?)
+    }
+}
+
 /// SplicedRecord represents segments of a larger whole that have been cut and joined together
 /// to form a new, continuous sequence.
 /// It consists of the left and right clipping operations, and a list of components.
@@ -73,6 +131,75 @@ pub struct SplicedRecord {
     right_clip: Cigar,
     segments: Vec<Segment>,
     pub strandness: Strand, // Strand information of the read.
+}
+
+impl bincode::Encode for SplicedRecord {
+    fn encode<E: bincode::enc::Encoder>(
+        &self,
+        encoder: &mut E,
+    ) -> core::result::Result<(), bincode::error::EncodeError> {
+        bincode::Encode::encode(&self.chrom, encoder)?;
+        bincode::Encode::encode(&encode_cigar(&self.left_clip).unwrap(), encoder)?;
+        bincode::Encode::encode(&encode_cigar(&self.right_clip).unwrap(), encoder)?;
+        bincode::Encode::encode(&self.segments, encoder)?;
+        match self.strandness {
+            Strand::Forward => bincode::Encode::encode(&0u8, encoder)?,
+            Strand::Reverse => bincode::Encode::encode(&1u8, encoder)?,
+        }
+        Ok(())
+    }
+}
+
+impl<Context> bincode::Decode<Context> for SplicedRecord {
+    fn decode<D: bincode::de::Decoder<Context = Context>>(
+        decoder: &mut D,
+    ) -> core::result::Result<Self, bincode::error::DecodeError> {
+        let chrom = bincode::Decode::decode(decoder)?;
+        let left_cigar_bytes: Vec<u8> = bincode::Decode::decode(decoder)?;
+        let right_cigar_bytes: Vec<u8> = bincode::Decode::decode(decoder)?;
+        let segments = bincode::Decode::decode(decoder)?;
+        let strand_byte: u8 = bincode::Decode::decode(decoder)?;
+        let strandness = match strand_byte {
+            0 => Strand::Forward,
+            1 => Strand::Reverse,
+            _ => return Err(bincode::error::DecodeError::OtherString(
+                "Invalid strand byte".to_string(),
+            )),
+        };
+        Ok(Self {
+            chrom,
+            left_clip: decode_cigar(&left_cigar_bytes).unwrap(),
+            right_clip: decode_cigar(&right_cigar_bytes).unwrap(),
+            segments,
+            strandness,
+        })
+    }
+}
+
+impl<'de, Context> bincode::BorrowDecode<'de, Context> for SplicedRecord {
+    fn borrow_decode<D: bincode::de::BorrowDecoder<'de, Context = Context>>(
+        decoder: &mut D,
+    ) -> core::result::Result<Self, bincode::error::DecodeError> {
+        let chrom = bincode::BorrowDecode::borrow_decode(decoder)?;
+        let left_cigar_bytes: Vec<u8> = bincode::BorrowDecode::borrow_decode(decoder)?;
+        let right_cigar_bytes: Vec<u8> = bincode::BorrowDecode::borrow_decode(decoder)?;
+        let segments = bincode::BorrowDecode::borrow_decode(decoder)?;
+        let strand_byte: u8 = bincode::BorrowDecode::borrow_decode(decoder)?;
+        let strandness = match strand_byte {
+            0 => Strand::Forward,
+            1 => Strand::Reverse,
+            _ => return Err(bincode::error::DecodeError::OtherString(
+                "Invalid strand byte".to_string(),
+            )),
+        };
+        Ok(Self {
+            chrom,
+            left_clip: decode_cigar(&left_cigar_bytes).unwrap(),
+            right_clip: decode_cigar(&right_cigar_bytes).unwrap(),
+            segments,
+            strandness,
+        })
+    }
 }
 
 impl SplicedRecord {
@@ -216,10 +343,9 @@ impl SplicedRecord {
                 let tx_length = transcript.exon_len();
 
                 // align the read to the exons
-                if let Some((mut tx_cigar, tx_aligned_bases)) = self.align_junctions(
-                    transcript,
-                    opts,
-                ) {
+                if let Some((mut tx_cigar, tx_aligned_bases)) =
+                    self.align_junctions(transcript, opts)
+                {
                     // flip reverse strand
                     if transcript.strand == Strand::Reverse {
                         tx_offset = tx_length - (tx_offset + tx_aligned_bases);
@@ -235,7 +361,7 @@ impl SplicedRecord {
     }
 
     /// Align the read to exons of a transcript. Returns the aligned cigar and the number of aligned bases.
-    /// 
+    ///
     /// Returns None if the alignment cannot be aligned to the transcript.
     fn align_junctions(
         &self,
@@ -446,3 +572,6 @@ fn mark_deleted_ref_bases(cigar: &mut Cigar, del_len: usize, reverse: bool) -> C
         new_cigar
     }
 }
+
+//fn detect_strandness(records: impl IntoIterator<Item = SplicedRecord>) -> Strand {
+//}

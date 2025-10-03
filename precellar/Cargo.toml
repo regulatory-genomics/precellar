@@ -16,7 +16,7 @@ itertools = "0.14"
 indexmap = "2.11"
 log = "0.4"
 lexical = "7.0"
-nalgebra-sparse = "0.10"
+nalgebra-sparse = "0.11"
 noodles = { version = "0.101", features = ["core", "gtf", "fastq", "bam", "sam", "async"] }
 polars = "0.51"
 rayon = "1.11"

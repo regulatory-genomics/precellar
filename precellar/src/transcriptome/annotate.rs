@@ -17,40 +17,56 @@ use std::collections::{BTreeMap, HashSet};
 
 #[derive(Encode, Decode, Eq, PartialEq, Ord, PartialOrd, Debug, Copy, Clone, Hash)]
 pub enum RegionType {
+    /// Aligned to exonic regions of a gene
     Exonic,
+    /// Aligned to intronic regions of a gene
     Intronic,
+    /// Aligned to regions outside of any gene
     Intergenic,
 }
 
 #[derive(Eq, PartialEq, Debug, Clone)]
-pub struct Annotation {
+struct Annotation {
     aln_sense: Vec<TranscriptAlignment>,
     aln_antisense: Vec<TranscriptAlignment>,
     genes: HashSet<String>,
     region_type: RegionType,
 }
 
-#[derive(Debug)]
+impl Annotation {
+    fn is_antisense(&self) -> bool {
+        !self.aln_antisense.is_empty() && self.aln_sense.is_empty()
+    }
+}
+
+#[derive(Debug, Encode, Decode)]
 pub struct AnnotatedAlignment {
     read1: SplicedRecord,
     read2: Option<SplicedRecord>,
-    mapped_genes: Vec<String>, // genes that this read maps to (transcriptomically)
+    uniquely_mapped_gene: Option<String>, // genes that this read uniquely maps to (transcriptomically)
     region_type: RegionType,
-    rescued: bool,
+    antisense: bool,
+    umi: Option<String>,
 }
 
 impl AnnotatedAlignment {
-    pub fn from_se(rec: SplicedRecord, anno: Annotation) -> Self {
+    fn from_se(rec: SplicedRecord, anno: Annotation) -> Self {
+        let antisense = anno.is_antisense();
         Self {
             read1: rec,
             read2: None,
-            mapped_genes: anno.genes.into_iter().collect(),
+            uniquely_mapped_gene: if anno.genes.len() == 1 {
+                Some(anno.genes.iter().next().unwrap().to_string())
+            } else {
+                None
+            },
             region_type: anno.region_type,
-            rescued: false,
+            antisense,
+            umi: None,
         }
     }
 
-    pub fn from_pe(
+    fn from_pe(
         read1: SplicedRecord,
         anno1: Annotation,
         read2: SplicedRecord,
@@ -62,12 +78,19 @@ impl AnnotatedAlignment {
             (RegionType::Intergenic, RegionType::Intergenic) => RegionType::Intergenic,
             _ => RegionType::Exonic,
         };
+        let antisense = anno1.is_antisense() && anno2.is_antisense();
+        let mapped_genes: Vec<_> = find_common_genes(&anno1, &anno2).into_iter().collect();
         Self {
             read1,
             read2: Some(read2),
-            mapped_genes: find_common_genes(&anno1, &anno2).into_iter().collect(),
+            uniquely_mapped_gene: if mapped_genes.len() == 1 {
+                Some(mapped_genes[0].clone())
+            } else {
+                None
+            },
             region_type: region,
-            rescued: false,
+            antisense,
+            umi: None,
         }
     }
 
@@ -75,13 +98,34 @@ impl AnnotatedAlignment {
         self.read2.is_some()
     }
 
+    // A read is counted as antisense if it has any alignments that are consistent
+    // with an exon of a transcript but antisense to it, and has no sense alignments.
+    pub fn is_antisense(&self) -> bool {
+        self.antisense
+    }
+
+    pub fn is_intergenic(&self) -> bool {
+        self.region_type == RegionType::Intergenic
+    }
+
+    pub fn is_exonic(&self) -> bool {
+        self.region_type == RegionType::Exonic
+    }
+
+    pub fn is_intronic(&self) -> bool {
+        self.region_type == RegionType::Intronic
+    }
+
+    /// Returns true if the read is confidently mapped to a single gene.
+    /// It is considered confidently mapped if it maps to exonic or intronic regions of a single gene.
+    /// Or if it is intergenic and maps to a single locus.
+    pub fn is_confidently_mapped(&self) -> bool {
+        self.uniquely_mapped_gene.is_some() || self.is_intergenic() || self.is_antisense()
+    }
+
     /// Returns the gene if the read is confidently mapped to a single gene.
-    pub fn confidently_mapped_gene(&self) -> Option<&str> {
-        if self.mapped_genes.len() == 1 {
-            Some(&self.mapped_genes[0])
-        } else {
-            None
-        }
+    pub fn uniquely_mapped_gene(&self) -> Option<&str> {
+        self.uniquely_mapped_gene.as_deref()
     }
 
     pub fn read1(&self) -> &SplicedRecord {
@@ -90,6 +134,10 @@ impl AnnotatedAlignment {
 
     pub fn read2(&self) -> Option<&SplicedRecord> {
         self.read2.as_ref()
+    }
+
+    pub fn umi(&self) -> Option<&str> {
+        self.umi.as_deref()
     }
 
     pub fn region_type(&self) -> RegionType {
@@ -126,18 +174,22 @@ impl AlignmentAnnotator {
     ///
     /// # Arguments
     /// * `header` - Reference to the SAM header.
-    /// * `rec` - Vector of single-end alignment records.
+    /// * `multi_map` - Vector of single-end alignment records.
+    /// 
+    /// Returns `Some(AnnotatedAlignment)` if a confident alignment is found, otherwise `None`.
     pub fn annotate_alignments_se(
         &self,
         header: &sam::Header,
-        multi_map: MultiMapR,
+        multi_map: &MultiMapR,
     ) -> Option<AnnotatedAlignment> {
         let results = multi_map.iter().flat_map(|rec| {
             let spliced_rec = SplicedRecord::new(rec, header).unwrap()?;
             let anno = self.annotate_alignment(&spliced_rec).unwrap();
             Some((spliced_rec, anno))
         });
-        rescue_alignments_se(results)
+        let mut aln = rescue_alignments_se(results)?;
+        aln.umi = multi_map.umi().unwrap();
+        Some(aln)
     }
 
     /// Annotates a batch of paired-end alignments.
@@ -149,8 +201,8 @@ impl AlignmentAnnotator {
     pub fn annotate_alignments_pe(
         &self,
         header: &sam::Header,
-        multi_map1: MultiMapR,
-        multi_map2: MultiMapR,
+        multi_map1: &MultiMapR,
+        multi_map2: &MultiMapR,
     ) -> Option<AnnotatedAlignment> {
         let result = multi_map1
             .iter()
@@ -162,7 +214,9 @@ impl AlignmentAnnotator {
                 let anno2 = self.annotate_alignment(&rec2).unwrap();
                 Some(((rec1, anno1), (rec2, anno2)))
             });
-        rescue_alignments_pe(result)
+        let mut aln = rescue_alignments_pe(result)?;
+        aln.umi = multi_map1.umi().unwrap();
+        Some(aln)
     }
 
     fn annotate_alignment(&self, spliced_rec: &SplicedRecord) -> Result<Annotation> {
@@ -229,9 +283,9 @@ impl AlignmentAnnotator {
 }
 
 /// When multiple genomic alignments exist for a single-end read, attempts to rescue one
-/// using transcript annotations. A read can be rescued if it maps to a single gene
-/// transcriptomically, even if it maps to multiple genomic loci,
-/// e.g., due to pseudogenes or repetitive elements.
+/// using transcript annotations. 
+/// If a read mapped to exonic loci from a single gene and also to non-exonic loci,
+/// it is considered uniquely mapped to one of the exonic loci.
 fn rescue_alignments_se(
     recs: impl IntoIterator<Item = (SplicedRecord, Annotation)>,
 ) -> Option<AnnotatedAlignment> {
@@ -260,8 +314,7 @@ fn rescue_alignments_se(
         Some(AnnotatedAlignment::from_se(first_rec.0, first_rec.1))
     } else if seen_genes.len() == 1 && rescued.is_some() {
         let rescued = rescued.unwrap();
-        let mut anno = AnnotatedAlignment::from_se(rescued.0, rescued.1);
-        anno.rescued = true;
+        let anno = AnnotatedAlignment::from_se(rescued.0, rescued.1);
         Some(anno)
     } else {
         None
@@ -302,9 +355,8 @@ fn rescue_alignments_pe(
         ))
     } else if seen_genes.len() == 1 && rescued.is_some() {
         let rescued = rescued.unwrap();
-        let mut anno =
+        let anno =
             AnnotatedAlignment::from_pe(rescued.0 .0, rescued.0 .1, rescued.1 .0, rescued.1 .1);
-        anno.rescued = true;
         Some(anno)
     } else {
         None
@@ -312,7 +364,7 @@ fn rescue_alignments_pe(
 }
 
 /// Take the intersection of the non-empty gene sets of the mates
-pub fn find_common_genes(anno1: &Annotation, anno2: &Annotation) -> HashSet<String> {
+fn find_common_genes(anno1: &Annotation, anno2: &Annotation) -> HashSet<String> {
     match (!anno1.genes.is_empty(), !anno2.genes.is_empty()) {
         (true, false) => anno1.genes.clone(),
         (false, true) => anno2.genes.clone(),
