@@ -1,7 +1,7 @@
 use std::{ops::{Deref, DerefMut}, path::PathBuf};
 use anyhow::Result;
 use noodles::sam::Header;
-use precellar::{align::{AnnotatedFastq, Aligner}, transcriptome::{AlignmentAnnotator, Transcript}};
+use precellar::{align::{Aligner, AnnotatedFastq}, transcriptome::{AlignmentAnnotator, JunctionAlignOptions, Transcript}};
 use pyo3::prelude::*;
 use star_aligner::{StarAligner, StarOpts};
 use bwa_mem2::{AlignerOpts, BurrowsWheelerAligner, FMIndex};
@@ -19,12 +19,12 @@ impl AlignerRef<'_> {
         }
     }
 
-    pub fn transcript_annotator(&self) -> Option<AlignmentAnnotator> {
+    pub fn transcript_annotator(&self, options: JunctionAlignOptions) -> Option<AlignmentAnnotator> {
         match self {
             AlignerRef::STAR(aligner) => {
                 let transcriptome: Vec<_> = aligner.get_transcriptome().unwrap().iter()
                     .map(|t| Transcript::try_from(t.clone()).unwrap()).collect();
-                Some(AlignmentAnnotator::new(transcriptome))
+                Some(AlignmentAnnotator::new(transcriptome, options))
             }
             AlignerRef::BWA(_) => None,
         }

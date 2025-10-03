@@ -7,9 +7,12 @@ use log::info;
 use noodles::sam::{self, alignment::io::Write};
 use precellar::align::{Aligner, AlignmentResult};
 use precellar::qc::Metric;
+use precellar::transcriptome::JunctionAlignOptions;
 use pyo3::types::PyDict;
 use pyo3::{prelude::*, BoundObject};
+use noodles::sam::record::data::field::value::base_modifications::group::Strand;
 use serde_json::Value;
+use core::panic;
 use std::{path::PathBuf, str::FromStr};
 
 use precellar::{
@@ -91,6 +94,8 @@ pub fn make_bwa_index(fasta: PathBuf, genome_prefix: PathBuf) -> Result<()> {
 /// compute_snv: bool
 ///     Whether to compute single nucleotide variants (SNVs) from the alignments.
 ///     If True, the SNVs will be computed and added to the fragment file.
+/// strand_specific: Literal['+', '-'] | None
+///     The strand specificity of the assay. Can be "+", "-", or None
 /// compression: str | None
 ///     The compression algorithm to use for the output fragment file.
 ///     If None, the compression algorithm will be inferred from the file extension.
@@ -120,6 +125,7 @@ pub fn make_bwa_index(fasta: PathBuf, genome_prefix: PathBuf) -> Result<()> {
         output, modality=None, output_type="alignment",
         mito_dna=vec!["chrM".to_owned(), "M".to_owned()],
         shift_left=4, shift_right=-5, compute_snv=false,
+        strand_specific=None,
         compression=None, compression_level=None,
         temp_dir=None, num_threads=8, chunk_size=10000000,
     ),
@@ -127,6 +133,7 @@ pub fn make_bwa_index(fasta: PathBuf, genome_prefix: PathBuf) -> Result<()> {
         output, modality=None, output_type='alignment',
         mito_dna=['chrM', 'M'],
         shift_left=4, shift_right=-5, compute_snv=False,
+        strand_specific=None,
         compression=None, compression_level=None,
         temp_dir=None, num_threads=8, chunk_size=10000000)"
 )]
@@ -141,6 +148,7 @@ pub fn align<'py>(
     shift_left: i64,
     shift_right: i64,
     compute_snv: bool,
+    strand_specific: Option<&str>,
     compression: Option<&str>,
     compression_level: Option<u32>,
     temp_dir: Option<PathBuf>,
@@ -160,7 +168,15 @@ pub fn align<'py>(
 
     let mut aligner = AlignerRef::try_from(aligner)?;
     let header = aligner.header();
-    let transcript_annotator = aligner.transcript_annotator();
+    let junction_align_options = JunctionAlignOptions {
+        chemistry_strandedness: strand_specific.map(|s| match s {
+            "+" => Strand::Forward, 
+            "-" => Strand::Reverse,
+            _ => panic!("strand_specific must be '+' or '-'"),
+        }),
+        ..Default::default()
+    };
+    let transcript_annotator = aligner.transcript_annotator(junction_align_options);
 
     let mut processor = FastqProcessor::new(assay)
         .with_modality(modality)

@@ -15,15 +15,13 @@ use std::{collections::HashSet, path::PathBuf};
 
 use crate::{align::MultiMapR, qc::QcGeneQuant};
 
-use super::{
-    annotate::AnnotationRegion, de_dups::count_unique_umi, AlignmentAnnotator, AnnotatedAlignment,
-};
+use super::{annotate::RegionType, de_dups::count_unique_umi, AlignmentAnnotator};
 
 #[derive(Debug, Encode, Decode)]
 pub struct GeneAlignment {
     pub idx: usize,
     pub umi: Option<String>,
-    pub align_type: AnnotationRegion,
+    pub align_type: RegionType,
 }
 
 #[derive(Debug)]
@@ -113,9 +111,7 @@ impl Quantifier {
                     mito_count.push(r.uniq_mito);
                 });
                 let (nrows, ncols, indptr, indices, data) = to_csr_data(
-                    results
-                        .into_iter()
-                        .map(|r| r.into_counts().collect()),
+                    results.into_iter().map(|r| r.into_counts().collect()),
                     num_cols,
                 );
                 from_csr_data(nrows, ncols, indptr, indices, data).unwrap()
@@ -161,36 +157,10 @@ impl Quantifier {
             self.annotator.annotate_alignments_se(header, rec)
         }?;
 
-        let gene_id;
-        let align_type;
-
-        match anno {
-            AnnotatedAlignment::PeMapped(a1, a2, anno) => {
-                let genes = anno.genes;
-                if genes.len() != 1 {
-                    return None;
-                }
-                let gene = genes.iter().next().unwrap();
-                align_type = match (a1.region, a2.region) {
-                    (AnnotationRegion::Intronic, _) => AnnotationRegion::Intronic,
-                    (_, AnnotationRegion::Intronic) => AnnotationRegion::Intronic,
-                    _ => AnnotationRegion::Exonic,
-                };
-                gene_id = self.genes.get_full(gene).unwrap().0;
-            }
-            AnnotatedAlignment::SeMapped(anno) => {
-                let genes = anno.genes;
-                if genes.len() != 1 {
-                    return None;
-                }
-                let gene = genes.iter().next().unwrap();
-                align_type = anno.region;
-                gene_id = self.genes.get_full(gene).unwrap().0;
-            }
-        }
-
+        let align_type = anno.region_type();
+        let gene_id = anno.confidently_mapped_gene()?;
         let alignment = GeneAlignment {
-            idx: gene_id,
+            idx: self.genes.get_full(gene_id).unwrap().0,
             umi,
             align_type,
         };

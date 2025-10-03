@@ -1,5 +1,5 @@
 use super::quantification::GeneAlignment;
-use crate::transcriptome::annotate::AnnotationRegion;
+use crate::transcriptome::annotate::RegionType;
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
@@ -43,13 +43,13 @@ where
         let umi = alignment.umi.map(|x| x.into_bytes()).unwrap_or(Vec::new());
         
         match alignment.align_type {
-            AnnotationRegion::Exonic => {
+            RegionType::Exonic => {
                 *umigene_counts_exon.entry((umi, gene)).or_insert(0) += 1u64;
             }
-            AnnotationRegion::Intronic => {
+            RegionType::Intronic => {
                 *umigene_counts_intron.entry((umi, gene)).or_insert(0) += 1u64;
             }
-            AnnotationRegion::Intergenic => {},
+            RegionType::Intergenic => {},
         }
     });
 
