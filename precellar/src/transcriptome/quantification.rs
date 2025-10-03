@@ -14,7 +14,7 @@ use rayon::{
     slice::ParallelSlice,
 };
 use std::{
-    collections::{BTreeMap, HashMap, HashSet},
+    collections::{BTreeMap, HashMap},
     path::PathBuf,
 };
 
@@ -27,7 +27,6 @@ pub struct Quantifier {
     genes: IndexMap<String, String>,
     temp_dir: Option<PathBuf>,
     chunk_size: usize,
-    mito_genes: HashSet<usize>,
 }
 
 impl Quantifier {
@@ -36,25 +35,14 @@ impl Quantifier {
             .transcripts
             .iter()
             .map(|(_, t)| (t.gene_id.clone(), t.gene_name.clone()))
+            .sorted_by(|a, b| a.1.cmp(&b.1))  // sort by gene names
             .collect();
         Self {
             annotator,
             genes,
             temp_dir: None,
             chunk_size: 50000000,
-            mito_genes: HashSet::new(),
         }
-    }
-
-    pub fn add_mito_dna(&mut self, mito_chr: &str) {
-        let iter = self.annotator.transcripts.iter().flat_map(|(_, t)| {
-            if t.chrom == mito_chr {
-                Some(self.genes.get_full(&t.gene_id).unwrap().0)
-            } else {
-                None
-            }
-        });
-        self.mito_genes.extend(iter);
     }
 
     pub fn quantify<'a, I, P>(
