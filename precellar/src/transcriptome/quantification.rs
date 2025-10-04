@@ -1,12 +1,13 @@
 use anndata::{
     data::utils::{from_csr_data, to_csr_data},
-    AnnData, AnnDataOp, ArrayData, AxisArraysOp,
+    AnnData, AnnDataOp, ArrayData, AxisArraysOp, ElemCollectionOp,
 };
 use anndata_hdf5::H5;
 use anyhow::Result;
 use bed_utils::extsort::ExternalSorterBuilder;
 use indexmap::IndexMap;
 use itertools::Itertools;
+use nalgebra_sparse::CsrMatrix;
 use noodles::sam::Header;
 use polars::df;
 use rayon::{
@@ -19,7 +20,9 @@ use std::{
 };
 
 use super::AlignmentAnnotator;
-use crate::{align::MultiMapR, qc::QcGeneQuant, transcriptome::AnnotatedAlignment};
+use crate::{
+    align::MultiMapR, genome::GenomeBaseIndex, qc::QcGeneQuant, transcriptome::AnnotatedAlignment,
+};
 
 #[derive(Debug)]
 pub struct Quantifier {
@@ -35,7 +38,7 @@ impl Quantifier {
             .transcripts
             .iter()
             .map(|(_, t)| (t.gene_id.clone(), t.gene_name.clone()))
-            .sorted_by(|a, b| a.1.cmp(&b.1))  // sort by gene names
+            .sorted_by(|a, b| a.1.cmp(&b.1)) // sort by gene names
             .collect();
         Self {
             annotator,
@@ -56,6 +59,8 @@ impl Quantifier {
         P: AsRef<std::path::Path>,
     {
         let mut qc = QcGeneQuant::default();
+        let mut num_unique_umi = 0;
+        let genome_index = GenomeBaseIndex::new(header);
 
         let adata: AnnData<H5> = AnnData::new(output)?;
         let num_cols = self.genes.len();
@@ -75,25 +80,31 @@ impl Quantifier {
                     group.map(|x| x.1).collect::<Vec<_>>()
                 })
                 .chunks(512);
-            let (total, exonic, intronic, reads): (Vec<_>, Vec<_>, Vec<_>, Vec<_>) =
+            let (total, exonic, intronic, coverage): (Vec<_>, Vec<_>, Vec<_>, Vec<_>) =
                 alignments_chunks
                     .into_iter()
                     .flat_map(|chunk| {
                         let results: Vec<_> = chunk
                             .collect::<Vec<_>>()
                             .into_par_iter()
-                            .map(|aln| self.count_one_cell(aln))
+                            .map(|aln| self.count_one_cell(&genome_index, aln))
                             .collect();
                         results
                     })
                     .multiunzip();
 
+            num_unique_umi += total.iter().flat_map(|x| x.iter().map(|(_, c)| *c as u64)).sum::<u64>();
             let total = make_csr(total, num_cols);
             let exonic = make_csr(exonic, num_cols);
             let intronic = make_csr(intronic, num_cols);
+            let coverage = make_csr(coverage, genome_index.len());
             adata.set_x(total)?;
             adata.layers().add("intronic", intronic)?;
             adata.layers().add("exonic", exonic)?;
+            adata.obsm().add("fragment_single", coverage)?;
+            adata
+                .uns()
+                .add("reference_sequences", genome_index.get_chrom_sizes())?;
         }
 
         adata.set_obs_names(barcodes.into())?;
@@ -103,17 +114,19 @@ impl Quantifier {
         )?)?;
 
         adata.close()?;
+        qc.num_unique_umi = num_unique_umi;
         Ok(qc)
     }
 
     fn count_one_cell(
         &self,
+        index: &GenomeBaseIndex,
         alignments: impl IntoIterator<Item = AnnotatedAlignment>,
     ) -> (
         Vec<(usize, u32)>,
         Vec<(usize, u32)>,
         Vec<(usize, u32)>,
-        Vec<AnnotatedAlignment>,
+        Vec<(usize, i32)>,
     ) {
         let mut exonic_count: BTreeMap<usize, u32> = BTreeMap::new();
         let mut intronic_count: BTreeMap<usize, u32> = BTreeMap::new();
@@ -179,11 +192,12 @@ impl Quantifier {
             let entry = total.entry(*gene).or_insert(0);
             *entry = entry.checked_add(*count).unwrap();
         }
+        let coverage = index.count_fragments(uniq_alignments.iter().flat_map(|a| a.to_fragments()));
         (
             total.into_iter().collect(),
             exonic_count.into_iter().collect(),
             intronic_count.into_iter().collect(),
-            uniq_alignments,
+            coverage,
         )
     }
 }
@@ -311,7 +325,11 @@ fn make_umi_map<T>(umi_count: &HashMap<Vec<u8>, (u64, T)>) -> HashMap<Vec<u8>, V
     corrections
 }
 
-fn make_csr(data: Vec<Vec<(usize, u32)>>, num_cols: usize) -> ArrayData {
+fn make_csr<T>(data: Vec<Vec<(usize, T)>>, num_cols: usize) -> ArrayData
+where 
+    ArrayData: From<CsrMatrix<T>>,
+    ArrayData: From<anndata::data::CsrNonCanonical<T>>,
+{
     let (nrows, ncols, indptr, indices, data) = to_csr_data(data, num_cols);
     from_csr_data(nrows, ncols, indptr, indices, data).unwrap()
 }

@@ -7,6 +7,7 @@ use noodles::sam::alignment::{
 use noodles::sam::record::data::field::value::base_modifications::group::Strand;
 use std::cmp;
 
+use crate::fragment::Fragment;
 use crate::transcriptome::{Exon, Transcript};
 
 #[derive(Debug, Clone)]
@@ -130,7 +131,7 @@ pub struct SplicedRecord {
     left_clip: Cigar,
     right_clip: Cigar,
     segments: Vec<Segment>,
-    pub strandness: Strand, // Strand information of the read.
+    pub strand: bed_utils::bed::Strand, // Strand information of the read.
 }
 
 impl bincode::Encode for SplicedRecord {
@@ -142,10 +143,7 @@ impl bincode::Encode for SplicedRecord {
         bincode::Encode::encode(&encode_cigar(&self.left_clip).unwrap(), encoder)?;
         bincode::Encode::encode(&encode_cigar(&self.right_clip).unwrap(), encoder)?;
         bincode::Encode::encode(&self.segments, encoder)?;
-        match self.strandness {
-            Strand::Forward => bincode::Encode::encode(&0u8, encoder)?,
-            Strand::Reverse => bincode::Encode::encode(&1u8, encoder)?,
-        }
+        bincode::Encode::encode(&self.strand, encoder)?;
         Ok(())
     }
 }
@@ -158,20 +156,13 @@ impl<Context> bincode::Decode<Context> for SplicedRecord {
         let left_cigar_bytes: Vec<u8> = bincode::Decode::decode(decoder)?;
         let right_cigar_bytes: Vec<u8> = bincode::Decode::decode(decoder)?;
         let segments = bincode::Decode::decode(decoder)?;
-        let strand_byte: u8 = bincode::Decode::decode(decoder)?;
-        let strandness = match strand_byte {
-            0 => Strand::Forward,
-            1 => Strand::Reverse,
-            _ => return Err(bincode::error::DecodeError::OtherString(
-                "Invalid strand byte".to_string(),
-            )),
-        };
+        let strand = bincode::Decode::decode(decoder)?;
         Ok(Self {
             chrom,
             left_clip: decode_cigar(&left_cigar_bytes).unwrap(),
             right_clip: decode_cigar(&right_cigar_bytes).unwrap(),
             segments,
-            strandness,
+            strand,
         })
     }
 }
@@ -184,20 +175,13 @@ impl<'de, Context> bincode::BorrowDecode<'de, Context> for SplicedRecord {
         let left_cigar_bytes: Vec<u8> = bincode::BorrowDecode::borrow_decode(decoder)?;
         let right_cigar_bytes: Vec<u8> = bincode::BorrowDecode::borrow_decode(decoder)?;
         let segments = bincode::BorrowDecode::borrow_decode(decoder)?;
-        let strand_byte: u8 = bincode::BorrowDecode::borrow_decode(decoder)?;
-        let strandness = match strand_byte {
-            0 => Strand::Forward,
-            1 => Strand::Reverse,
-            _ => return Err(bincode::error::DecodeError::OtherString(
-                "Invalid strand byte".to_string(),
-            )),
-        };
+        let strand = bincode::Decode::decode(decoder)?;
         Ok(Self {
             chrom,
             left_clip: decode_cigar(&left_cigar_bytes).unwrap(),
             right_clip: decode_cigar(&right_cigar_bytes).unwrap(),
             segments,
-            strandness,
+            strand,
         })
     }
 }
@@ -257,17 +241,17 @@ impl SplicedRecord {
         splice_segments.push(curr_segment);
 
         let flag = read.flags();
-        let strandness = if flag.is_reverse_complemented() {
+        let strand = if flag.is_reverse_complemented() {
             if flag.is_segmented() && flag.is_last_segment() {
-                Strand::Forward
+                bed_utils::bed::Strand::Forward
             } else {
-                Strand::Reverse
+                bed_utils::bed::Strand::Reverse
             }
         } else {
             if flag.is_segmented() && flag.is_last_segment() {
-                Strand::Reverse
+                bed_utils::bed::Strand::Reverse
             } else {
-                Strand::Forward
+                bed_utils::bed::Strand::Forward
             }
         };
         Ok(Some(Self {
@@ -275,7 +259,7 @@ impl SplicedRecord {
             left_clip: left_clip.into(),
             right_clip: right_clip.into(),
             segments: splice_segments,
-            strandness,
+            strand,
         }))
     }
 
@@ -320,8 +304,8 @@ impl SplicedRecord {
         let is_exonic = self.is_exonic(transcript, opts.region_min_overlap);
         if is_exonic || get_overlap(genomic_start, genomic_end, tx_start, tx_end) >= 1.0 {
             let is_antisense = match opts.chemistry_strandedness {
-                Some(Strand::Forward) => transcript.strand != self.strandness,
-                Some(Strand::Reverse) => transcript.strand == self.strandness,
+                Some(Strand::Forward) => transcript.strand != self.strand,
+                Some(Strand::Reverse) => transcript.strand == self.strand,
                 _ => false, // if unstranded, always sense
             };
             let tx_strand = if is_antisense {
@@ -347,7 +331,7 @@ impl SplicedRecord {
                     self.align_junctions(transcript, opts)
                 {
                     // flip reverse strand
-                    if transcript.strand == Strand::Reverse {
+                    if transcript.strand == bed_utils::bed::Strand::Reverse {
                         tx_offset = tx_length - (tx_offset + tx_aligned_bases);
                         tx_cigar.as_mut().reverse();
                     };
@@ -358,6 +342,18 @@ impl SplicedRecord {
         } else {
             None
         }
+    }
+
+    pub fn to_fragments(&self) -> impl Iterator<Item = Fragment> + '_ {
+        self.segments.iter().map(move |segment| Fragment {
+            chrom: self.chrom.clone(),
+            start: segment.start, 
+            end: segment.end,
+            barcode: None,
+            count: 1,
+            strand: Some(self.strand),
+            extended: None,
+        })
     }
 
     /// Align the read to exons of a transcript. Returns the aligned cigar and the number of aligned bases.

@@ -442,8 +442,7 @@ pub struct QcGeneQuant {
     num_intergenic: u64,
     num_exonic: u64,
     num_intronic: u64,
-    pub(crate) total_umi: u64,
-    pub(crate) unique_umi: u64,
+    pub(crate) num_unique_umi: u64,
 }
 
 impl QcGeneQuant {
@@ -466,13 +465,14 @@ impl QcGeneQuant {
 
 impl From<QcGeneQuant> for Value {
     fn from(qc: QcGeneQuant) -> Self {
+        let num_transcriptomic = (qc.num_exonic + qc.num_intronic - qc.num_antisense) as f64;
         json!({
             "frac_intergenic": qc.num_intergenic as f64 / qc.total_raw_count as f64,
             "frac_intronic": qc.num_intronic as f64 / qc.total_raw_count as f64,
             "frac_exonic": qc.num_exonic as f64 / qc.total_raw_count as f64,
             "frac_antisense": qc.num_antisense as f64 / qc.total_raw_count as f64,
-            //"frac_": (qc.num_intronic + qc.num_exonic) as f64 / qc.total_raw_count as f64,
-            "frac_duplicates": 1.0 - qc.unique_umi as f64 / qc.total_umi as f64,
+            "frac_transcriptomic": num_transcriptomic / qc.total_raw_count as f64,
+            "frac_duplicates": 1.0 - qc.num_unique_umi as f64 / num_transcriptomic,
         })
     }
 }

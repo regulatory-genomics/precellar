@@ -14,7 +14,7 @@ pub use annotate::{AlignmentAnnotator, AnnotatedAlignment};
 pub use align::JunctionAlignOptions;
 
 use anyhow::{bail, ensure, Result};
-use noodles::sam::record::data::field::value::base_modifications::group::Strand;
+use bed_utils::bed::Strand;
 
 /// Represents a transcript. 
 #[derive(Debug, Clone)]

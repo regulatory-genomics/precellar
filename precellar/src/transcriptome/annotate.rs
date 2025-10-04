@@ -2,6 +2,7 @@
 /// It supports both single-end and paired-end alignments and uses transcript annotations for gene-level
 /// and exon-level classification.
 use crate::align::MultiMapR;
+use crate::fragment::Fragment;
 use crate::transcriptome::align::JunctionAlignOptions;
 use crate::transcriptome::align::SplicedRecord;
 use crate::transcriptome::align::TranscriptAlignment;
@@ -142,6 +143,10 @@ impl AnnotatedAlignment {
 
     pub fn region_type(&self) -> RegionType {
         self.region_type
+    }
+
+    pub fn to_fragments(&self) -> impl Iterator<Item = Fragment> + '_ {
+        self.read1.to_fragments().chain(self.read2.iter().flat_map(|r| r.to_fragments()))
     }
 }
 
