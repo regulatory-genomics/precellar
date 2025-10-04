@@ -11,7 +11,7 @@ mod align;
 
 pub use quantification::Quantifier;
 pub use annotate::{AlignmentAnnotator, AnnotatedAlignment};
-pub use align::JunctionAlignOptions;
+pub use align::{ChemistryStrandness, JunctionAlignOptions};
 
 use anyhow::{bail, ensure, Result};
 use bed_utils::bed::Strand;

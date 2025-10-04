@@ -10,6 +10,13 @@ use std::cmp;
 use crate::fragment::Fragment;
 use crate::transcriptome::{Exon, Transcript};
 
+#[derive(Debug, Copy, Clone)]
+pub enum ChemistryStrandness {
+    Forward,
+    Reverse,
+    Unstranded,
+}
+
 #[derive(Debug, Clone)]
 pub struct JunctionAlignOptions {
     /// Minimum overlap fraction required for a region to be considered exonic.
@@ -21,7 +28,7 @@ pub struct JunctionAlignOptions {
     /// The number of bases to allow overhangs into intronic regions.
     pub intronic_trim_bases: u64,
     /// Strandness of the chemistry.
-    pub chemistry_strandedness: Option<Strand>,
+    pub chemistry_strandedness: Option<ChemistryStrandness>,
 }
 
 impl Default for JunctionAlignOptions {
@@ -304,8 +311,8 @@ impl SplicedRecord {
         let is_exonic = self.is_exonic(transcript, opts.region_min_overlap);
         if is_exonic || get_overlap(genomic_start, genomic_end, tx_start, tx_end) >= 1.0 {
             let is_antisense = match opts.chemistry_strandedness {
-                Some(Strand::Forward) => transcript.strand != self.strand,
-                Some(Strand::Reverse) => transcript.strand == self.strand,
+                Some(ChemistryStrandness::Forward) => transcript.strand != self.strand,
+                Some(ChemistryStrandness::Reverse) => transcript.strand == self.strand,
                 _ => false, // if unstranded, always sense
             };
             let tx_strand = if is_antisense {
@@ -354,6 +361,30 @@ impl SplicedRecord {
             strand: Some(self.strand),
             extended: None,
         })
+    }
+
+    /// Determine the orientation of the read with respect to a transcript.
+    pub fn orientation(
+        &self,
+        transcript: &Transcript,
+        min_overlap_frac: f64,
+    ) -> Option<Strand> {
+        // figure out coordinates
+        let tx_start = transcript.start;
+        let tx_end = transcript.end;
+        let genomic_start = self.start();
+        let genomic_end = self.end();
+
+        let is_exonic = self.is_exonic(transcript, min_overlap_frac);
+        if is_exonic || get_overlap(genomic_start, genomic_end, tx_start, tx_end) >= 1.0 {
+            if transcript.strand == self.strand {
+                return Some(Strand::Forward);  // sense
+            } else {
+                return Some(Strand::Reverse);  // antisense
+            }
+        } else {
+            None
+        }
     }
 
     /// Align the read to exons of a transcript. Returns the aligned cigar and the number of aligned bases.
@@ -568,6 +599,3 @@ fn mark_deleted_ref_bases(cigar: &mut Cigar, del_len: usize, reverse: bool) -> C
         new_cigar
     }
 }
-
-//fn detect_strandness(records: impl IntoIterator<Item = SplicedRecord>) -> Strand {
-//}

@@ -7,10 +7,9 @@ use log::info;
 use noodles::sam::{self, alignment::io::Write};
 use precellar::align::{Aligner, AlignmentResult};
 use precellar::qc::Metric;
-use precellar::transcriptome::JunctionAlignOptions;
+use precellar::transcriptome::{ChemistryStrandness, JunctionAlignOptions};
 use pyo3::types::PyDict;
 use pyo3::{prelude::*, BoundObject};
-use noodles::sam::record::data::field::value::base_modifications::group::Strand;
 use serde_json::Value;
 use core::panic;
 use std::{path::PathBuf, str::FromStr};
@@ -94,8 +93,9 @@ pub fn make_bwa_index(fasta: PathBuf, genome_prefix: PathBuf) -> Result<()> {
 /// compute_snv: bool
 ///     Whether to compute single nucleotide variants (SNVs) from the alignments.
 ///     If True, the SNVs will be computed and added to the fragment file.
-/// strand_specific: Literal['+', '-'] | None
-///     The strand specificity of the assay. Can be "+", "-", or None
+/// strand_specific: Literal['forward', 'reverse', 'unstranded'] | None
+///     The strand specificity of the assay. Can be "forward", "reverse", or "unstranded".
+///     If None, the strand specificity will be inferred from the data.
 /// compression: str | None
 ///     The compression algorithm to use for the output fragment file.
 ///     If None, the compression algorithm will be inferred from the file extension.
@@ -170,9 +170,10 @@ pub fn align<'py>(
     let header = aligner.header();
     let junction_align_options = JunctionAlignOptions {
         chemistry_strandedness: strand_specific.map(|s| match s {
-            "+" => Strand::Forward, 
-            "-" => Strand::Reverse,
-            _ => panic!("strand_specific must be '+' or '-'"),
+            "forward" => ChemistryStrandness::Forward,
+            "reverse" => ChemistryStrandness::Reverse,
+            "unstranded" => ChemistryStrandness::Unstranded,
+            _ => panic!("strand_specific must be 'unstranded', 'forward' or 'reverse'"),
         }),
         ..Default::default()
     };
@@ -242,7 +243,10 @@ pub fn align<'py>(
             qc_metrics.insert("fragment".to_owned(), frag_qc.into());
         }
         OutputType::GeneQuantification => {
-            let quantifier = Quantifier::new(transcript_annotator.unwrap());
+            let mut annotator = transcript_annotator.unwrap();
+            let mut alignments = alignments.peekable();
+            annotator.set_strandness(&header, alignments.peek().unwrap());
+            let quantifier = Quantifier::new(annotator);
             let quant_qc = quantifier.quantify(&header, alignments, output.clone())?;
             qc_metrics.insert("gene_quantification".to_owned(), quant_qc.into());
         }

@@ -3,6 +3,7 @@
 /// and exon-level classification.
 use crate::align::MultiMapR;
 use crate::fragment::Fragment;
+use crate::transcriptome::align::ChemistryStrandness;
 use crate::transcriptome::align::JunctionAlignOptions;
 use crate::transcriptome::align::SplicedRecord;
 use crate::transcriptome::align::TranscriptAlignment;
@@ -12,6 +13,7 @@ use anyhow::Result;
 use bed_utils::bed::map::GIntervalMap;
 use bed_utils::bed::GenomicRange;
 use bincode::{Decode, Encode};
+use log::info;
 use noodles::sam;
 use noodles::sam::record::data::field::value::base_modifications::group::Strand;
 use std::collections::{BTreeMap, HashSet};
@@ -146,7 +148,9 @@ impl AnnotatedAlignment {
     }
 
     pub fn to_fragments(&self) -> impl Iterator<Item = Fragment> + '_ {
-        self.read1.to_fragments().chain(self.read2.iter().flat_map(|r| r.to_fragments()))
+        self.read1
+            .to_fragments()
+            .chain(self.read2.iter().flat_map(|r| r.to_fragments()))
     }
 }
 
@@ -160,7 +164,10 @@ pub struct AlignmentAnnotator {
 
 impl AlignmentAnnotator {
     /// Creates a new `AlignmentAnnotator` with the provided transcripts.
-    pub fn new(transcripts: impl IntoIterator<Item = Transcript>, options: JunctionAlignOptions) -> Self {
+    pub fn new(
+        transcripts: impl IntoIterator<Item = Transcript>,
+        options: JunctionAlignOptions,
+    ) -> Self {
         let transcripts = transcripts
             .into_iter()
             .map(|x| (GenomicRange::new(&x.chrom, x.start, x.end), x))
@@ -180,7 +187,7 @@ impl AlignmentAnnotator {
     /// # Arguments
     /// * `header` - Reference to the SAM header.
     /// * `multi_map` - Vector of single-end alignment records.
-    /// 
+    ///
     /// Returns `Some(AnnotatedAlignment)` if a confident alignment is found, otherwise `None`.
     pub fn annotate_alignments_se(
         &self,
@@ -285,10 +292,60 @@ impl AlignmentAnnotator {
 
         Ok(annotation)
     }
+
+    /// Detects the strandness of the RNA-seq data based on the alignments.
+    pub fn set_strandness(
+        &mut self,
+        header: &sam::Header,
+        alignments: &[(Option<MultiMapR>, Option<MultiMapR>)],
+    ) {
+        if self.options.chemistry_strandedness.is_some() {
+            return
+        }
+
+        let mut num_sense = 0;
+        let mut num_antisense = 0;
+        alignments
+            .into_iter()
+            .flat_map(|(r1, r2)| {
+                r1.iter().chain(r2.iter()).flat_map(|aln| {
+                    aln.iter()
+                        .flat_map(|rec| SplicedRecord::new(rec, header).unwrap())
+                }).collect::<Vec<_>>()
+            })
+            .for_each(|rec| {
+                let region = GenomicRange::new(&rec.chrom, rec.start() as u64, rec.end() as u64);
+                self.transcripts.find(&region).for_each(|(_, transcript)| {
+                    match rec.orientation(transcript, self.options.region_min_overlap) {
+                        Some(Strand::Forward) => num_sense += 1,
+                        Some(Strand::Reverse) => num_antisense += 1,
+                        None => {}
+                    }
+                })
+            });
+        
+        let total = num_sense + num_antisense;
+        let percent_sense = num_sense as f64 / total as f64 * 100.0;
+        let percent_antisense = num_antisense as f64 / total as f64 * 100.0;
+        info!(
+            "Found {:.3}% sense and {:.3}% antisense alignments",
+            percent_sense, percent_antisense
+        );
+        if percent_sense > 75.0 {
+            info!("Chemistry strandness is set to: Forward");
+            self.options.chemistry_strandedness = Some(ChemistryStrandness::Forward);
+        } else if percent_antisense > 75.0 {
+            info!("Chemistry strandness is set to: Reverse");
+            self.options.chemistry_strandedness = Some(ChemistryStrandness::Reverse);
+        } else {
+            info!("Chemistry strandness is set to: Unstranded");
+            self.options.chemistry_strandedness = Some(ChemistryStrandness::Unstranded);
+        }
+    }
 }
 
 /// When multiple genomic alignments exist for a single-end read, attempts to rescue one
-/// using transcript annotations. 
+/// using transcript annotations.
 /// If a read mapped to exonic loci from a single gene and also to non-exonic loci,
 /// it is considered uniquely mapped to one of the exonic loci.
 fn rescue_alignments_se(
