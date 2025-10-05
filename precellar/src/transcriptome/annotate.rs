@@ -300,30 +300,41 @@ impl AlignmentAnnotator {
         alignments: &[(Option<MultiMapR>, Option<MultiMapR>)],
     ) {
         if self.options.chemistry_strandedness.is_some() {
-            return
+            return;
         }
 
         let mut num_sense = 0;
         let mut num_antisense = 0;
         alignments
             .into_iter()
-            .flat_map(|(r1, r2)| {
-                r1.iter().chain(r2.iter()).flat_map(|aln| {
-                    aln.iter()
-                        .flat_map(|rec| SplicedRecord::new(rec, header).unwrap())
-                }).collect::<Vec<_>>()
+            .filter(|(rec1, rec2)| {
+                rec1.as_ref().map_or(true, |x| x.is_confidently_mapped())
+                    && rec2.as_ref().map_or(true, |x| x.is_confidently_mapped())
             })
-            .for_each(|rec| {
-                let region = GenomicRange::new(&rec.chrom, rec.start() as u64, rec.end() as u64);
-                self.transcripts.find(&region).for_each(|(_, transcript)| {
-                    match rec.orientation(transcript, self.options.region_min_overlap) {
-                        Some(Strand::Forward) => num_sense += 1,
-                        Some(Strand::Reverse) => num_antisense += 1,
-                        None => {}
+            .for_each(|(rec1, rec2)| {
+                let mut is_sense = false;
+                let mut is_antisense = false;
+
+                rec1.iter().chain(rec2.iter()).for_each(|aln| {
+                    if let Some(rec) = SplicedRecord::new(&aln.primary, header).unwrap() {
+                        let region =
+                            GenomicRange::new(&rec.chrom, rec.start() as u64, rec.end() as u64);
+                        self.transcripts.find(&region).for_each(|(_, transcript)| {
+                            match rec.orientation(transcript, self.options.region_min_overlap) {
+                                Some(Strand::Forward) => is_sense = true,
+                                Some(Strand::Reverse) => is_antisense = true,
+                                None => {}
+                            }
+                        });
+                        if is_sense {
+                            num_sense += 1;
+                        } else if is_antisense {
+                            num_antisense += 1;
+                        }
                     }
-                })
+                });
             });
-        
+
         let total = num_sense + num_antisense;
         let percent_sense = num_sense as f64 / total as f64 * 100.0;
         let percent_antisense = num_antisense as f64 / total as f64 * 100.0;
