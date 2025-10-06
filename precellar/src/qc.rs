@@ -1,6 +1,6 @@
 use crate::align::{AnnotatedFastq, MultiMap};
 use crate::fragment::Fragment;
-use crate::transcriptome::AnnotatedAlignment;
+use crate::transcriptome::TxAlignment;
 
 use anyhow::Result;
 use bed_utils::bed::BEDLike;
@@ -232,40 +232,20 @@ impl Extend<Self> for QcAlign {
 
 impl Metric for QcAlign {
     fn to_json(&self) -> Value {
-        let mut map = serde_json::Map::new();
-
         let stat_all = &self.stat_all;
         let stat_barcoded = &self.stat_barcoded;
-
         let fraction_confidently_mapped =
             stat_barcoded.total_high_quality() as f64 / stat_barcoded.total_reads() as f64;
-
-        map.insert("sequenced_reads".to_string(), stat_all.total_reads().into());
-        map.insert(
-            "sequenced_read_pairs".to_string(),
-            stat_all.total_pairs().into(),
-        );
-        if stat_all.total_pairs() > 0 {
-            map.insert(
-                "frac_properly_paired".to_string(),
-                (stat_all.proper_pairs as f64 / stat_all.total_pairs() as f64).into(),
-            );
-        }
-        map.insert(
-            "frac_confidently_mapped".to_string(),
-            fraction_confidently_mapped.into(),
-        );
-        map.insert("frac_unmapped".to_string(), self.frac_unmapped().into());
-        map.insert(
-            "frac_valid_barcode".to_string(),
-            self.frac_valid_barcode().into(),
-        );
-        map.insert(
-            "frac_mitochondrial".to_string(),
-            self.frac_mitochondrial().into(),
-        );
-
-        map.into()
+        json!({
+            "sequenced_reads": stat_all.total_reads(),
+            "sequenced_read_pairs": stat_all.total_pairs(),
+            "mapped_reads": stat_all.total_mapped(),
+            "frac_properly_paired": if stat_all.total_pairs() > 0 { stat_all.proper_pairs as f64 / stat_all.total_pairs() as f64 } else { 0.0 },
+            "frac_confidently_mapped": fraction_confidently_mapped,
+            "frac_unmapped": self.frac_unmapped(),
+            "frac_valid_barcode": self.frac_valid_barcode(),
+            "frac_mitochondrial": self.frac_mitochondrial(),
+        })
     }
 }
 
@@ -392,27 +372,12 @@ pub struct QcFragment {
 
 impl From<QcFragment> for Value {
     fn from(qc: QcFragment) -> Self {
-        let mut map = serde_json::Map::new();
-        map.insert(
-            "num_unique_fragments".to_string(),
-            qc.num_unique_fragments.into(),
-        );
-        map.insert(
-            "frac_duplicates".to_string(),
-            (qc.num_pcr_duplicates as f64
-                / (qc.num_unique_fragments + qc.num_pcr_duplicates) as f64)
-                .into(),
-        );
-        map.insert(
-            "frac_fragment_in_nucleosome_free_region".to_string(),
-            (qc.num_frag_nfr as f64 / qc.num_unique_fragments as f64).into(),
-        );
-        map.insert(
-            "frac_fragment_flanking_single_nucleosome".to_string(),
-            (qc.num_frag_single as f64 / qc.num_unique_fragments as f64).into(),
-        );
-
-        map.into()
+        json!({
+            "num_unique_fragments": qc.num_unique_fragments,
+            "frac_duplicates": qc.num_pcr_duplicates as f64 / (qc.num_unique_fragments + qc.num_pcr_duplicates) as f64,
+            "frac_fragment_in_nucleosome_free_region": qc.num_frag_nfr as f64 / qc.num_unique_fragments as f64,
+            "frac_fragment_flanking_single_nucleosome": qc.num_frag_single as f64 / qc.num_unique_fragments as f64,
+        })
     }
 }
 
@@ -440,39 +405,62 @@ pub struct QcGeneQuant {
     total_raw_count: u64,
     num_antisense: u64,
     num_intergenic: u64,
+    num_multimapped: u64,
+    num_discordant: u64,
     num_exonic: u64,
+    num_spanning: u64,
     num_intronic: u64,
+    num_mix: u64,
     pub(crate) num_unique_umi: u64,
+    pub(crate) num_spliced: u64,
+    pub(crate) num_unspliced: u64,
 }
 
 impl QcGeneQuant {
-    pub fn update(&mut self, alignment: Option<&AnnotatedAlignment>) {
+    pub fn update(&mut self, alignment: Option<&TxAlignment>) {
         self.total_raw_count += 1;
-        if let Some(anno) = alignment {
-            if anno.is_antisense() {
-                self.num_antisense += 1;
-            } 
-            if anno.is_intergenic() {
-                self.num_intergenic += 1;
-            } else if anno.is_exonic() {
-                self.num_exonic += 1;
-            } else if anno.is_intronic() {
-                self.num_intronic += 1;
-            }
+        match alignment {
+            None => {},
+            Some(TxAlignment::Antisense) => self.num_antisense += 1,
+            Some(TxAlignment::Discordant) => self.num_discordant += 1,
+            Some(TxAlignment::Intergenic) => self.num_intergenic += 1,
+            Some(TxAlignment::Multimapped) => self.num_multimapped += 1,
+            Some(aln) => {
+                if aln.is_spanning() {
+                    self.num_spanning += 1;
+                } else if aln.is_exonic_only() {
+                    self.num_exonic += 1;
+                } else if aln.is_intronic_only() {
+                    self.num_intronic += 1;
+                } else {
+                    self.num_mix += 1;
+                }
+            },
         }
     }
 }
 
 impl From<QcGeneQuant> for Value {
     fn from(qc: QcGeneQuant) -> Self {
-        let num_transcriptomic = (qc.num_exonic + qc.num_intronic - qc.num_antisense) as f64;
-        json!({
-            "frac_intergenic": qc.num_intergenic as f64 / qc.total_raw_count as f64,
+        let num_transcriptomic = qc.num_exonic + qc.num_intronic + qc.num_mix + qc.num_spanning;
+        let mapping = json!({
             "frac_intronic": qc.num_intronic as f64 / qc.total_raw_count as f64,
             "frac_exonic": qc.num_exonic as f64 / qc.total_raw_count as f64,
+            "frac_spanning": qc.num_spanning as f64 / qc.total_raw_count as f64,
+            "frac_mixed": qc.num_mix as f64 / qc.total_raw_count as f64,
+            "frac_intergenic": qc.num_intergenic as f64 / qc.total_raw_count as f64,
+            "frac_multimapped": qc.num_multimapped as f64 / qc.total_raw_count as f64,
+            "frac_discordant": qc.num_discordant as f64 / qc.total_raw_count as f64,
             "frac_antisense": qc.num_antisense as f64 / qc.total_raw_count as f64,
-            "frac_transcriptomic": num_transcriptomic / qc.total_raw_count as f64,
-            "frac_duplicates": 1.0 - qc.num_unique_umi as f64 / num_transcriptomic,
+        });
+        json!({
+            "frac_transcriptomic": num_transcriptomic as f64 / qc.total_raw_count as f64,
+            "mapping": mapping,
+            "quantification": {
+                "frac_duplicates": 1.0 - qc.num_unique_umi as f64 / num_transcriptomic as f64,
+                "frac_spliced": qc.num_spliced as f64 / qc.num_unique_umi as f64,
+                "frac_unspliced": qc.num_unspliced as f64 / qc.num_unique_umi as f64,
+            },
         })
     }
 }

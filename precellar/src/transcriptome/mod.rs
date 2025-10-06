@@ -6,12 +6,12 @@
 //! * AnnotatedAlignment: final annotated alignment, with gene information.
 
 mod quantification;
-mod annotate;
 mod align;
+mod annotate;
 
 pub use quantification::Quantifier;
-pub use annotate::{AlignmentAnnotator, AnnotatedAlignment};
-pub use align::{ChemistryStrandness, JunctionAlignOptions};
+pub use align::{ChemistryStrandness, TxAlignResult, TxAligner, TxAlignment};
+pub use annotate::{UMIGroup, CorrectUMI};
 
 use anyhow::{bail, ensure, Result};
 use bed_utils::bed::Strand;

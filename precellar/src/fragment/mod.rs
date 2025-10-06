@@ -1,4 +1,4 @@
-mod de_dups;
+mod dedups;
 
 use anyhow::Result;
 use bed_utils::{
@@ -6,7 +6,7 @@ use bed_utils::{
     extsort::ExternalSorterBuilder,
 };
 use bincode::{Decode, Encode};
-use de_dups::AlignmentInfo;
+use dedups::AlignmentInfo;
 use itertools::Itertools;
 use noodles::sam::{
     alignment::{record::Flags, Record},
@@ -17,7 +17,7 @@ use std::{collections::BTreeMap, path::PathBuf};
 
 use crate::{
     align::{MultiMap, MultiMapR, SNVs},
-    fragment::de_dups::{AlignmentMini, RemoveDuplicates},
+    fragment::dedups::{AlignmentMini, RemoveDuplicates},
 };
 
 pub type CellBarcode = String;

@@ -2,16 +2,16 @@ use crate::aligners::AlignerRef;
 use crate::pyseqspec::extract_assays;
 
 use anyhow::{bail, Result};
+use core::panic;
 use indicatif::{ProgressBar, ProgressFinish, ProgressStyle};
 use log::info;
 use noodles::sam::{self, alignment::io::Write};
 use precellar::align::{Aligner, AlignmentResult};
 use precellar::qc::Metric;
-use precellar::transcriptome::{ChemistryStrandness, JunctionAlignOptions};
+use precellar::transcriptome::ChemistryStrandness;
 use pyo3::types::PyDict;
 use pyo3::{prelude::*, BoundObject};
 use serde_json::Value;
-use core::panic;
 use std::{path::PathBuf, str::FromStr};
 
 use precellar::{
@@ -168,16 +168,13 @@ pub fn align<'py>(
 
     let mut aligner = AlignerRef::try_from(aligner)?;
     let header = aligner.header();
-    let junction_align_options = JunctionAlignOptions {
-        chemistry_strandedness: strand_specific.map(|s| match s {
-            "forward" => ChemistryStrandness::Forward,
-            "reverse" => ChemistryStrandness::Reverse,
-            "unstranded" => ChemistryStrandness::Unstranded,
-            _ => panic!("strand_specific must be 'unstranded', 'forward' or 'reverse'"),
-        }),
-        ..Default::default()
-    };
-    let transcript_annotator = aligner.transcript_annotator(junction_align_options);
+    let chemistry_strandness = strand_specific.map(|s| match s {
+        "forward" => ChemistryStrandness::Forward,
+        "reverse" => ChemistryStrandness::Reverse,
+        "unstranded" => ChemistryStrandness::Unstranded,
+        _ => panic!("strand_specific must be 'unstranded', 'forward' or 'reverse'"),
+    });
+    let transcript_annotator = aligner.transcript_annotator(chemistry_strandness);
 
     let mut processor = FastqProcessor::new(assay)
         .with_modality(modality)
@@ -243,10 +240,7 @@ pub fn align<'py>(
             qc_metrics.insert("fragment".to_owned(), frag_qc.into());
         }
         OutputType::GeneQuantification => {
-            let mut annotator = transcript_annotator.unwrap();
-            let mut alignments = alignments.peekable();
-            annotator.set_strandness(&header, alignments.peek().unwrap());
-            let quantifier = Quantifier::new(annotator);
+            let quantifier = Quantifier::new(transcript_annotator.unwrap());
             let quant_qc = quantifier.quantify(&header, alignments, output.clone())?;
             qc_metrics.insert("gene_quantification".to_owned(), quant_qc.into());
         }

@@ -1,12 +1,16 @@
 use anyhow::Result;
+use bincode::{Decode, Encode};
 use noodles::sam;
-use noodles::sam::alignment::{
-    record::cigar::{op::Kind, Op},
-    record_buf::{Cigar, RecordBuf},
-};
-use noodles::sam::record::data::field::value::base_modifications::group::Strand;
-use std::cmp;
+use noodles::sam::alignment::{record::cigar::op::Kind, record_buf::RecordBuf};
 
+use bed_utils::bed::map::GIntervalMap;
+use bed_utils::bed::GenomicRange;
+use itertools::Itertools;
+use log::info;
+use rayon::iter::ParallelIterator;
+use rayon::slice::ParallelSlice;
+
+use crate::align::MultiMapR;
 use crate::fragment::Fragment;
 use crate::transcriptome::{Exon, Transcript};
 
@@ -17,114 +21,57 @@ pub enum ChemistryStrandness {
     Unstranded,
 }
 
-#[derive(Debug, Clone)]
-pub struct JunctionAlignOptions {
-    /// Minimum overlap fraction required for a region to be considered exonic.
-    pub region_min_overlap: f64,
-    /// The maximum number of bases that can be misaligned at each junction.
-    pub junction_trim_bases: u64,
-    /// The number of bases to allow overhangs into intergenic regions.
-    pub intergenic_trim_bases: u64,
-    /// The number of bases to allow overhangs into intronic regions.
-    pub intronic_trim_bases: u64,
-    /// Strandness of the chemistry.
-    pub chemistry_strandedness: Option<ChemistryStrandness>,
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Encode, Decode)]
+pub enum Orientation {
+    Sense,
+    Antisense,
 }
 
-impl Default for JunctionAlignOptions {
-    fn default() -> Self {
-        Self {
-            region_min_overlap: 0.5,
-            junction_trim_bases: 0,
-            intergenic_trim_bases: 0,
-            intronic_trim_bases: 0,
-            chemistry_strandedness: None,
-        }
-    }
+/// Indicates whether a transcript alignment is exonic, intronic, or spans exon-intron boundaries.
+#[derive(Eq, PartialEq, Debug, Clone, Encode, Decode)]
+pub enum AlignType {
+    Exonic,
+    Intronic,
+    Spanning,
+    Discordant,
 }
 
-#[derive(Eq, PartialEq, Debug, Clone)]
-pub struct TranscriptAlignment {
+#[derive(Eq, PartialEq, Debug, Clone, Encode, Decode)]
+pub struct TxAlignResult {
     pub gene_id: String,
     pub transcript_id: String,
-    pub strand: Strand,
-    pub exon_align: Option<Cigar>,
+    pub strand: Orientation,
+    align_type: AlignType,
 }
 
-impl TranscriptAlignment {
+impl TxAlignResult {
     pub fn is_exonic(&self) -> bool {
-        self.exon_align.is_some()
+        self.align_type == AlignType::Exonic
     }
 
     pub fn is_intronic(&self) -> bool {
-        !self.is_exonic()
+        self.align_type == AlignType::Intronic
+    }
+
+    pub fn is_spanning(&self) -> bool {
+        self.align_type == AlignType::Spanning
+    }
+
+    pub fn is_discordant(&self) -> bool {
+        self.align_type == AlignType::Discordant
+    }
+
+    pub fn is_transcriptomic(&self) -> bool {
+        !self.is_discordant() && self.strand == Orientation::Sense
     }
 }
 
 /// Segment represents a contiguous block of cigar operations not containing
 /// any "Skip" sections. The SpliceSegment is 0-based, half-open with respect to the reference.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Encode, Decode)]
 struct Segment {
     start: u64,
     end: u64,
-    cigar: Cigar,
-}
-
-impl bincode::Encode for Segment {
-    fn encode<E: bincode::enc::Encoder>(
-        &self,
-        encoder: &mut E,
-    ) -> core::result::Result<(), bincode::error::EncodeError> {
-        bincode::Encode::encode(&self.start, encoder)?;
-        bincode::Encode::encode(&self.end, encoder)?;
-        bincode::Encode::encode(&encode_cigar(&self.cigar).unwrap(), encoder)?;
-        Ok(())
-    }
-}
-
-impl<Context> bincode::Decode<Context> for Segment {
-    fn decode<D: bincode::de::Decoder<Context = Context>>(
-        decoder: &mut D,
-    ) -> core::result::Result<Self, bincode::error::DecodeError> {
-        let start = bincode::Decode::decode(decoder)?;
-        let end = bincode::Decode::decode(decoder)?;
-        let cigar_bytes: Vec<u8> = bincode::Decode::decode(decoder)?;
-        Ok(Self {
-            start,
-            end,
-            cigar: decode_cigar(&cigar_bytes).unwrap(),
-        })
-    }
-}
-
-impl<'de, Context> bincode::BorrowDecode<'de, Context> for Segment {
-    fn borrow_decode<D: bincode::de::BorrowDecoder<'de, Context = Context>>(
-        decoder: &mut D,
-    ) -> core::result::Result<Self, bincode::error::DecodeError> {
-        let start = bincode::BorrowDecode::borrow_decode(decoder)?;
-        let end = bincode::BorrowDecode::borrow_decode(decoder)?;
-        let cigar_bytes: Vec<u8> = bincode::BorrowDecode::borrow_decode(decoder)?;
-        Ok(Self {
-            start,
-            end,
-            cigar: decode_cigar(&cigar_bytes).unwrap(),
-        })
-    }
-}
-
-fn encode_cigar(cigar: &Cigar) -> Result<Vec<u8>> {
-    let mut buf = Vec::new();
-    sam::io::writer::record::write_cigar(&mut buf, &cigar)?;
-    Ok(buf)
-}
-
-fn decode_cigar(cigar: &[u8]) -> Result<Cigar> {
-    if cigar[0] == b'*' {
-        Ok(Vec::new().into())
-    } else {
-        let cigar = noodles::sam::record::Cigar::new(cigar);
-        Ok(Cigar::try_from(cigar)?)
-    }
 }
 
 /// SplicedRecord represents segments of a larger whole that have been cut and joined together
@@ -132,69 +79,15 @@ fn decode_cigar(cigar: &[u8]) -> Result<Cigar> {
 /// It consists of the left and right clipping operations, and a list of components.
 /// A SplicedRecord can be constructed from a BAM record by splitting the CIGAR string
 /// at each "Skip" operation.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Encode, Decode)]
 pub struct SplicedRecord {
-    pub chrom: String,
-    left_clip: Cigar,
-    right_clip: Cigar,
+    chrom: String,
     segments: Vec<Segment>,
-    pub strand: bed_utils::bed::Strand, // Strand information of the read.
-}
-
-impl bincode::Encode for SplicedRecord {
-    fn encode<E: bincode::enc::Encoder>(
-        &self,
-        encoder: &mut E,
-    ) -> core::result::Result<(), bincode::error::EncodeError> {
-        bincode::Encode::encode(&self.chrom, encoder)?;
-        bincode::Encode::encode(&encode_cigar(&self.left_clip).unwrap(), encoder)?;
-        bincode::Encode::encode(&encode_cigar(&self.right_clip).unwrap(), encoder)?;
-        bincode::Encode::encode(&self.segments, encoder)?;
-        bincode::Encode::encode(&self.strand, encoder)?;
-        Ok(())
-    }
-}
-
-impl<Context> bincode::Decode<Context> for SplicedRecord {
-    fn decode<D: bincode::de::Decoder<Context = Context>>(
-        decoder: &mut D,
-    ) -> core::result::Result<Self, bincode::error::DecodeError> {
-        let chrom = bincode::Decode::decode(decoder)?;
-        let left_cigar_bytes: Vec<u8> = bincode::Decode::decode(decoder)?;
-        let right_cigar_bytes: Vec<u8> = bincode::Decode::decode(decoder)?;
-        let segments = bincode::Decode::decode(decoder)?;
-        let strand = bincode::Decode::decode(decoder)?;
-        Ok(Self {
-            chrom,
-            left_clip: decode_cigar(&left_cigar_bytes).unwrap(),
-            right_clip: decode_cigar(&right_cigar_bytes).unwrap(),
-            segments,
-            strand,
-        })
-    }
-}
-
-impl<'de, Context> bincode::BorrowDecode<'de, Context> for SplicedRecord {
-    fn borrow_decode<D: bincode::de::BorrowDecoder<'de, Context = Context>>(
-        decoder: &mut D,
-    ) -> core::result::Result<Self, bincode::error::DecodeError> {
-        let chrom = bincode::BorrowDecode::borrow_decode(decoder)?;
-        let left_cigar_bytes: Vec<u8> = bincode::BorrowDecode::borrow_decode(decoder)?;
-        let right_cigar_bytes: Vec<u8> = bincode::BorrowDecode::borrow_decode(decoder)?;
-        let segments = bincode::BorrowDecode::borrow_decode(decoder)?;
-        let strand = bincode::Decode::decode(decoder)?;
-        Ok(Self {
-            chrom,
-            left_clip: decode_cigar(&left_cigar_bytes).unwrap(),
-            right_clip: decode_cigar(&right_cigar_bytes).unwrap(),
-            segments,
-            strand,
-        })
-    }
+    strand: bed_utils::bed::Strand, // Strand information of the read.
 }
 
 impl SplicedRecord {
-    pub fn new(read: &RecordBuf, header: &sam::Header) -> Result<Option<Self>> {
+    fn new(read: &RecordBuf, header: &sam::Header) -> Result<Option<Self>> {
         if read.flags().is_unmapped() {
             return Ok(None);
         }
@@ -202,45 +95,27 @@ impl SplicedRecord {
         let chrom = read.reference_sequence(header).unwrap()?.0;
         let chrom = std::str::from_utf8(chrom)?.to_string();
         let cigar = read.cigar();
-        let alignment_start = read.alignment_start().unwrap().get();
+        let alignment_start = read.alignment_start().unwrap().get() - 1;
 
-        let mut left_clip: Vec<Op> = Vec::new();
-        let mut right_clip: Vec<Op> = Vec::new();
         let mut splice_segments: Vec<Segment> = Vec::new();
-        let mut seen_nonclips = false; // whether we've seen non-clip bases yet
         let mut curr_segment = Segment {
             start: alignment_start as u64,
             end: alignment_start as u64,
-            cigar: Vec::new().into(),
         };
 
         for c in cigar.as_ref() {
             match c.kind() {
-                Kind::HardClip | Kind::SoftClip => {
-                    if seen_nonclips {
-                        right_clip.push(*c);
-                    } else {
-                        left_clip.push(*c);
-                    }
-                }
+                Kind::HardClip | Kind::SoftClip | Kind::Insertion => {}
                 Kind::Skip => {
-                    seen_nonclips = true;
                     let next_start = curr_segment.end + c.len() as u64;
                     splice_segments.push(curr_segment);
                     curr_segment = Segment {
                         start: next_start,
                         end: next_start,
-                        cigar: Vec::new().into(),
                     };
                 }
-                Kind::Insertion => {
-                    seen_nonclips = true;
-                    curr_segment.cigar.as_mut().push(*c);
-                }
                 Kind::Match | Kind::Deletion | Kind::SequenceMatch | Kind::SequenceMismatch => {
-                    seen_nonclips = true;
                     curr_segment.end += c.len() as u64;
-                    curr_segment.cigar.as_mut().push(*c);
                 }
                 Kind::Pad => unreachable!(),
             }
@@ -263,98 +138,50 @@ impl SplicedRecord {
         };
         Ok(Some(Self {
             chrom,
-            left_clip: left_clip.into(),
-            right_clip: right_clip.into(),
             segments: splice_segments,
             strand,
         }))
     }
 
     /// The leftmost position of the alignment.
-    pub fn start(&self) -> u64 {
+    fn start(&self) -> u64 {
         self.segments.first().map_or(0, |segment| segment.start)
     }
 
     /// The rightmost position of the alignment (exclusive).
-    pub fn end(&self) -> u64 {
+    fn end(&self) -> u64 {
         self.segments.last().map_or(0, |segment| segment.end)
     }
 
-    /// Determine if the alignment belongs to exonic regions of a transcript.
-    /// An alignment is considered exonic if each of its components (segments)
-    /// overlaps with exons with at least `min_overlap_frac`.
-    pub fn is_exonic(&self, transcript: &Transcript, min_overlap_frac: f64) -> bool {
-        self.segments.iter().all(|segment| {
-            // find first exon that ends to the right of the segment start
-            let idx = transcript
-                .exons()
-                .binary_search_by_key(&segment.start, |ex| ex.end - 1)
-                .unwrap_or_else(std::convert::identity);
-            transcript.exons().get(idx).map_or(false, |exon| {
-                get_overlap(segment.start, segment.end, exon.start, exon.end) >= min_overlap_frac
-            })
-        })
-    }
-
     /// Aligns a read to a transcript and determines the region type (exonic, intronic, or intergenic).
-    pub fn align_transcript(
+    fn align_transcript(
         &self,
         transcript: &Transcript,
-        opts: &JunctionAlignOptions,
-    ) -> Option<TranscriptAlignment> {
-        // figure out coordinates
-        let tx_start = transcript.start;
-        let tx_end = transcript.end;
-        let genomic_start = self.start();
-        let genomic_end = self.end();
-
-        let is_exonic = self.is_exonic(transcript, opts.region_min_overlap);
-        if is_exonic || get_overlap(genomic_start, genomic_end, tx_start, tx_end) >= 1.0 {
-            let is_antisense = match opts.chemistry_strandedness {
-                Some(ChemistryStrandness::Forward) => transcript.strand != self.strand,
-                Some(ChemistryStrandness::Reverse) => transcript.strand == self.strand,
-                _ => false, // if unstranded, always sense
-            };
-            let tx_strand = if is_antisense {
-                Strand::Reverse
-            } else {
-                Strand::Forward
-            };
-
-            let mut alignment = TranscriptAlignment {
-                gene_id: transcript.gene_id.clone(),
-                transcript_id: transcript.id.clone(),
-                strand: tx_strand,
-                exon_align: None,
-            };
-
-            if is_exonic {
-                // compute offsets
-                let mut tx_offset = transcript.get_offset(genomic_start).unwrap().max(0) as u64;
-                let tx_length = transcript.exon_len();
-
-                // align the read to the exons
-                if let Some((mut tx_cigar, tx_aligned_bases)) =
-                    self.align_junctions(transcript, opts)
-                {
-                    // flip reverse strand
-                    if transcript.strand == bed_utils::bed::Strand::Reverse {
-                        tx_offset = tx_length - (tx_offset + tx_aligned_bases);
-                        tx_cigar.as_mut().reverse();
-                    };
-                    alignment.exon_align = Some(tx_cigar);
-                }
-            }
-            Some(alignment)
+        chemistry_strandness: ChemistryStrandness,
+    ) -> TxAlignResult {
+        let is_antisense = match chemistry_strandness {
+            ChemistryStrandness::Forward => transcript.strand != self.strand,
+            ChemistryStrandness::Reverse => transcript.strand == self.strand,
+            ChemistryStrandness::Unstranded => false, // if unstranded, always sense
+        };
+        let strand = if is_antisense {
+            Orientation::Antisense
         } else {
-            None
+            Orientation::Sense
+        };
+
+        TxAlignResult {
+            gene_id: transcript.gene_id.clone(),
+            transcript_id: transcript.id.clone(),
+            strand,
+            align_type: self.align_helper(transcript),
         }
     }
 
     pub fn to_fragments(&self) -> impl Iterator<Item = Fragment> + '_ {
         self.segments.iter().map(move |segment| Fragment {
             chrom: self.chrom.clone(),
-            start: segment.start, 
+            start: segment.start,
             end: segment.end,
             barcode: None,
             count: 1,
@@ -364,238 +191,485 @@ impl SplicedRecord {
     }
 
     /// Determine the orientation of the read with respect to a transcript.
-    pub fn orientation(
-        &self,
-        transcript: &Transcript,
-        min_overlap_frac: f64,
-    ) -> Option<Strand> {
-        // figure out coordinates
-        let tx_start = transcript.start;
-        let tx_end = transcript.end;
-        let genomic_start = self.start();
-        let genomic_end = self.end();
-
-        let is_exonic = self.is_exonic(transcript, min_overlap_frac);
-        if is_exonic || get_overlap(genomic_start, genomic_end, tx_start, tx_end) >= 1.0 {
+    fn orientation(&self, transcript: &Transcript) -> Option<Orientation> {
+        if self.start() >= transcript.start && self.end() <= transcript.end {
             if transcript.strand == self.strand {
-                return Some(Strand::Forward);  // sense
+                Some(Orientation::Sense)
             } else {
-                return Some(Strand::Reverse);  // antisense
+                Some(Orientation::Antisense)
             }
         } else {
             None
         }
     }
 
-    /// Align the read to exons of a transcript. Returns the aligned cigar and the number of aligned bases.
+    /// Align segments to exons and determine if the alignment is exonic or is intronic or
+    /// spans exon-intron boundaries.
     ///
-    /// Returns None if the alignment cannot be aligned to the transcript.
-    fn align_junctions(
-        &self,
-        transcript: &Transcript,
-        opts: &JunctionAlignOptions,
-    ) -> Option<(Cigar, u64)> {
-        let exons = find_exons(
-            &transcript.exons(),
-            self.start(),
-            self.end(),
-            opts.intergenic_trim_bases,
-            opts.intronic_trim_bases,
-        )?;
-
-        // The number of segments should match the number of exons
-        if self.segments.len() != exons.len() {
-            return None;
+    /// 1. If the read does not overlap the transcript, it is considered unaligned.
+    ///
+    /// Transcript:  |||||||----|||||-------|||||---||
+    /// Exonic:        XXXXX----XXXX--------XXXXX
+    /// Intronic:            XX
+    /// Spanning:        XXXXXXXXXXXX-------XXXXX
+    fn align_helper(&self, transcript: &Transcript) -> AlignType {
+        if self.end() <= transcript.start || self.start() >= transcript.end {
+            panic!("Read does not overlap transcript");
         }
 
-        let mut full_cigar = self.left_clip.clone();
-        let mut aligned_bases = 0;
-        for i in 0..self.segments.len() {
-            let curr_segment = &self.segments[i];
-            let curr_exon = &exons[i];
-            aligned_bases += curr_exon.len();
-            let mut tmp_cigar = curr_segment.cigar.clone();
-
-            // align the start
-            let start_diff = curr_exon.start as i64 - curr_segment.start as i64;
-            if i == 0 {
-                // first segment
-                if start_diff > 0 {
-                    // overhang -> softclip
-                    tmp_cigar = mask_read_bases(
-                        &mut tmp_cigar,
-                        Op::new(Kind::SoftClip, start_diff as usize),
-                        false,
-                    );
-                } else if start_diff < 0 {
-                    // underhang -> decrement aligned bases
-                    aligned_bases -= start_diff.unsigned_abs();
-                }
-            } else if start_diff.unsigned_abs() > opts.junction_trim_bases {
-                return None; // can't align properly
-            } else if start_diff > 0 {
-                // overhang -> mark as insertion
-                tmp_cigar = mask_read_bases(
-                    &mut tmp_cigar,
-                    Op::new(Kind::Insertion, start_diff as usize),
-                    false,
-                );
-            } else if start_diff < 0 {
-                // underhang -> mark as deletion
-                tmp_cigar = mark_deleted_ref_bases(
-                    &mut tmp_cigar,
-                    start_diff.unsigned_abs().try_into().unwrap(),
-                    false,
-                );
-            }
-
-            // align the end
-            let end_diff = curr_segment.end as i64 - curr_exon.end as i64 - 1;
-            if i == self.segments.len() - 1 {
-                // last segment
-                if end_diff > 0 {
-                    // overhang -> softclip
-                    tmp_cigar = mask_read_bases(
-                        &mut tmp_cigar,
-                        Op::new(Kind::SoftClip, end_diff as usize),
-                        true,
-                    );
-                } else if end_diff < 0 {
-                    // underhang -> decrement aligned bases
-                    aligned_bases -= end_diff.unsigned_abs();
-                }
-            } else if end_diff.unsigned_abs() > opts.junction_trim_bases {
-                return None; // can't align properly
-            } else if end_diff > 0 {
-                // overhang -> mark as insertion
-                tmp_cigar = mask_read_bases(
-                    &mut tmp_cigar,
-                    Op::new(Kind::Insertion, end_diff as usize),
-                    true,
-                );
-            } else if end_diff < 0 {
-                // underhang -> mark as deletion
-                tmp_cigar = mark_deleted_ref_bases(
-                    &mut tmp_cigar,
-                    end_diff.unsigned_abs().try_into().unwrap(),
-                    true,
-                );
-            }
-
-            // extend
-            full_cigar.extend(Vec::from(tmp_cigar).into_iter());
+        let exons = find_exons(transcript.exons(), self.start(), self.end() - 1);
+        if exons.is_empty() {
+            // No exon overlaps the read, but the read overlaps the transcript.
+            return AlignType::Intronic;
         }
-        full_cigar.extend(self.right_clip.as_ref().iter().copied());
 
-        Some((full_cigar, aligned_bases))
+        let segments = &self.segments;
+        let n_ex = exons.len();
+        let n_segment = segments.len();
+        if n_ex == n_segment {
+            if n_ex == 1 {
+                if segments[0].start >= exons[0].start && segments[0].end <= exons[0].end {
+                    // Fully contained within the exon.
+                    AlignType::Exonic
+                } else {
+                    AlignType::Spanning
+                }
+            } else if segments[1..n_segment - 1]
+                .iter()
+                .zip(exons[1..n_ex - 1].iter())
+                .all(|(s, e)| s.start == e.start && s.end == e.end)
+            {
+                // All internal segments (except the 1st and last) match exactly.
+                if segments[0].end == exons[0].end
+                    && segments[n_segment - 1].start == exons[n_ex - 1].start
+                {
+                    // first and last segments also match.
+                    if segments[0].start >= exons[0].start
+                        && segments[n_segment - 1].end <= exons[n_ex - 1].end
+                    {
+                        AlignType::Exonic
+                    } else {
+                        AlignType::Spanning
+                    }
+                } else {
+                    AlignType::Discordant
+                }
+            } else {
+                AlignType::Discordant
+            }
+        } else if n_ex > n_segment {
+            // There are more exons than segments. Possibly spanning.
+            if exons[n_ex - 1].start >= segments[n_segment - 1].start
+                && exons[0].end > segments[0].start
+                && exons[1..n_ex - 1].iter().all(|_| true)
+            // FIXME: this is a bit hacky
+            {
+                AlignType::Spanning
+            } else {
+                AlignType::Discordant
+            }
+        } else {
+            // There are more segments than exons. Cannot be concordant.
+            AlignType::Discordant
+        }
     }
 }
 
-/// Fraction of read interval covered by ref interval
-fn get_overlap(read_start: u64, read_end: u64, ref_start: u64, ref_end: u64) -> f64 {
-    let mut overlap_bases =
-        cmp::min(ref_end, read_end) as f64 - cmp::max(ref_start, read_start) as f64;
-    if overlap_bases < 0.0 {
-        overlap_bases = 0.0;
-    }
-    overlap_bases / ((read_end - read_start) as f64)
-}
-
-/// Find the exons that the read aligns to. Returns the indices of the first and last exons.
+/// Returns the exons that overlap the interval.
+/// ||||||-------|||||||
+///    ^^^^^^^^^^^^^
 fn find_exons(
     exon_info: &[Exon],
     read_start: u64,
     read_end: u64, // inclusive
-    intergenic_trim_bases: u64,
-    intronic_trim_bases: u64,
-) -> Option<&[Exon]> {
+) -> &[Exon] {
     // find first exon that ends to the right of the read start
     let ex_start = exon_info
         .binary_search_by_key(&read_start, |ex| ex.end - 1)
         .map_or_else(|i| i, |i| i);
     // find first exon that starts to the left of the read end
-    let ex_end = exon_info
+    if let Some(ex_end) = exon_info
         .binary_search_by_key(&read_end, |ex| ex.start)
-        .map_or_else(|i| if i > 0 { Some(i - 1) } else { None }, |i| Some(i))?;
-    if ex_start >= exon_info.len() {
-        return None;
-    }
-
-    let starting_exon = &exon_info[ex_start];
-    let ending_exon = &exon_info[ex_end];
-
-    if read_start < starting_exon.start {
-        // read overhangs exon on the left
-        let overhang = starting_exon.start - read_start;
-        let trim_bases = if ex_start == 0 {
-            intergenic_trim_bases
+        .map_or_else(|i| if i > 0 { Some(i - 1) } else { None }, |i| Some(i))
+    {
+        if ex_start >= exon_info.len() {
+            &[]
         } else {
-            intronic_trim_bases
-        };
-        if overhang > trim_bases {
-            // too much overhang
-            return None;
-        };
-    }
-
-    if read_end > ending_exon.end {
-        // read overhangs exon on the right
-        let overhang = read_end - ending_exon.end;
-        let trim_bases = if ex_end >= exon_info.len() {
-            intergenic_trim_bases
-        } else {
-            intronic_trim_bases
-        };
-        if overhang > trim_bases {
-            // too much overhang
-            return None;
-        };
-    }
-
-    Some(&exon_info[ex_start..=ex_end])
-}
-
-fn mask_read_bases(cigar: &mut Cigar, mask: Op, reverse: bool) -> Cigar {
-    // NOTE: this assumes that refskips have been removed
-    let mut new_cigar = Vec::new();
-    let mask_len = mask.len();
-    let mut consumed_bases = 0;
-    new_cigar.push(mask);
-    if reverse {
-        cigar.as_mut().reverse();
-    }
-    for c in cigar.as_ref() {
-        if consumed_bases < mask_len {
-            // this op should be masked
-            let read_bases = match c.kind() {
-                Kind::Deletion => 0, // deletions don't consume read bases
-                _ => c.len(),
-            };
-            if consumed_bases + read_bases >= mask_len {
-                let truncated = Op::new(c.kind(), read_bases + consumed_bases - mask_len);
-                new_cigar.push(truncated);
-            };
-            consumed_bases += read_bases;
-        } else {
-            // just copy the op
-            new_cigar.push(*c);
-        };
-    }
-    if reverse {
-        new_cigar.reverse();
-    }
-    new_cigar.into()
-}
-
-fn mark_deleted_ref_bases(cigar: &mut Cigar, del_len: usize, reverse: bool) -> Cigar {
-    let del = Op::new(Kind::Deletion, del_len);
-    if reverse {
-        let mut new_cigar: Cigar = vec![del].into();
-        new_cigar.extend(cigar.as_ref().iter().copied());
-        new_cigar
+            &exon_info[ex_start..=ex_end]
+        }
     } else {
-        let mut new_cigar = cigar.clone();
-        new_cigar.as_mut().push(del);
-        new_cigar
+        &[]
+    }
+}
+
+#[derive(Debug, Encode, Decode)]
+pub enum TxAlignment {
+    Intergenic,
+    Discordant,
+    Multimapped,
+    Antisense,
+    SeAligned {
+        read: SplicedRecord,
+        alignment: Vec<TxAlignResult>,
+        barcode: String,
+        umi: Option<String>,
+    },
+}
+
+impl TxAlignment {
+    pub fn alignments(&self) -> Box<dyn Iterator<Item = &TxAlignResult> + '_> {
+        match self {
+            TxAlignment::SeAligned { alignment, .. } => Box::new(alignment.iter()),
+            _ => Box::new(std::iter::empty()),
+        }
+    }
+
+    /// Returns the gene if the read is confidently mapped to a single gene.
+    pub fn uniquely_mapped_gene(&self) -> Option<&str> {
+        match self {
+            TxAlignment::SeAligned { alignment, .. } => Some(alignment[0].gene_id.as_str()),
+            _ => None,
+        }
+    }
+
+    pub fn barcode(&self) -> Option<&str> {
+        match self {
+            TxAlignment::SeAligned { barcode, .. } => Some(barcode.as_str()),
+            _ => None,
+        }
+    }
+
+    pub fn umi(&self) -> Option<&str> {
+        match self {
+            TxAlignment::SeAligned { umi, .. } => umi.as_deref(),
+            _ => None,
+        }
+    }
+
+    pub fn is_exonic_only(&self) -> bool {
+        match self {
+            TxAlignment::SeAligned { alignment, .. } => alignment.iter().all(|x| x.is_exonic()),
+            _ => false,
+        }
+    }
+
+    pub fn is_intronic_only(&self) -> bool {
+        match self {
+            TxAlignment::SeAligned { alignment, .. } => alignment.iter().all(|x| x.is_intronic()),
+            _ => false,
+        }
+    }
+
+    /// A alignment is spanning if it spans the exon-intron boundary at least in
+    /// one transcript, and does NOT align to exons in any other transcripts.
+    pub fn is_spanning(&self) -> bool {
+        match self {
+            TxAlignment::SeAligned { alignment, .. } => {
+                alignment.iter().any(|x| x.is_spanning())
+                    && alignment.iter().all(|x| !x.is_exonic())
+            }
+            _ => false,
+        }
+    }
+
+    pub fn to_fragments(&self) -> Box<dyn Iterator<Item = Fragment> + '_> {
+        match self {
+            TxAlignment::SeAligned { read, .. } => Box::new(read.to_fragments()),
+            _ => Box::new(std::iter::empty()),
+        }
+    }
+}
+
+/// Manages the annotation of alignments using transcriptome data.
+#[derive(Debug, Clone)]
+pub struct TxAligner {
+    /// Map of genomic intervals to transcripts.
+    transcripts: GIntervalMap<Transcript>,
+    chemistry_strandness: Option<ChemistryStrandness>,
+    header: sam::Header,
+}
+
+impl TxAligner {
+    /// Creates a new `AlignmentAnnotator` with the provided transcripts.
+    pub fn new(
+        transcripts: impl IntoIterator<Item = Transcript>,
+        header: sam::Header,
+        chemistry_strandness: Option<ChemistryStrandness>,
+    ) -> Self {
+        let transcripts = transcripts
+            .into_iter()
+            .map(|x| (GenomicRange::new(&x.chrom, x.start, x.end), x))
+            .collect();
+        Self {
+            transcripts,
+            header,
+            chemistry_strandness,
+        }
+    }
+
+    pub fn transcripts(&self) -> impl Iterator<Item = &Transcript> {
+        self.transcripts.iter().map(|(_, t)| t)
+    }
+
+    pub fn align<'a>(
+        &'a self,
+        data: impl IntoIterator<Item = Vec<(Option<MultiMapR>, Option<MultiMapR>)>> + 'a,
+    ) -> impl Iterator<Item = Option<TxAlignment>> + 'a {
+        fn helper<'a>(
+            tx_aligner: &'a TxAligner,
+            records: &'a [(Option<MultiMapR>, Option<MultiMapR>)],
+            strandness: ChemistryStrandness,
+        ) -> impl Iterator<Item = Option<TxAlignment>> + 'a {
+            records.into_iter().map(move |(read1, read2)| {
+                if read1.is_some() && read2.is_some() {
+                    tx_aligner._align_pe(read1.as_ref().unwrap(), read2.as_ref().unwrap())
+                } else {
+                    let read = if read1.is_some() {
+                        read1.as_ref().unwrap()
+                    } else {
+                        read2.as_ref().unwrap()
+                    };
+                    tx_aligner._align_se(&read, strandness)
+                }
+            })
+        }
+
+        let mut chemistry_strandness = self.chemistry_strandness;
+        data.into_iter().flat_map(move |recs| {
+            if chemistry_strandness.is_none() {
+                chemistry_strandness = Some(self.detect_strandness(&recs));
+            }
+            recs.par_chunks(4096)
+                .flat_map_iter(|chunk| helper(self, chunk, chemistry_strandness.unwrap()))
+                .collect::<Vec<_>>()
+        })
+    }
+
+    /// Annotate the alignments by mapping them to the transcriptome. If multiple
+    /// alignments are present, we will try to find the confident ones and promote
+    /// them to primary. A read may align to multiple transcripts and genes, but
+    /// it is only considered confidently mapped to the transcriptome if it is
+    /// mapped to a single gene. The confident alignment will be returned if found.
+    ///
+    /// # Arguments
+    /// * `header` - Reference to the SAM header.
+    /// * `multi_map` - Vector of single-end alignment records.
+    ///
+    /// Returns `Some(AnnotatedAlignment)` if a confident alignment is found, otherwise `None`.
+    fn _align_se(&self, multi_map: &MultiMapR, strandness: ChemistryStrandness) -> Option<TxAlignment> {
+        let barcode = multi_map.barcode().unwrap()?.clone();
+        let aln: Vec<_> = multi_map
+            .iter()
+            .flat_map(|rec| self._align_one(rec, strandness))
+            .collect();
+        if aln.is_empty() {
+            None
+        } else if aln.iter().all(|(_, items)| items.is_empty()) {
+            Some(TxAlignment::Intergenic)
+        } else {
+            let num_unique_genes: usize = aln
+                .iter()
+                .flat_map(|(_, items)| {
+                    items.iter().filter_map(|x| {
+                        if x.is_transcriptomic() {
+                            Some(x.gene_id.clone())
+                        } else {
+                            None
+                        }
+                    })
+                })
+                .unique()
+                .count();
+
+            if num_unique_genes > 1 {
+                Some(TxAlignment::Multimapped)
+            } else if num_unique_genes == 0 {
+                if aln.len() > 1 {
+                    Some(TxAlignment::Discordant)
+                } else {
+                    let has_antisense = aln
+                        .iter()
+                        .flat_map(|(_, items)| {
+                            items.iter().filter_map(|x| {
+                                if x.is_discordant() {
+                                    None
+                                } else {
+                                    Some(x.strand == Orientation::Antisense)
+                                }
+                            })
+                        })
+                        .any(|x| x);
+                    if has_antisense {
+                        Some(TxAlignment::Antisense)
+                    } else {
+                        Some(TxAlignment::Discordant)
+                    }
+                }
+            } else {
+                // Now we know there's exactly one gene, we choose the first non-discordant alignment
+                let (read, alignment) = aln
+                    .into_iter()
+                    .map(|(rec, x)| {
+                        let result: Vec<_> =
+                            x.into_iter().filter(|x| x.is_transcriptomic()).collect();
+                        (rec, result)
+                    })
+                    .find(|(_, x)| !x.is_empty())
+                    .unwrap();
+                Some(TxAlignment::SeAligned {
+                    read,
+                    alignment,
+                    barcode,
+                    umi: multi_map.umi().unwrap().clone(),
+                })
+            }
+        }
+    }
+
+    fn _align_pe(&self, multi_map1: &MultiMapR, multi_map2: &MultiMapR) -> Option<TxAlignment> {
+        todo!()
+    }
+
+    fn _align_one(&self, rec: &RecordBuf, strandness: ChemistryStrandness) -> Option<(SplicedRecord, Vec<TxAlignResult>)> {
+        let spliced_rec = SplicedRecord::new(rec, &self.header).unwrap()?;
+        let region = GenomicRange::new(
+            &spliced_rec.chrom,
+            spliced_rec.start() as u64,
+            spliced_rec.end() as u64,
+        );
+        let alignments = self
+            .transcripts
+            .find(&region)
+            .map(|(_, transcript)| spliced_rec.align_transcript(transcript, strandness))
+            .collect();
+        Some((spliced_rec, alignments))
+    }
+
+    /// Detects the strandness of the RNA-seq data based on the alignments.
+    fn detect_strandness(
+        &self,
+        alignments: &[(Option<MultiMapR>, Option<MultiMapR>)],
+    ) -> ChemistryStrandness {
+        let mut num_sense = 0;
+        let mut num_antisense = 0;
+        alignments
+            .into_iter()
+            .filter(|(rec1, rec2)| {
+                rec1.as_ref().map_or(true, |x| x.is_confidently_mapped())
+                    && rec2.as_ref().map_or(true, |x| x.is_confidently_mapped())
+            })
+            .for_each(|(rec1, rec2)| {
+                let mut is_sense = false;
+                let mut is_antisense = false;
+
+                rec1.iter().chain(rec2.iter()).for_each(|aln| {
+                    if let Some(rec) = SplicedRecord::new(&aln.primary, &self.header).unwrap() {
+                        let region =
+                            GenomicRange::new(&rec.chrom, rec.start() as u64, rec.end() as u64);
+                        self.transcripts.find(&region).for_each(|(_, transcript)| {
+                            match rec.orientation(transcript) {
+                                Some(Orientation::Sense) => is_sense = true,
+                                Some(Orientation::Antisense) => is_antisense = true,
+                                None => {}
+                            }
+                        });
+                        if is_sense {
+                            num_sense += 1;
+                        } else if is_antisense {
+                            num_antisense += 1;
+                        }
+                    }
+                });
+            });
+
+        let total = num_sense + num_antisense;
+        let percent_sense = num_sense as f64 / total as f64 * 100.0;
+        let percent_antisense = num_antisense as f64 / total as f64 * 100.0;
+        info!(
+            "Found {:.3}% sense and {:.3}% antisense alignments",
+            percent_sense, percent_antisense
+        );
+        if percent_sense > 75.0 {
+            info!("Chemistry strandness is set to: Forward");
+            ChemistryStrandness::Forward
+        } else if percent_antisense > 75.0 {
+            info!("Chemistry strandness is set to: Reverse");
+            ChemistryStrandness::Reverse
+        } else {
+            info!("Chemistry strandness is set to: Unstranded");
+            ChemistryStrandness::Unstranded
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::transcriptome::Exons;
+
+    use super::*;
+
+    #[test]
+    fn test_align() {
+        let transcript = Transcript {
+            id: "tx1".to_string(),
+            chrom: "chr1".to_string(),
+            start: 5,
+            end: 8000,
+            strand: bed_utils::bed::Strand::Forward,
+            gene_id: "gene1".to_string(),
+            gene_name: "GeneName1".to_string(),
+            exons: Exons(vec![
+                Exon { start: 10, end: 20 },
+                Exon { start: 30, end: 40 },
+                Exon { start: 50, end: 60 },
+                Exon {
+                    start: 500,
+                    end: 700,
+                },
+                Exon {
+                    start: 1500,
+                    end: 1550,
+                },
+                Exon {
+                    start: 5000,
+                    end: 6000,
+                },
+            ]),
+        };
+
+        let mut record = SplicedRecord {
+            chrom: "chr1".to_string(),
+            segments: vec![],
+            strand: bed_utils::bed::Strand::Forward,
+        };
+
+        let mut test_fun = |segments: Vec<(u64, u64)>, expected: AlignType| {
+            record.segments = segments
+                .into_iter()
+                .map(|(s, e)| Segment { start: s, end: e })
+                .collect();
+            assert_eq!(record.align_helper(&transcript), expected);
+        };
+
+        // Incompatible
+        test_fun(vec![(12, 18), (32, 38)], AlignType::Discordant);
+        test_fun(vec![(21, 29), (32, 38)], AlignType::Discordant);
+        test_fun(
+            vec![(5, 40), (50, 60), (500, 700), (1400, 1501)],
+            AlignType::Discordant,
+        );
+
+        // Exonic
+        test_fun(vec![(12, 20), (30, 38)], AlignType::Exonic);
+
+        // Intronic
+        test_fun(vec![(6, 8)], AlignType::Intronic);
+
+        // Spanning
+        test_fun(vec![(29, 38)], AlignType::Spanning);
+        test_fun(
+            vec![(5, 40), (50, 60), (500, 700), (1500, 1501)],
+            AlignType::Spanning,
+        );
     }
 }
