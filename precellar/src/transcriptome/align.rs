@@ -3,23 +3,16 @@ use bincode::{Decode, Encode};
 use noodles::sam;
 use noodles::sam::alignment::{record::cigar::op::Kind, record_buf::RecordBuf};
 
-use bed_utils::bed::map::GIntervalMap;
-use bed_utils::bed::GenomicRange;
+use bed_utils::bed::{map::GIntervalMap, GenomicRange};
 use itertools::Itertools;
-use log::info;
+use log::{info, warn};
 use rayon::iter::ParallelIterator;
 use rayon::slice::ParallelSlice;
+use seqspec::ChemistryStrandedness;
 
 use crate::align::MultiMapR;
 use crate::fragment::Fragment;
 use crate::transcriptome::{Exon, Transcript};
-
-#[derive(Debug, Copy, Clone)]
-pub enum ChemistryStrandness {
-    Forward,
-    Reverse,
-    Unstranded,
-}
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Encode, Decode)]
 pub enum Orientation {
@@ -87,7 +80,7 @@ pub struct SplicedRecord {
 }
 
 impl SplicedRecord {
-    fn new(read: &RecordBuf, header: &sam::Header) -> Result<Option<Self>> {
+    fn new(read: &RecordBuf, header: &sam::Header, is_read2: bool) -> Result<Option<Self>> {
         if read.flags().is_unmapped() {
             return Ok(None);
         }
@@ -105,7 +98,6 @@ impl SplicedRecord {
 
         for c in cigar.as_ref() {
             match c.kind() {
-                Kind::HardClip | Kind::SoftClip | Kind::Insertion => {}
                 Kind::Skip => {
                     let next_start = curr_segment.end + c.len() as u64;
                     splice_segments.push(curr_segment);
@@ -117,6 +109,7 @@ impl SplicedRecord {
                 Kind::Match | Kind::Deletion | Kind::SequenceMatch | Kind::SequenceMismatch => {
                     curr_segment.end += c.len() as u64;
                 }
+                Kind::HardClip | Kind::SoftClip | Kind::Insertion => {}
                 Kind::Pad => unreachable!(),
             }
         }
@@ -124,13 +117,13 @@ impl SplicedRecord {
 
         let flag = read.flags();
         let strand = if flag.is_reverse_complemented() {
-            if flag.is_segmented() && flag.is_last_segment() {
+            if is_read2 {
                 bed_utils::bed::Strand::Forward
             } else {
                 bed_utils::bed::Strand::Reverse
             }
         } else {
-            if flag.is_segmented() && flag.is_last_segment() {
+            if is_read2 {
                 bed_utils::bed::Strand::Reverse
             } else {
                 bed_utils::bed::Strand::Forward
@@ -157,12 +150,12 @@ impl SplicedRecord {
     fn align_transcript(
         &self,
         transcript: &Transcript,
-        chemistry_strandness: ChemistryStrandness,
+        strandedness: ChemistryStrandedness,
     ) -> TxAlignResult {
-        let is_antisense = match chemistry_strandness {
-            ChemistryStrandness::Forward => transcript.strand != self.strand,
-            ChemistryStrandness::Reverse => transcript.strand == self.strand,
-            ChemistryStrandness::Unstranded => false, // if unstranded, always sense
+        let is_antisense = match strandedness {
+            ChemistryStrandedness::Forward => transcript.strand != self.strand,
+            ChemistryStrandedness::Reverse => transcript.strand == self.strand,
+            ChemistryStrandedness::Unstranded => false, // if unstranded, always sense
         };
         let strand = if is_antisense {
             Orientation::Antisense
@@ -385,7 +378,7 @@ impl TxAlignment {
 pub struct TxAligner {
     /// Map of genomic intervals to transcripts.
     transcripts: GIntervalMap<Transcript>,
-    chemistry_strandness: Option<ChemistryStrandness>,
+    strandedness: Option<ChemistryStrandedness>,
     header: sam::Header,
 }
 
@@ -394,7 +387,7 @@ impl TxAligner {
     pub fn new(
         transcripts: impl IntoIterator<Item = Transcript>,
         header: sam::Header,
-        chemistry_strandness: Option<ChemistryStrandness>,
+        strandedness: Option<ChemistryStrandedness>,
     ) -> Self {
         let transcripts = transcripts
             .into_iter()
@@ -403,7 +396,7 @@ impl TxAligner {
         Self {
             transcripts,
             header,
-            chemistry_strandness,
+            strandedness,
         }
     }
 
@@ -418,29 +411,27 @@ impl TxAligner {
         fn helper<'a>(
             tx_aligner: &'a TxAligner,
             records: &'a [(Option<MultiMapR>, Option<MultiMapR>)],
-            strandness: ChemistryStrandness,
+            strandedness: ChemistryStrandedness,
         ) -> impl Iterator<Item = Option<TxAlignment>> + 'a {
             records.into_iter().map(move |(read1, read2)| {
                 if read1.is_some() && read2.is_some() {
                     tx_aligner._align_pe(read1.as_ref().unwrap(), read2.as_ref().unwrap())
+                } else if read1.is_some() {
+                    tx_aligner._align_se(read1.as_ref().unwrap(), false, strandedness)
                 } else {
-                    let read = if read1.is_some() {
-                        read1.as_ref().unwrap()
-                    } else {
-                        read2.as_ref().unwrap()
-                    };
-                    tx_aligner._align_se(&read, strandness)
+                    tx_aligner._align_se(read2.as_ref().unwrap(), true, strandedness)
                 }
             })
         }
 
-        let mut chemistry_strandness = self.chemistry_strandness;
+        let mut strandedness = self.strandedness;
         data.into_iter().flat_map(move |recs| {
-            if chemistry_strandness.is_none() {
-                chemistry_strandness = Some(self.detect_strandness(&recs));
+            if strandedness.is_none() {
+                warn!("Strandedness not provided, detecting from data ...");
+                strandedness = Some(self.detect_strandedness(&recs));
             }
             recs.par_chunks(4096)
-                .flat_map_iter(|chunk| helper(self, chunk, chemistry_strandness.unwrap()))
+                .flat_map_iter(|chunk| helper(self, chunk, strandedness.unwrap()))
                 .collect::<Vec<_>>()
         })
     }
@@ -456,11 +447,20 @@ impl TxAligner {
     /// * `multi_map` - Vector of single-end alignment records.
     ///
     /// Returns `Some(AnnotatedAlignment)` if a confident alignment is found, otherwise `None`.
-    fn _align_se(&self, multi_map: &MultiMapR, strandness: ChemistryStrandness) -> Option<TxAlignment> {
+    fn _align_se(
+        &self,
+        multi_map: &MultiMapR,
+        is_read2: bool,
+        strandedness: ChemistryStrandedness,
+    ) -> Option<TxAlignment> {
         let barcode = multi_map.barcode().unwrap()?.clone();
         let aln: Vec<_> = multi_map
             .iter()
-            .flat_map(|rec| self._align_one(rec, strandness))
+            .flat_map(|rec| {
+                let rec = SplicedRecord::new(rec, &self.header, is_read2).unwrap()?;
+                let aln = self._align_one(&rec, strandedness);
+                Some((rec, aln))
+            })
             .collect();
         if aln.is_empty() {
             None
@@ -530,56 +530,63 @@ impl TxAligner {
         todo!()
     }
 
-    fn _align_one(&self, rec: &RecordBuf, strandness: ChemistryStrandness) -> Option<(SplicedRecord, Vec<TxAlignResult>)> {
-        let spliced_rec = SplicedRecord::new(rec, &self.header).unwrap()?;
-        let region = GenomicRange::new(
-            &spliced_rec.chrom,
-            spliced_rec.start() as u64,
-            spliced_rec.end() as u64,
-        );
-        let alignments = self
-            .transcripts
+    fn _align_one(
+        &self,
+        rec: &SplicedRecord,
+        strandedness: ChemistryStrandedness,
+    ) -> Vec<TxAlignResult> {
+        let region = GenomicRange::new(&rec.chrom, rec.start() as u64, rec.end() as u64);
+        self.transcripts
             .find(&region)
-            .map(|(_, transcript)| spliced_rec.align_transcript(transcript, strandness))
-            .collect();
-        Some((spliced_rec, alignments))
+            .map(|(_, transcript)| rec.align_transcript(transcript, strandedness))
+            .collect()
     }
 
-    /// Detects the strandness of the RNA-seq data based on the alignments.
-    fn detect_strandness(
+    /// Detects the strandedness of the RNA-seq data based on the alignments.
+    fn detect_strandedness(
         &self,
         alignments: &[(Option<MultiMapR>, Option<MultiMapR>)],
-    ) -> ChemistryStrandness {
+    ) -> ChemistryStrandedness {
         let mut num_sense = 0;
         let mut num_antisense = 0;
+
         alignments
             .into_iter()
-            .filter(|(rec1, rec2)| {
-                rec1.as_ref().map_or(true, |x| x.is_confidently_mapped())
-                    && rec2.as_ref().map_or(true, |x| x.is_confidently_mapped())
+            .flat_map(|(rec1, rec2)| {
+                let rec1 = rec1.as_ref().and_then(|x| {
+                    if x.is_confidently_mapped() {
+                        SplicedRecord::new(&x.primary, &self.header, false).unwrap()
+                    } else {
+                        None
+                    }
+                });
+                let rec2 = rec2.as_ref().and_then(|x| {
+                    if x.is_confidently_mapped() {
+                        SplicedRecord::new(&x.primary, &self.header, true).unwrap()
+                    } else {
+                        None
+                    }
+                });
+                [rec1, rec2]
             })
-            .for_each(|(rec1, rec2)| {
+            .flatten()
+            .for_each(|aln| {
                 let mut is_sense = false;
                 let mut is_antisense = false;
 
-                rec1.iter().chain(rec2.iter()).for_each(|aln| {
-                    if let Some(rec) = SplicedRecord::new(&aln.primary, &self.header).unwrap() {
-                        let region =
-                            GenomicRange::new(&rec.chrom, rec.start() as u64, rec.end() as u64);
-                        self.transcripts.find(&region).for_each(|(_, transcript)| {
-                            match rec.orientation(transcript) {
-                                Some(Orientation::Sense) => is_sense = true,
-                                Some(Orientation::Antisense) => is_antisense = true,
-                                None => {}
-                            }
-                        });
-                        if is_sense {
-                            num_sense += 1;
-                        } else if is_antisense {
-                            num_antisense += 1;
-                        }
+                let region = GenomicRange::new(&aln.chrom, aln.start() as u64, aln.end() as u64);
+                self.transcripts.find(&region).for_each(|(_, transcript)| {
+                    match aln.orientation(transcript) {
+                        Some(Orientation::Sense) => is_sense = true,
+                        Some(Orientation::Antisense) => is_antisense = true,
+                        None => {}
                     }
                 });
+                if is_sense {
+                    num_sense += 1;
+                } else if is_antisense {
+                    num_antisense += 1;
+                }
             });
 
         let total = num_sense + num_antisense;
@@ -589,15 +596,15 @@ impl TxAligner {
             "Found {:.3}% sense and {:.3}% antisense alignments",
             percent_sense, percent_antisense
         );
-        if percent_sense > 75.0 {
-            info!("Chemistry strandness is set to: Forward");
-            ChemistryStrandness::Forward
-        } else if percent_antisense > 75.0 {
-            info!("Chemistry strandness is set to: Reverse");
-            ChemistryStrandness::Reverse
+        if percent_sense > 67.0 {
+            info!("Chemistry strandedness is set to: Forward");
+            ChemistryStrandedness::Forward
+        } else if percent_antisense > 67.0 {
+            info!("Chemistry strandedness is set to: Reverse");
+            ChemistryStrandedness::Reverse
         } else {
-            info!("Chemistry strandness is set to: Unstranded");
-            ChemistryStrandness::Unstranded
+            info!("Chemistry strandedness is set to: Unstranded");
+            ChemistryStrandedness::Unstranded
         }
     }
 }

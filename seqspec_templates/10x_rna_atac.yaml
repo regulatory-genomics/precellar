@@ -13,6 +13,7 @@ library_protocol: Custom
 library_kit: Illumina Truseq Dual Index
 sequence_protocol: Illumina NovaSeq 6000
 sequence_kit: NovaSeq 6000 v1.5
+chemistry_strandedness: reverse
 sequence_spec: []
 library_spec:
 - !Region

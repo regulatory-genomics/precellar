@@ -1,23 +1,20 @@
-!Assay
 seqspec_version: 0.3.0
-assay_id: 10xRNAv3
-name: 10xRNAv3
+assay_id: 10xRNAv4
+name: 10xRNAv4
 doi: https://doi.org/10.1126/science.aam8999
 date: 15 March 2018
-description: 10x Genomics v3 single-cell rnaseq
+description: 10x Genomics v4 single-cell rnaseq
 modalities:
 - rna
 lib_struct: https://teichlab.github.io/scg_lib_structs/methods_html/10xChromium3.html
+library_protocol: 10xv4 RNA
+library_kit: Not-specified
 sequence_protocol: Not-specified
 sequence_kit: Not-specified
-library_protocol: 10xv3 RNA
-library_kit: Not-specified
 chemistry_strandedness: reverse
 sequence_spec: []
 library_spec:
-- !Region
-  parent_id: null
-  region_id: rna
+- region_id: rna
   region_type: rna
   name: 10x-ATAC-RNA-MULTI-seq RNA
   sequence_type: joined
@@ -26,9 +23,7 @@ library_spec:
   max_len: 1150
   onlist: null
   regions:
-  - !Region
-    parent_id: rna
-    region_id: rna-illumina_p5
+  - region_id: rna-illumina_p5
     region_type: illumina_p5
     name: Illumina P5
     sequence_type: fixed
@@ -36,10 +31,8 @@ library_spec:
     min_len: 29
     max_len: 29
     onlist: null
-    regions: null
-  - !Region
-    parent_id: rna
-    region_id: rna-truseq_read1
+    regions: []
+  - region_id: rna-truseq_read1
     region_type: truseq_read1
     name: RNA Truseq Read 1
     sequence_type: fixed
@@ -47,28 +40,25 @@ library_spec:
     min_len: 29
     max_len: 29
     onlist: null
-    regions: null
-  - !Region
-    parent_id: rna
-    region_id: rna-cell_barcode
+    regions: []
+  - region_id: rna-cell_barcode
     region_type: barcode
     name: Cell Barcode
     sequence_type: onlist
     sequence: NNNNNNNNNNNNNNNN
     min_len: 16
     max_len: 16
-    onlist: !Onlist
-      file_id: 3M-february-2018.txt.gz
-      filename: 3M-february-2018.txt.gz
+    onlist:
+      file_id: 10x_rna_v4-3M_3pgex_may_2023_TRU.txt.gz
+      filename: 10x_rna_v4-3M_3pgex_may_2023_TRU.txt.gz
       filetype: txt
       filesize: 115512960
-      url: https://osf.io/download/ksv9x
+      url: https://osf.io/download/67pd8/
       urltype: https
-      md5: 3d36d0a4021fd292b265e2b5e72aaaf3
       location: remote
-    regions: null
-  - !Region
-    region_id: rna-umi
+      md5: 3d36d0a4021fd292b265e2b5e72aaaf3
+    regions: []
+  - region_id: rna-umi
     region_type: umi
     name: GEX UMI
     sequence_type: random
@@ -76,11 +66,8 @@ library_spec:
     min_len: 12
     max_len: 12
     onlist: null
-    regions: null
-    parent_id: rna
-  - !Region
-    parent_id: rna
-    region_id: rna-polyT
+    regions: []
+  - region_id: rna-polyT
     region_type: poly_t
     name: rna-polyT
     sequence_type: random
@@ -88,10 +75,8 @@ library_spec:
     min_len: 10
     max_len: 250
     onlist: null
-    regions: null
-  - !Region
-    parent_id: rna
-    region_id: rna-cDNA
+    regions: []
+  - region_id: rna-cDNA
     region_type: cdna
     name: rna-cDNA
     sequence_type: random
@@ -99,10 +84,8 @@ library_spec:
     min_len: 1
     max_len: 1000
     onlist: null
-    regions: null
-  - !Region
-    parent_id: rna
-    region_id: rna-truseq_read2
+    regions: []
+  - region_id: rna-truseq_read2
     region_type: truseq_read2
     name: Truseq Read 2
     sequence_type: fixed
@@ -110,10 +93,8 @@ library_spec:
     min_len: 34
     max_len: 34
     onlist: null
-    regions: null
-  - !Region
-    parent_id: rna
-    region_id: rna-index7
+    regions: []
+  - region_id: rna-index7
     region_type: index7
     name: Truseq Read 2
     sequence_type: onlist
@@ -121,10 +102,8 @@ library_spec:
     min_len: 8
     max_len: 8
     onlist: null
-    regions: null
-  - !Region
-    parent_id: rna
-    region_id: rna-illumina_p7
+    regions: []
+  - region_id: rna-illumina_p7
     region_type: illumina_p7
     name: Illumina P7
     sequence_type: fixed
@@ -132,4 +111,4 @@ library_spec:
     min_len: 24
     max_len: 24
     onlist: null
-    regions: null
+    regions: []

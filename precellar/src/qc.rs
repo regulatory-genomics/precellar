@@ -457,6 +457,7 @@ impl From<QcGeneQuant> for Value {
             "frac_transcriptomic": num_transcriptomic as f64 / qc.total_raw_count as f64,
             "mapping": mapping,
             "quantification": {
+                "num_unique_umi": qc.num_unique_umi,
                 "frac_duplicates": 1.0 - qc.num_unique_umi as f64 / num_transcriptomic as f64,
                 "frac_spliced": qc.num_spliced as f64 / qc.num_unique_umi as f64,
                 "frac_unspliced": qc.num_unspliced as f64 / qc.num_unique_umi as f64,

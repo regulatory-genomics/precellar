@@ -10,7 +10,7 @@ mod align;
 mod annotate;
 
 pub use quantification::Quantifier;
-pub use align::{ChemistryStrandness, TxAlignResult, TxAligner, TxAlignment};
+pub use align::{TxAlignResult, TxAligner, TxAlignment};
 pub use annotate::{UMIGroup, CorrectUMI};
 
 use anyhow::{bail, ensure, Result};

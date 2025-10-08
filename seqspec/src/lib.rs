@@ -23,6 +23,15 @@ use std::{
     sync::{Arc, RwLock},
 };
 
+#[derive(Deserialize, Serialize, Debug, Copy, Clone, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum ChemistryStrandedness {
+    Forward,
+    Reverse,
+    Unstranded,
+}
+
+
 /// Assay struct contains the information parsed from the sequence spec YAML file
 #[derive(Deserialize, Serialize, Debug, Clone, PartialEq)]
 pub struct Assay {
@@ -40,6 +49,7 @@ pub struct Assay {
     pub library_kit: LibraryKit,
     pub sequence_protocol: SequenceProtocol,
     pub sequence_kit: SequenceKit,
+    pub chemistry_strandedness: Option<ChemistryStrandedness>,
     pub sequence_spec: read::SeqSpec,
     pub library_spec: LibSpec,
 }

@@ -2,13 +2,13 @@ use crate::aligners::AlignerRef;
 use crate::pyseqspec::extract_assays;
 
 use anyhow::{bail, Result};
+use seqspec::ChemistryStrandedness;
 use core::panic;
 use indicatif::{ProgressBar, ProgressFinish, ProgressStyle};
 use log::info;
 use noodles::sam::{self, alignment::io::Write};
 use precellar::align::{Aligner, AlignmentResult};
 use precellar::qc::Metric;
-use precellar::transcriptome::ChemistryStrandness;
 use pyo3::types::PyDict;
 use pyo3::{prelude::*, BoundObject};
 use serde_json::Value;
@@ -93,7 +93,7 @@ pub fn make_bwa_index(fasta: PathBuf, genome_prefix: PathBuf) -> Result<()> {
 /// compute_snv: bool
 ///     Whether to compute single nucleotide variants (SNVs) from the alignments.
 ///     If True, the SNVs will be computed and added to the fragment file.
-/// strand_specific: Literal['forward', 'reverse', 'unstranded'] | None
+/// strandedness: Literal['forward', 'reverse', 'unstranded'] | None
 ///     The strand specificity of the assay. Can be "forward", "reverse", or "unstranded".
 ///     If None, the strand specificity will be inferred from the data.
 /// compression: str | None
@@ -125,7 +125,7 @@ pub fn make_bwa_index(fasta: PathBuf, genome_prefix: PathBuf) -> Result<()> {
         output, modality=None, output_type="alignment",
         mito_dna=vec!["chrM".to_owned(), "M".to_owned()],
         shift_left=4, shift_right=-5, compute_snv=false,
-        strand_specific=None,
+        strandedness=None,
         compression=None, compression_level=None,
         temp_dir=None, num_threads=8, chunk_size=10000000,
     ),
@@ -133,7 +133,7 @@ pub fn make_bwa_index(fasta: PathBuf, genome_prefix: PathBuf) -> Result<()> {
         output, modality=None, output_type='alignment',
         mito_dna=['chrM', 'M'],
         shift_left=4, shift_right=-5, compute_snv=False,
-        strand_specific=None,
+        strandedness=None,
         compression=None, compression_level=None,
         temp_dir=None, num_threads=8, chunk_size=10000000)"
 )]
@@ -148,7 +148,7 @@ pub fn align<'py>(
     shift_left: i64,
     shift_right: i64,
     compute_snv: bool,
-    strand_specific: Option<&str>,
+    strandedness: Option<&str>,
     compression: Option<&str>,
     compression_level: Option<u32>,
     temp_dir: Option<PathBuf>,
@@ -168,13 +168,13 @@ pub fn align<'py>(
 
     let mut aligner = AlignerRef::try_from(aligner)?;
     let header = aligner.header();
-    let chemistry_strandness = strand_specific.map(|s| match s {
-        "forward" => ChemistryStrandness::Forward,
-        "reverse" => ChemistryStrandness::Reverse,
-        "unstranded" => ChemistryStrandness::Unstranded,
+    let strandedness = strandedness.map(|s| match s {
+        "forward" => ChemistryStrandedness::Forward,
+        "reverse" => ChemistryStrandedness::Reverse,
+        "unstranded" => ChemistryStrandedness::Unstranded,
         _ => panic!("strand_specific must be 'unstranded', 'forward' or 'reverse'"),
-    });
-    let transcript_annotator = aligner.transcript_annotator(chemistry_strandness);
+    }).or(assay[0].chemistry_strandedness);
+    let transcript_annotator = aligner.transcript_annotator(strandedness);
 
     let mut processor = FastqProcessor::new(assay)
         .with_modality(modality)
