@@ -1,9 +1,8 @@
 use anyhow::Result;
+use indexmap::{IndexMap, IndexSet};
 use log::warn;
-use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
-use crate::barcode::OligoFrequncy;
 use seqspec::region::{LibSpec, Region};
 use seqspec::Modality;
 
@@ -302,7 +301,7 @@ impl BarcodeLocator {
 fn find_best_barcode_match(
     candidate_seq: &[u8],
     barcode_region: &Arc<RwLock<Region>>,
-    whitelists: &HashMap<String, OligoFrequncy>,
+    whitelists: &IndexMap<String, IndexSet<Vec<u8>>>,
 ) -> Option<ExtractedBarcode> {
     let region_guard = barcode_region.read().unwrap();
     let region_id = region_guard.region_id.clone();
@@ -324,7 +323,7 @@ fn find_best_barcode_match(
 /// Find best barcode match using fitting alignment distance
 fn find_best_fitting_match(
     candidate_seq: &[u8],
-    whitelist: &OligoFrequncy,
+    whitelist: &IndexSet<Vec<u8>>,
 ) -> Option<(Vec<u8>, f64)> {
     if whitelist.is_empty() {
         return None;
@@ -333,7 +332,7 @@ fn find_best_fitting_match(
     let mut best_barcode = None;
     let mut min_distance = usize::MAX;
 
-    for barcode in whitelist.keys() {
+    for barcode in whitelist.iter() {
         // Use fitting alignment distance: short sequence (barcode) vs long sequence (candidate)
         let distance = fitting_alignment_distance(barcode, candidate_seq);
         
@@ -383,7 +382,7 @@ impl BarcodeExtractor {
     pub fn extract_barcode(
         &self,
         record: &noodles::fastq::Record,
-        whitelists: &HashMap<String, OligoFrequncy>,
+        whitelists: &IndexMap<String, IndexSet<Vec<u8>>>,
     ) -> Result<LongReadBarcodeResult> {
         let sequence = record.sequence();
         let quality = record.quality_scores();
@@ -419,7 +418,7 @@ impl BarcodeExtractor {
         &self,
         segment_seq: &[u8],
         end_regions: &EndRegions,
-        whitelists: &HashMap<String, OligoFrequncy>,
+        whitelists: &IndexMap<String, IndexSet<Vec<u8>>>,
     ) -> Result<Vec<ExtractedBarcode>> {
         // Return early if no barcode region is present on this end
         if !end_regions.has_barcode {
