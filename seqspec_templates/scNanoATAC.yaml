@@ -1,0 +1,100 @@
+!Assay
+seqspec_version: 0.3.0
+assay_id: scNanoATAC
+name: scNanoATAC
+doi: 10.1038/s41422-022-00730-x
+date: 11 October 2022
+description: Single Cell Long Read ATAC-seq
+modalities:
+- atac
+lib_struct: https://static-content.springer.com/esm/art%3A10.1038%2Fs41422-022-00730-x/MediaObjects/41422_2022_730_MOESM1_ESM.pdf
+library_protocol: Custom
+library_kit: Custom
+sequence_protocol: Oxfold Nanopore
+sequence_kit: Custom
+sequence_spec: []
+library_spec:
+- !Region
+  region_id: atac
+  region_type: atac
+  name: ATAC
+  sequence_type: joined
+  sequence: 
+  min_len: 1000
+  max_len: 2147483647
+  onlist: null
+  regions:
+  - !Region
+    region_id: mix_seq
+    region_type: mix_seq
+    name: mixture sequence
+    sequence_type: random
+    sequence: XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
+    min_len: 150
+    max_len: 150
+    onlist: null
+    regions: null
+  - !Region
+    region_id: gdna
+    region_type: gdna
+    name: gdna
+    sequence_type: random
+    sequence: XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
+    min_len: 1000
+    max_len: 2147483647
+    onlist: null
+  - !Region
+    region_id: adapter
+    region_type: adapter
+    name: adapter
+    sequence_type: fixed
+    sequence: CTGTCTCTTATACACATCTGACGCTGCCGACGA
+    min_len: 33
+    max_len: 33
+    onlist: null
+  - !Region
+    region_id: inner barcode
+    region_type: barcode
+    name: inner barcode
+    sequence_type: onlist
+    sequence: NNNNNNNNNNNNNNNNNNNNNNNN
+    min_len: 24
+    max_len: 24
+    onlist: !Onlist
+      file_id: inner_barcode.txt.gz
+      filename: inner_barcode.txt.gz
+      filetype: txt
+      filesize: 0
+      url: https://osf.io/download/inner_barcode.txt.gz
+      urltype: https
+      md5: null
+      location: remote
+  - !Region
+    region_id: linker
+    region_type: linker
+    name: linker
+    sequence_type: fixed
+    sequence: AGATCGGAAGAGCGTCGTGTAG
+    min_len: 22
+    max_len: 22
+    onlist: null
+    regions: null
+  - !Region
+    region_id: outer barcode
+    region_type: barcode
+    name: outer barcode
+    sequence_type: onlist
+    sequence: NNNNNNNNNNNNNNNNNNNNNNNN
+    min_len: 24
+    max_len: 24
+    onlist: !Onlist
+  - !Region
+    region_id: end_linker
+    region_type: linker
+    name: end linker
+    sequence_type: fixed
+    sequence: AGAT
+    min_len: 4
+    max_len: 4
+    onlist: null
+    regions: null

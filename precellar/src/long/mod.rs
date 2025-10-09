@@ -1,11 +1,11 @@
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, bail, Result};
+use indexmap::{IndexMap, IndexSet};
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
 pub mod barcode_extractor;
 pub mod sequence_aligner;
 
-use crate::barcode::OligoFrequncy;
 use seqspec::region::{Region, LibSpec};
 
 /// Long-read barcode extraction result
@@ -22,18 +22,28 @@ pub struct LongReadBarcodeResult {
 /// Main interface for long-read processing
 #[derive(Debug)]
 pub struct LongReadProcessor {
-    /// Barcode whitelists
-    whitelists: HashMap<String, OligoFrequncy>,
+    /// Barcode whitelists: String for region_id
+    whitelists: IndexMap<String, IndexSet<Vec<u8>>>,
 }
 
 impl LongReadProcessor {
     /// Create a new long-read processor
     pub fn new(
-        whitelists: HashMap<String, OligoFrequncy>,
-    ) -> Self {
-        Self {
-            whitelists,
+        whitelists: IndexMap<String, IndexSet<Vec<u8>>>,
+    ) -> Result<Self> {
+        // Check that all barcode regions have non-empty whitelists
+        for (region_id, whitelist) in &whitelists {
+            if whitelist.is_empty() {
+                bail!(
+                    "Barcode region '{}' does not have a whitelist. Long-read processing requires all barcode regions to have whitelists.", 
+                    region_id
+                );
+            }
         }
+        
+        Ok(Self {
+            whitelists,
+        })
     }
 
     /// Extract barcode from FASTQ record
@@ -309,8 +319,6 @@ mod tests {
     #[test]
     fn test_extraction_with_fastq_record() {
         use noodles::fastq::Record;
-        use crate::barcode::OligoFrequncy;
-        use std::collections::HashSet;
 
         // Define fixed region sequences
         let fixed_seq1 = "ACGTACGTACGTACGT"; // 16bp fixed sequence 1
@@ -321,18 +329,14 @@ mod tests {
         let barcode2 = "CCCCCCCCCC"; // 10bp  
         let barcode3 = "GGGGGGGGGG"; // 10bp
         
-        // Create barcode whitelist
-        let mut whitelist = HashSet::new();
+        // Create barcode whitelist using IndexSet
+        let mut whitelist = IndexSet::new();
         whitelist.insert(barcode1.as_bytes().to_vec());
         whitelist.insert(barcode2.as_bytes().to_vec());
         whitelist.insert(barcode3.as_bytes().to_vec());
-        let mut oligo_freq = OligoFrequncy::new();
-        for barcode in whitelist {
-            oligo_freq.insert(barcode, 1);
-        }
         
-        let mut whitelists = HashMap::new();
-        whitelists.insert("bc1".to_string(), oligo_freq);
+        let mut whitelists = IndexMap::new();
+        whitelists.insert("bc1".to_string(), whitelist);
         
         // Create test library specification
         let fixed_region1 = Arc::new(RwLock::new(create_test_region(
@@ -384,7 +388,7 @@ mod tests {
         };
 
         let lib_spec = LibSpec::new(vec![modality_region]).unwrap();
-        let processor = LongReadProcessor::new(whitelists);
+        let processor = LongReadProcessor::new(whitelists).unwrap();
 
         // Test sequences with indels and mismatches
         // Record 1: Perfect match with barcode1, 1 mismatch in fixed region
