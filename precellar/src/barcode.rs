@@ -19,7 +19,10 @@ const BC_MAX_QV: u8 = 66; // This is the illumina quality value
 pub(crate) const BASE_OPTS: [u8; 4] = [b'A', b'C', b'G', b'T'];
 
 /// Count barcodes in a given assay and modality, returning a map of region IDs to their respective whitelists
-pub(crate) fn barcode_counting(assay: &Assay, modality: Modality) -> (IndexMap<RegionId, Whitelist>, usize) {
+pub(crate) fn barcode_counting(
+    assay: &Assay, 
+    modality: Modality
+) -> (IndexMap<RegionId, Whitelist>, usize) {
     let spinner = ProgressBar::with_draw_target(None, ProgressDrawTarget::stderr_with_hz(1))
     .with_style(
         ProgressStyle::with_template(
