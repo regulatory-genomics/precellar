@@ -2,7 +2,6 @@ use crate::aligners::AlignerRef;
 use crate::pyseqspec::extract_assays;
 
 use anyhow::{bail, Result};
-use seqspec::ChemistryStrandedness;
 use core::panic;
 use indicatif::{ProgressBar, ProgressFinish, ProgressStyle};
 use log::info;
@@ -11,6 +10,7 @@ use precellar::align::{Aligner, AlignmentResult};
 use precellar::qc::Metric;
 use pyo3::types::PyDict;
 use pyo3::{prelude::*, BoundObject};
+use seqspec::ChemistryStrandedness;
 use serde_json::Value;
 use std::{path::PathBuf, str::FromStr};
 
@@ -93,9 +93,11 @@ pub fn make_bwa_index(fasta: PathBuf, genome_prefix: PathBuf) -> Result<()> {
 /// compute_snv: bool
 ///     Whether to compute single nucleotide variants (SNVs) from the alignments.
 ///     If True, the SNVs will be computed and added to the fragment file.
-/// strandedness: Literal['forward', 'reverse', 'unstranded'] | None
-///     The strand specificity of the assay. Can be "forward", "reverse", or "unstranded".
-///     If None, the strand specificity will be inferred from the data.
+/// strandedness: Literal['forward', 'reverse', 'unstranded', 'auto'] | None
+///     The strand specificity of the assay. Can be "forward", "reverse", "unstranded", "auto".
+///     If "auto", the strand specificity will be inferred from the data. Note that automatic
+///     inference may not always be accurate, especially for in the samples where the
+///     antisense transcription is prevalent, e.g., brain samples.
 /// compression: str | None
 ///     The compression algorithm to use for the output fragment file.
 ///     If None, the compression algorithm will be inferred from the file extension.
@@ -168,14 +170,23 @@ pub fn align<'py>(
 
     let mut aligner = AlignerRef::try_from(aligner)?;
     let header = aligner.header();
-    let strandedness = strandedness.map(|s| match s {
-        "forward" => ChemistryStrandedness::Forward,
-        "reverse" => ChemistryStrandedness::Reverse,
-        "unstranded" => ChemistryStrandedness::Unstranded,
-        _ => panic!("strand_specific must be 'unstranded', 'forward' or 'reverse'"),
-    }).or(assay[0].chemistry_strandedness);
-    let transcript_annotator = aligner.transcript_annotator(strandedness);
+    let strandedness = if let Some(s) = strandedness {
+        match s.to_lowercase().as_str() {
+            "forward" => Some(ChemistryStrandedness::Forward),
+            "reverse" => Some(ChemistryStrandedness::Reverse),
+            "unstranded" => Some(ChemistryStrandedness::Unstranded),
+            "auto" => None,
+            _ => panic!("strandedness must be 'unstranded', 'forward', 'reverse' or 'auto'"),
+        }
+    } else {
+        if assay[0].chemistry_strandedness.is_some() {
+            assay[0].chemistry_strandedness
+        } else {
+            panic!("strandedness must be provided if not specified in the assay")
+        }
+    };
 
+    let transcript_annotator = aligner.transcript_annotator(strandedness);
     let mut processor = FastqProcessor::new(assay)
         .with_modality(modality)
         .with_barcode_correct_prob(0.9);

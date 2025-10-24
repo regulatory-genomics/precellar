@@ -239,7 +239,6 @@ impl Metric for QcAlign {
         json!({
             "sequenced_reads": stat_all.total_reads(),
             "sequenced_read_pairs": stat_all.total_pairs(),
-            "mapped_reads": stat_all.total_mapped(),
             "frac_properly_paired": if stat_all.total_pairs() > 0 { stat_all.proper_pairs as f64 / stat_all.total_pairs() as f64 } else { 0.0 },
             "frac_confidently_mapped": fraction_confidently_mapped,
             "frac_unmapped": self.frac_unmapped(),
