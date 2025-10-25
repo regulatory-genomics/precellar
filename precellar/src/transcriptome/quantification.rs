@@ -36,7 +36,7 @@ impl Quantifier {
         Ok(Self {
             annotator,
             genes,
-            chunk_size: 50000000,
+            chunk_size: 10000000,
         })
     }
 

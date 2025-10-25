@@ -313,7 +313,7 @@ impl Default for IntoFragOpts {
             shift_left: 0,
             shift_right: 0,
             min_mapq: 30,
-            chunk_size: 30000000,
+            chunk_size: 10000000,
             temp_dir: None,
             compute_snv: false,
         }
