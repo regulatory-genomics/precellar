@@ -81,13 +81,13 @@ impl Default for Read {
 }
 
 pub struct FastqReader {
-    reader: fastq::io::Reader<Box<dyn BufRead>>,
+    reader: fastq::io::Reader<Box<dyn BufRead + Send>>,
     min_len: u32,
     max_len: u32,
 }
 
 impl FastqReader {
-    pub fn new(reader: Box<dyn BufRead>, min_len: u32, max_len: u32) -> Self {
+    pub fn new(reader: Box<dyn BufRead + Send>, min_len: u32, max_len: u32) -> Self {
         Self {
             reader: fastq::io::Reader::new(reader),
             min_len,
@@ -274,7 +274,7 @@ impl File {
     /// If the file is remote, it will be downloaded to the cache directory.
     /// If the file is local, it will be opened directly.
     /// The base_dir is used to resolve relative paths.
-    pub fn open(&self) -> Result<Box<dyn std::io::Read>> {
+    pub fn open(&self) -> Result<Box<dyn std::io::Read + Send + Sync>> {
         match self.urltype {
             UrlType::Local => Ok(Box::new(crate::utils::open_file(&self.url)?)),
             _ => {

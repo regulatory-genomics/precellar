@@ -298,7 +298,7 @@ struct AlignProgressBar<'a, A> {
 
 impl<'a, A> AlignProgressBar<'a, A> {
     fn new(alignments: AlignmentResult<'a, A>) -> AlignProgressBar<'a, A> {
-        let pb = ProgressBar::new(alignments.fastq_reader.total_reads.unwrap_or(0) as u64);
+        let pb = ProgressBar::new(alignments.num_records() as u64);
         let sty = ProgressStyle::with_template(
             "{percent}%|{wide_bar:.cyan/blue}| {human_pos:>}/{human_len:} [{elapsed}<{eta}, {per_sec}]",
         )
@@ -317,7 +317,7 @@ impl<A: Aligner> Iterator for AlignProgressBar<'_, A> {
     fn next(&mut self) -> Option<Self::Item> {
         let item = self.alignments.next();
         self.pb
-            .set_position(self.alignments.fastq_reader.num_processed() as u64);
+            .set_position(self.alignments.num_processed() as u64);
         item
     }
 }

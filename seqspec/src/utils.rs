@@ -41,8 +41,8 @@ pub fn create_file<P: AsRef<Path>>(
 }
 
 /// Open a file, possibly compressed. Supports gzip and zstd.
-pub fn open_file<P: AsRef<Path>>(file: P) -> Result<Box<dyn std::io::Read>> {
-    let reader: Box<dyn std::io::Read> = match detect_compression(file.as_ref()) {
+pub fn open_file<P: AsRef<Path>>(file: P) -> Result<Box<dyn std::io::Read + Send + Sync>> {
+    let reader: Box<dyn std::io::Read + Send + Sync> = match detect_compression(file.as_ref()) {
         Some(Compression::Gzip) => Box::new(flate2::read::MultiGzDecoder::new(File::open(
             file.as_ref(),
         )?)),

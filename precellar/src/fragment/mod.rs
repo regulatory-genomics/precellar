@@ -449,7 +449,7 @@ where
     sorter
         .build()
         .unwrap()
-        .sort_by(reads, |a, b| a.barcode.cmp(&b.barcode))
+        .sort_by_async(reads, |a, b| a.barcode.cmp(&b.barcode))
         .unwrap()
         .map(|x| x.unwrap())
 }

@@ -2,7 +2,7 @@ use super::aligners::{Aligner, MultiMap, MultiMapR};
 
 use crate::barcode::{barcode_counting, BarcodeCorrector, OligoFrequncy, Whitelist};
 use crate::qc::{QcAlign, QcFastq};
-use crate::utils::rev_compl_fastq_record;
+use crate::utils::{rev_compl_fastq_record, PrefetchIterator};
 use anyhow::Result;
 use bstr::BString;
 use indexmap::IndexMap;
@@ -95,19 +95,6 @@ impl FastqProcessor {
         chunk_size: usize,
     ) -> AlignmentResult<'a, A> {
         let fq_reader = self.gen_barcoded_fastq(true, chunk_size);
-
-        // Initialize qc
-        let mut qc = QcAlign::default();
-        let header = aligner.header();
-        self.mito_dna.iter().for_each(|mito| {
-            header
-                .reference_sequences()
-                .get_index_of(&BString::from(mito.as_str()))
-                .map(|x| qc.mito_dna.insert(x));
-        });
-        self.qc_align
-            .insert(self.modality(), Arc::new(Mutex::new(qc)));
-
         let n_reads: String = fq_reader
             .readers
             .iter()
@@ -115,20 +102,22 @@ impl FastqProcessor {
             .intersperse(" + ".to_string())
             .collect();
         info!("Aligning {} reads to reference genome ...", n_reads);
-        AlignmentResult {
+        let result = AlignmentResult::new(
             aligner,
-            fastq_reader: fq_reader,
-            qc: self.get_align_qc().clone(),
-            header,
+            fq_reader,
+            &self.mito_dna,
             num_threads,
-        }
+        );
+        self.qc_align
+            .insert(self.modality(), result.qc.clone());
+        result
     }
 
     pub fn gen_barcoded_fastq(
         &mut self,
         correct_barcode: bool,
         chunk_size: usize,
-    ) -> AnnotatedFastqReaders {
+    ) -> MultiAnnotatedFqReader {
         let modality = self.modality();
         // Initialize qc
         self.qc_fastq
@@ -185,17 +174,54 @@ impl FastqProcessor {
             fq_reader.total_reads = Some(num_reads);
             fq_reader.with_chunk_size(chunk_size)
         }).collect();
-        AnnotatedFastqReaders::new(result)
+        MultiAnnotatedFqReader::new(result)
     }
 }
 
 /// Iterator that yields alignment results from annotated FASTQ reads with QC metrics.
 pub struct AlignmentResult<'a, A> {
     aligner: &'a mut A,
-    pub fastq_reader: AnnotatedFastqReaders,
+    fastq_reader: PrefetchIterator<Vec<AnnotatedFastq>>,
     qc: Arc<Mutex<QcAlign>>,
     header: noodles::sam::Header,
     num_threads: u16,
+    num_records: usize,
+    num_processed: usize,
+}
+
+impl<'a, A: Aligner> AlignmentResult<'a, A> {
+    fn new(aligner: &'a mut A, fastq_reader: MultiAnnotatedFqReader, mito_dna: &HashSet<String>, num_threads: u16) -> Self {
+        let header = aligner.header();
+        let num_records = fastq_reader.num_records();
+
+        let mut qc = QcAlign::default();
+        mito_dna.iter().for_each(|mito| {
+            header
+                .reference_sequences()
+                .get_index_of(&BString::from(mito.as_str()))
+                .map(|x| qc.mito_dna.insert(x));
+        });
+ 
+        Self {
+            aligner,
+            fastq_reader: PrefetchIterator::new(fastq_reader, 2),
+            qc: Arc::new(Mutex::new(qc)),
+            header,
+            num_threads,
+            num_records,
+            num_processed: 0,
+        }
+    }
+}
+
+impl<'a, A> AlignmentResult<'a, A> {
+    pub fn num_records(&self) -> usize {
+        self.num_records
+    }
+
+    pub fn num_processed(&self) -> usize {
+        self.num_processed
+    }
 }
 
 /// Implement the Iterator trait for AlignmentResult.
@@ -223,18 +249,18 @@ impl<'a, A: Aligner> Iterator for AlignmentResult<'a, A> {
                 debug!("No alignment found for read");
             }
         });
+        self.num_processed += results.len();
         Some(results)
     }
 }
 
 /// AnnotatedFastqReaders is formed by concatenating multiple AnnotatedFastqReader instances.
-pub struct AnnotatedFastqReaders {
+pub struct MultiAnnotatedFqReader {
     readers: Vec<AnnotatedFastqReader>,
     current: usize,
-    pub total_reads: Option<usize>,
 }
 
-impl Iterator for AnnotatedFastqReaders {
+impl Iterator for MultiAnnotatedFqReader {
     type Item = Vec<AnnotatedFastq>;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -248,22 +274,19 @@ impl Iterator for AnnotatedFastqReaders {
     }
 }
 
-impl AnnotatedFastqReaders {
+impl MultiAnnotatedFqReader {
     fn new(readers: Vec<AnnotatedFastqReader>) -> Self {
-        let total_reads = readers
-            .iter()
-            .map(|x| x.total_reads)
-            .reduce(|a, b| a.and_then(|x| b.map(|y| x + y)))
-            .unwrap_or(Some(0));
         Self {
             readers,
             current: 0,
-            total_reads,
         }
     }
 
-    pub fn num_processed(&self) -> usize {
-        self.readers.iter().map(|x| x.num_processed).sum()
+    pub fn num_records(&self) -> usize {
+        self.readers
+            .iter()
+            .map(|x| x.total_reads.unwrap())
+            .sum()
     }
 
     pub fn is_paired_end(&self) -> Result<bool> {
@@ -278,7 +301,6 @@ impl AnnotatedFastqReaders {
 struct AnnotatedFastqReader {
     buffer: fastq::Record,
     total_reads: Option<usize>,
-    num_processed: usize,
     trim_poly_a: bool,
     annotators: Vec<FastqAnnotator>,
     readers: Vec<FastqReader>,
@@ -297,7 +319,6 @@ impl AnnotatedFastqReader {
         Self {
             buffer: fastq::Record::default(),
             total_reads: None,
-            num_processed: 0,
             annotators,
             readers,
             trim_poly_a: false,
@@ -385,7 +406,6 @@ impl Iterator for AnnotatedFastqReader {
         if n == 0 {
             None
         } else {
-            self.num_processed += n;
             let n = (n / 256).max(1024);
             let annotators = &self.annotators;
             let (result, qc): (Vec<_>, Vec<_>) = self

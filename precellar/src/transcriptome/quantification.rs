@@ -83,18 +83,18 @@ impl Quantifier {
             });
 
             // Sort alignments by cell barcodes
-            let alignments_cell_group = sort_alignments(tx_alignments, self.chunk_size)
-                .chunk_by(|x| x.barcode().unwrap().to_string());
-            let alignments_chunks = alignments_cell_group
+            let sorted_aln = sort_alignments(tx_alignments, self.chunk_size);
+            let aln_cell_group = sorted_aln.chunk_by(|x| x.barcode().unwrap().to_string());
+            let aln_chunks = aln_cell_group
                 .into_iter()
                 .map(|(barcode, group)| {
                     barcodes.push(barcode);
                     group.collect::<Vec<_>>()
                 })
-                .chunks(512);
+                .chunks(9012);
 
-            alignments_chunks.into_iter().for_each(|chunk| {
-                let ((t, s), (uns, cov)) = self.count_one_cell(&genome_index, chunk.collect());
+            aln_chunks.into_iter().for_each(|chunk| {
+                let ((t, s), (uns, cov)) = self.count_one_cell(&genome_index, chunk);
                 umi_cache.add(t).unwrap();
                 spliced_cache.add(s).unwrap();
                 unspliced_cache.add(uns).unwrap();
@@ -154,18 +154,24 @@ impl Quantifier {
     fn count_one_cell(
         &self,
         index: &GenomeBaseIndex,
-        alignments: Vec<Vec<TxAlignment>>,
+        alignments: impl Iterator<Item = Vec<TxAlignment>>,
     ) -> (
         (Vec<Vec<(usize, u32)>>, Vec<Vec<(usize, u32)>>),
         (Vec<Vec<(usize, u32)>>, Vec<Vec<(usize, i32)>>),
     ) {
         alignments
+            .chunks(32)
+            .into_iter()
+            .map(|x| x.collect::<Vec<_>>())
+            .collect::<Vec<_>>()
             .into_par_iter()
-            .map(|aln| {
-                let umi_group = aln.into_iter().correct_umi(&self.genes);
-                let coverage = index.count_fragments(umi_group.to_fragments());
-                let (spliced, unspliced) = umi_group.to_spliced_counts();
-                ((umi_group.to_counts(), spliced), (unspliced, coverage))
+            .flat_map_iter(|chunk| {
+                chunk.into_iter().map(|aln| {
+                    let umi_group = aln.into_iter().correct_umi(&self.genes);
+                    let coverage = index.count_fragments(umi_group.to_fragments());
+                    let (spliced, unspliced) = umi_group.to_spliced_counts();
+                    ((umi_group.to_counts(), spliced), (unspliced, coverage))
+                })
             })
             .unzip()
     }
@@ -184,7 +190,7 @@ where
     sorter
         .build()
         .unwrap()
-        .sort_by(alignments, |a, b| a.barcode().cmp(&b.barcode()))
+        .sort_by_async(alignments, |a, b| a.barcode().cmp(&b.barcode()))
         .unwrap()
         .map(|x| x.unwrap())
 }

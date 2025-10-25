@@ -1,9 +1,86 @@
 use std::ops::Range;
 
+use std::sync::mpsc::{sync_channel, Receiver};
+use std::thread::JoinHandle;
 use noodles::fastq;
 use regex::Regex;
 use anyhow::{Result, anyhow};
 use bstr::ByteSlice;
+
+/// PrefetchIterator allows for prefetching items from an iterator into a buffer.
+pub struct PrefetchIterator<T> {
+    rx: Receiver<T>,
+    // Keep the thread handle so we can join on Drop (nice for deterministic cleanup).
+    handle: Option<JoinHandle<()>>,
+}
+
+impl<T: Send + 'static> PrefetchIterator<T> {
+    pub fn new<I>(iter: I, buffer_size: usize) -> Self
+    where
+        I: IntoIterator<Item = T> + Send + 'static,
+    {
+        let (sender, receiver) = sync_channel(buffer_size);
+        let handle = std::thread::spawn(move || {
+            for item in iter {
+                if sender.send(item).is_err() {
+                    // If the receiver is dropped, we stop sending more items.
+                    break;
+                }
+            }
+        });
+        Self { rx: receiver, handle: Some(handle) }
+    }
+}
+
+impl<T: Send + 'static> Iterator for PrefetchIterator<T> {
+    type Item = T;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.rx.recv().ok()
+    }
+}
+
+impl<T> Drop for PrefetchIterator<T> {
+    fn drop(&mut self) {
+        // Dropping rx will cause the producer to exit; join the thread to avoid detach.
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
+pub struct PrefetchIterScoped<T> {
+    rx: Receiver<T>,
+}
+
+impl<T> Iterator for PrefetchIterScoped<T> {
+    type Item = T;
+    fn next(&mut self) -> Option<T> {
+        self.rx.recv().ok()
+    }
+}
+
+/// Run `f` with a prefetching iterator, without requiring `'static` on `I` or `T`.
+pub fn with_prefetch<'a, I, T, R, F>(iter: I, buffer: usize, f: F) -> R
+where
+    I: IntoIterator<Item = T> + Send + 'a,
+    T: Send + 'a,
+    F: FnOnce(PrefetchIterScoped<T>) -> R,
+{
+    std::thread::scope(|s| {
+        let (tx, rx) = sync_channel::<T>(buffer);
+        let _producer = s.spawn(move || {
+            for item in iter {
+                if tx.send(item).is_err() {
+                    break;
+                }
+            }
+        });
+        let it = PrefetchIterScoped { rx };
+        f(it) // consumes inside the scope; no `'static` needed
+    })
+}
+
 
 #[derive(Debug, Clone)]
 pub enum GroupIndex {
