@@ -182,7 +182,7 @@ pub fn align<'py>(
         if assay[0].chemistry_strandedness.is_some() {
             assay[0].chemistry_strandedness
         } else {
-            panic!("strandedness must be provided if not specified in the assay")
+            panic!("strandedness must be provided if not specified in the assay. Possible values are 'unstranded', 'forward', 'reverse' or 'auto'")
         }
     };
 
@@ -251,7 +251,7 @@ pub fn align<'py>(
             qc_metrics.insert("fragment".to_owned(), frag_qc.into());
         }
         OutputType::GeneQuantification => {
-            let quantifier = Quantifier::new(transcript_annotator.unwrap());
+            let quantifier = Quantifier::new(transcript_annotator.unwrap())?;
             let quant_qc = quantifier.quantify(&header, alignments, output.clone())?;
             qc_metrics.insert("gene_quantification".to_owned(), quant_qc.into());
         }

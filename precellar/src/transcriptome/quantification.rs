@@ -4,14 +4,13 @@ use anndata::{
 };
 use anndata_hdf5::H5;
 use anyhow::Result;
-use bed_utils::extsort::ExternalSorterBuilder;
+use bed_utils::extsort::{ExternalChunkBuilder, ExternalSorterBuilder};
 use indexmap::IndexMap;
 use itertools::Itertools;
 use nalgebra_sparse::CsrMatrix;
 use noodles::sam::Header;
 use polars::df;
 use rayon::iter::{IntoParallelIterator, ParallelIterator};
-use std::path::PathBuf;
 
 use super::TxAligner;
 use crate::{
@@ -21,27 +20,24 @@ use crate::{
     transcriptome::{CorrectUMI, TxAlignment},
 };
 
-#[derive(Debug)]
 pub struct Quantifier {
     annotator: TxAligner,
     genes: IndexMap<String, String>,
-    temp_dir: Option<PathBuf>,
     chunk_size: usize,
 }
 
 impl Quantifier {
-    pub fn new(annotator: TxAligner) -> Self {
+    pub fn new(annotator: TxAligner) -> Result<Self> {
         let genes = annotator
             .transcripts()
             .map(|t| (t.gene_id.clone(), t.gene_name.clone()))
             .sorted_by(|a, b| a.1.cmp(&b.1)) // sort by gene names
             .collect();
-        Self {
+        Ok(Self {
             annotator,
             genes,
-            temp_dir: None,
             chunk_size: 50000000,
-        }
+        })
     }
 
     pub fn quantify<'a, I, P>(
@@ -55,10 +51,16 @@ impl Quantifier {
         P: AsRef<std::path::Path>,
     {
         let mut qc = QcGeneQuant::default();
-        let mut num_unique_umi = 0;
-        let mut num_spliced = 0;
-        let mut num_unspliced = 0;
         let genome_index = GenomeBaseIndex::new(header);
+
+        let mut umi_cache: ExternalChunkBuilder<Vec<Vec<(usize, u32)>>> =
+            ExternalChunkBuilder::new(tempfile::tempfile()?, Some(3))?;
+        let mut spliced_cache: ExternalChunkBuilder<Vec<Vec<(usize, u32)>>> =
+            ExternalChunkBuilder::new(tempfile::tempfile()?, Some(3))?;
+        let mut unspliced_cache: ExternalChunkBuilder<Vec<Vec<(usize, u32)>>> =
+            ExternalChunkBuilder::new(tempfile::tempfile()?, Some(3))?;
+        let mut coverage_cache: ExternalChunkBuilder<Vec<Vec<(usize, i32)>>> =
+            ExternalChunkBuilder::new(tempfile::tempfile()?, Some(3))?;
 
         let adata: AnnData<H5> = AnnData::new(output)?;
         let num_cols = self.genes.len();
@@ -66,6 +68,7 @@ impl Quantifier {
         let mut barcodes = Vec::new();
 
         {
+            // Align reads to transcripts
             let tx_alignments = self.annotator.align(records).flat_map(|aln| {
                 qc.update(aln.as_ref());
                 if aln
@@ -79,9 +82,9 @@ impl Quantifier {
                 }
             });
 
-            let alignments_cell_group =
-                sort_alignments(tx_alignments, self.temp_dir.as_ref(), self.chunk_size)
-                    .chunk_by(|x| x.barcode().unwrap().to_string());
+            // Sort alignments by cell barcodes
+            let alignments_cell_group = sort_alignments(tx_alignments, self.chunk_size)
+                .chunk_by(|x| x.barcode().unwrap().to_string());
             let alignments_chunks = alignments_cell_group
                 .into_iter()
                 .map(|(barcode, group)| {
@@ -89,43 +92,55 @@ impl Quantifier {
                     group.collect::<Vec<_>>()
                 })
                 .chunks(512);
-            let (total, spliced, unspliced, coverage): (Vec<_>, Vec<_>, Vec<_>, Vec<_>) =
-                alignments_chunks
-                    .into_iter()
-                    .flat_map(|chunk| {
-                        let results: Vec<_> = chunk
-                            .collect::<Vec<_>>()
-                            .into_par_iter()
-                            .map(|aln| self.count_one_cell(&genome_index, aln))
-                            .collect();
-                        results
-                    })
-                    .multiunzip();
 
-            num_unique_umi += total
-                .iter()
-                .flat_map(|x| x.iter().map(|(_, c)| *c as u64))
-                .sum::<u64>();
-            num_spliced += spliced
-                .iter()
-                .flat_map(|x| x.iter().map(|(_, c)| *c as u64))
-                .sum::<u64>();
-            num_unspliced += unspliced
-                .iter()
-                .flat_map(|x| x.iter().map(|(_, c)| *c as u64))
-                .sum::<u64>();
-            let coverage = make_csr(coverage, genome_index.len());
-            adata.set_x(make_csr(total, num_cols))?;
-            adata.layers().add("spliced", make_csr(spliced, num_cols))?;
-            adata
-                .layers()
-                .add("unspliced", make_csr(unspliced, num_cols))?;
-            adata.obsm().add("fragment_single", coverage)?;
-            adata
-                .uns()
-                .add("reference_sequences", genome_index.get_chrom_sizes())?;
+            alignments_chunks.into_iter().for_each(|chunk| {
+                let ((t, s), (uns, cov)) = self.count_one_cell(&genome_index, chunk.collect());
+                umi_cache.add(t).unwrap();
+                spliced_cache.add(s).unwrap();
+                unspliced_cache.add(uns).unwrap();
+                coverage_cache.add(cov).unwrap();
+            });
         }
 
+        let umi_count = umi_cache.finish()?.map(|x| {
+            let x = x.unwrap();
+            qc.num_unique_umi += x
+                .iter()
+                .flat_map(|x| x.iter().map(|(_, c)| *c as u64))
+                .sum::<u64>();
+            make_csr(x, num_cols)
+        });
+        adata.set_x_from_iter(umi_count)?;
+
+        let spliced_count = spliced_cache.finish()?.map(|x| {
+            let x = x.unwrap();
+            qc.num_spliced += x
+                .iter()
+                .flat_map(|x| x.iter().map(|(_, c)| *c as u64))
+                .sum::<u64>();
+            make_csr(x, num_cols)
+        });
+        adata.layers().add_iter("spliced", spliced_count)?;
+
+        let unspliced_count = unspliced_cache.finish()?.map(|x| {
+            let x = x.unwrap();
+            qc.num_unspliced += x
+                .iter()
+                .flat_map(|x| x.iter().map(|(_, c)| *c as u64))
+                .sum::<u64>();
+            make_csr(x, num_cols)
+        });
+        adata.layers().add_iter("unspliced", unspliced_count)?;
+
+        let coverage = coverage_cache.finish()?.map(|x| {
+            let x = x.unwrap();
+            make_csr(x, genome_index.len())
+        });
+        adata.obsm().add_iter("fragment_single", coverage)?;
+
+        adata
+            .uns()
+            .add("reference_sequences", genome_index.get_chrom_sizes())?;
         adata.set_obs_names(barcodes.into())?;
         adata.set_var_names(self.genes.keys().map(|g| g.clone()).collect())?;
         adata.set_var(df!(
@@ -133,45 +148,39 @@ impl Quantifier {
         )?)?;
 
         adata.close()?;
-        qc.num_unique_umi = num_unique_umi;
-        qc.num_spliced = num_spliced;
-        qc.num_unspliced = num_unspliced;
         Ok(qc)
     }
 
     fn count_one_cell(
         &self,
         index: &GenomeBaseIndex,
-        alignments: impl IntoIterator<Item = TxAlignment>,
+        alignments: Vec<Vec<TxAlignment>>,
     ) -> (
-        Vec<(usize, u32)>,
-        Vec<(usize, u32)>,
-        Vec<(usize, u32)>,
-        Vec<(usize, i32)>,
+        (Vec<Vec<(usize, u32)>>, Vec<Vec<(usize, u32)>>),
+        (Vec<Vec<(usize, u32)>>, Vec<Vec<(usize, i32)>>),
     ) {
-        let umi_group = alignments.into_iter().correct_umi(&self.genes);
-
-        let coverage = index.count_fragments(umi_group.to_fragments());
-        let (spliced, unspliced) = umi_group.to_spliced_counts();
-        (umi_group.to_counts(), spliced, unspliced, coverage)
+        alignments
+            .into_par_iter()
+            .map(|aln| {
+                let umi_group = aln.into_iter().correct_umi(&self.genes);
+                let coverage = index.count_fragments(umi_group.to_fragments());
+                let (spliced, unspliced) = umi_group.to_spliced_counts();
+                ((umi_group.to_counts(), spliced), (unspliced, coverage))
+            })
+            .unzip()
     }
 }
 
-fn sort_alignments<I, P>(
+fn sort_alignments<I>(
     alignments: I,
-    temp_dir: Option<P>,
     chunk_size: usize,
 ) -> impl ExactSizeIterator<Item = TxAlignment>
 where
     I: Iterator<Item = TxAlignment>,
-    P: AsRef<std::path::Path>,
 {
-    let mut sorter = ExternalSorterBuilder::new()
+    let sorter = ExternalSorterBuilder::new()
         .with_chunk_size(chunk_size)
         .with_compression(2);
-    if let Some(tmp) = temp_dir {
-        sorter = sorter.with_tmp_dir(tmp);
-    }
     sorter
         .build()
         .unwrap()

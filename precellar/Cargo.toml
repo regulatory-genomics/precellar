@@ -1,13 +1,13 @@
 [package]
 name = "precellar"
-version = "0.5.1"
+version = "0.5.2"
 edition = "2021"
 
 [dependencies]
 anyhow = "1.0"
 anndata = { git = "https://github.com/kaizhang/anndata-rs.git", rev = "abe4c2cf7ec7af1cc03a9e337b2af8bdf602ef5b"}
 anndata-hdf5 = { git = "https://github.com/kaizhang/anndata-rs.git", rev = "abe4c2cf7ec7af1cc03a9e337b2af8bdf602ef5b"}
-bed-utils = "0.9.3"
+bed-utils = "0.9.5"
 bwa-mem2 = { git = "https://github.com/regulatory-genomics/bwa-mem2-rust.git", rev = "e3b64904adcb379b3814f6408796fd371d56e5cf" }
 star-aligner = { git = "https://github.com/regulatory-genomics/star-aligner", rev = "ff62b1d7d6ccbade4396398960ffcb1eb3d629e7" }
 smallvec = "1.15"
@@ -27,6 +27,7 @@ regex = "1.11"
 env_logger = "0.11"
 rand = "0.9.0"
 indicatif = "0.18"
+tempfile = "3"
 
 [dev-dependencies]
 flate2 = "1.1"
