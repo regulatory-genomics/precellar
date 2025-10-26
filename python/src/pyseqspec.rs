@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{bail, Result};
 use glob::glob;
 use pyo3::prelude::*;
 use seqspec::{Modality, Read, Region, SequenceKit, SequenceProtocol};
@@ -19,9 +19,7 @@ pub(crate) fn extract_assays<'py>(assays: Bound<'py, PyAny>) -> PyResult<Vec<seq
     }
     if assays.is_instance_of::<pyo3::types::PyList>() {
         let assays: Vec<Bound<'py, PyAny>> = assays.extract()?;
-        assays.into_iter()
-            .map(extract)
-            .collect()
+        assays.into_iter().map(extract).collect()
     } else {
         let assay = extract(assays)?;
         Ok(vec![assay])
@@ -110,6 +108,31 @@ impl Assay {
     #[setter]
     fn set_doi(&mut self, doi: &str) {
         self.0.doi = doi.to_string();
+    }
+
+    /// The chemistry strandedness of the Assay object.
+    #[getter]
+    fn get_chemistry_strandedness(&self) -> Option<String> {
+        let strandedness = match &self.0.chemistry_strandedness? {
+            seqspec::ChemistryStrandedness::Forward => "forward".to_string(),
+            seqspec::ChemistryStrandedness::Reverse => "reverse".to_string(),
+            seqspec::ChemistryStrandedness::Unstranded => "unstranded".to_string(),
+        };
+        Some(strandedness)
+    }
+
+    #[setter]
+    fn set_chemistry_strandedness(&mut self, chemistry_strandedness: &str) -> Result<()> {
+        let strandedness = match chemistry_strandedness {
+            "forward" => seqspec::ChemistryStrandedness::Forward,
+            "reverse" => seqspec::ChemistryStrandedness::Reverse,
+            "unstranded" => seqspec::ChemistryStrandedness::Unstranded,
+            _ => bail!("Invalid chemistry_strandedness: {}. Must be one of 'forward', 'reverse', or 'unstranded'.",
+                    chemistry_strandedness
+                ),
+        };
+        self.0.chemistry_strandedness = Some(strandedness);
+        Ok(())
     }
 
     /// The sequence protocol of the Assay object.

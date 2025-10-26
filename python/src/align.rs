@@ -95,6 +95,9 @@ pub fn make_bwa_index(fasta: PathBuf, genome_prefix: PathBuf) -> Result<()> {
 ///     If True, the SNVs will be computed and added to the fragment file.
 /// strandedness: Literal['forward', 'reverse', 'unstranded', 'auto'] | None
 ///     The strand specificity of the assay. Can be "forward", "reverse", "unstranded", "auto".
+///     "forward" means that the read 1 is expected to be aligned to the same strand as the original RNA molecule.
+///     For example, in 10x Genomics 3' scRNA-seq, the read 1 is aligned to the reverse strand of the original RNA molecule,
+///     so the strandedness should be set to "reverse".
 ///     If "auto", the strand specificity will be inferred from the data. Note that automatic
 ///     inference may not always be accurate, especially for in the samples where the
 ///     antisense transcription is prevalent, e.g., brain samples.
