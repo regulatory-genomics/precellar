@@ -102,14 +102,8 @@ impl FastqProcessor {
             .intersperse(" + ".to_string())
             .collect();
         info!("Aligning {} reads to reference genome ...", n_reads);
-        let result = AlignmentResult::new(
-            aligner,
-            fq_reader,
-            &self.mito_dna,
-            num_threads,
-        );
-        self.qc_align
-            .insert(self.modality(), result.qc.clone());
+        let result = AlignmentResult::new(aligner, fq_reader, &self.mito_dna, num_threads);
+        self.qc_align.insert(self.modality(), result.qc.clone());
         result
     }
 
@@ -169,10 +163,9 @@ impl FastqProcessor {
                         let reader = read.open()?;
                         Some((annotator, reader))
                     });
-            let mut fq_reader = AnnotatedFastqReader::new(readers, self.get_fastq_qc().clone());
-
+            let mut fq_reader = AnnotatedFastqReader::new(readers, self.get_fastq_qc().clone(), chunk_size);
             fq_reader.total_reads = Some(num_reads);
-            fq_reader.with_chunk_size(chunk_size)
+            fq_reader
         }).collect();
         MultiAnnotatedFqReader::new(result)
     }
@@ -190,7 +183,12 @@ pub struct AlignmentResult<'a, A> {
 }
 
 impl<'a, A: Aligner> AlignmentResult<'a, A> {
-    fn new(aligner: &'a mut A, fastq_reader: MultiAnnotatedFqReader, mito_dna: &HashSet<String>, num_threads: u16) -> Self {
+    fn new(
+        aligner: &'a mut A,
+        fastq_reader: MultiAnnotatedFqReader,
+        mito_dna: &HashSet<String>,
+        num_threads: u16,
+    ) -> Self {
         let header = aligner.header();
         let num_records = fastq_reader.num_records();
 
@@ -201,10 +199,10 @@ impl<'a, A: Aligner> AlignmentResult<'a, A> {
                 .get_index_of(&BString::from(mito.as_str()))
                 .map(|x| qc.mito_dna.insert(x));
         });
- 
+
         Self {
             aligner,
-            fastq_reader: PrefetchIterator::new(fastq_reader, 2),
+            fastq_reader: PrefetchIterator::new(fastq_reader, 1),
             qc: Arc::new(Mutex::new(qc)),
             header,
             num_threads,
@@ -231,6 +229,7 @@ impl<'a, A: Aligner> Iterator for AlignmentResult<'a, A> {
     type Item = Vec<(Option<MultiMapR>, Option<MultiMapR>)>;
     fn next(&mut self) -> Option<Self::Item> {
         let data = self.fastq_reader.next()?;
+        self.num_processed += data.len();
 
         // Align the reads.
         let results: Vec<_> = self.aligner.align_reads(self.num_threads, data);
@@ -249,7 +248,6 @@ impl<'a, A: Aligner> Iterator for AlignmentResult<'a, A> {
                 debug!("No alignment found for read");
             }
         });
-        self.num_processed += results.len();
         Some(results)
     }
 }
@@ -283,10 +281,7 @@ impl MultiAnnotatedFqReader {
     }
 
     pub fn num_records(&self) -> usize {
-        self.readers
-            .iter()
-            .map(|x| x.total_reads.unwrap())
-            .sum()
+        self.readers.iter().map(|x| x.total_reads.unwrap()).sum()
     }
 
     pub fn is_paired_end(&self) -> Result<bool> {
@@ -299,13 +294,10 @@ impl MultiAnnotatedFqReader {
 }
 
 struct AnnotatedFastqReader {
-    buffer: fastq::Record,
     total_reads: Option<usize>,
     trim_poly_a: bool,
     annotators: Vec<FastqAnnotator>,
-    readers: Vec<FastqReader>,
-    chunk_size: usize,
-    chunk: Vec<SmallVec<[fastq::Record; 4]>>,
+    readers: PrefetchIterator<Vec<SmallVec<[fastq::Record; 4]>>>,
     qc: Arc<Mutex<QcFastq>>,
 }
 
@@ -313,24 +305,22 @@ impl AnnotatedFastqReader {
     fn new<T: IntoIterator<Item = (FastqAnnotator, FastqReader)>>(
         iter: T,
         qc: Arc<Mutex<QcFastq>>,
+        chunk_size: usize,
     ) -> Self {
         let (annotators, readers): (Vec<_>, Vec<_>) = iter.into_iter().unzip();
-        let chunk = Vec::new();
         Self {
-            buffer: fastq::Record::default(),
             total_reads: None,
             annotators,
-            readers,
+            readers: PrefetchIterator::new(
+                BatchedFqReader {
+                    readers,
+                    batch_size: chunk_size,
+                },
+                1,
+            ),
             trim_poly_a: false,
-            chunk_size: 10000000,
-            chunk,
             qc,
         }
-    }
-
-    pub fn with_chunk_size(mut self, chunk_size: usize) -> Self {
-        self.chunk_size = chunk_size;
-        self
     }
 
     pub fn with_polya_trimmed(mut self) -> Self {
@@ -354,69 +344,24 @@ impl AnnotatedFastqReader {
         });
         has_read1 && has_read2
     }
-
-    /// Read a chunk of records from the fastq files.
-    fn read_chunk(&mut self) -> usize {
-        self.chunk.clear();
-
-        let mut accumulated_length = 0;
-
-        while accumulated_length < self.chunk_size {
-            let mut max_read = 0;
-            let mut min_read = usize::MAX;
-            let records: SmallVec<[_; 4]> = self
-                .readers
-                .iter_mut()
-                .flat_map(|reader| {
-                    let n = reader
-                        .read_record(&mut self.buffer)
-                        .expect("error reading fastq record");
-                    min_read = min_read.min(n);
-                    max_read = max_read.max(n);
-                    if n > 0 {
-                        accumulated_length += self.buffer.sequence().len();
-                        Some(self.buffer.clone())
-                    } else {
-                        None
-                    }
-                })
-                .collect();
-            if max_read == 0 {
-                break;
-            } else if min_read == 0 {
-                panic!("Unequal number of reads in the chunk");
-            } else {
-                assert!(
-                    records.iter().map(|r| get_read_name(r)).all_equal(),
-                    "read names mismatch"
-                );
-                self.chunk.push(records);
-            }
-        }
-
-        self.chunk.len()
-    }
 }
 
 impl Iterator for AnnotatedFastqReader {
     type Item = Vec<AnnotatedFastq>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        let n = self.read_chunk();
-        if n == 0 {
-            None
-        } else {
-            let n = (n / 256).max(1024);
-            let annotators = &self.annotators;
-            let (result, qc): (Vec<_>, Vec<_>) = self
-                .chunk
-                .par_chunks(n)
-                .map(|chunk| process_chunk(&annotators, chunk))
-                .unzip();
-
-            self.qc.lock().unwrap().extend(qc);
-            Some(result.into_iter().flatten().collect())
-        }
+        let chunk = self.readers.next()?;
+        let n = chunk.len();
+        let annotators = &self.annotators;
+        let result: Vec<_> = chunk
+            .par_chunks(n / 128)
+            .flat_map_iter(|chunk| {
+                let (fq, qc) = process_chunk(&annotators, chunk);
+                self.qc.lock().unwrap().extend(std::iter::once(qc));
+                fq
+            })
+            .collect();
+        Some(result)
     }
 }
 
@@ -455,6 +400,56 @@ fn process_chunk<'a, I: IntoIterator<Item = &'a SmallVec<[fastq::Record; 4]>>>(
         })
         .collect();
     (annotated, qc)
+}
+
+/// A batched FASTQ reader that reads multiple FASTQ files in batches.
+struct BatchedFqReader {
+    readers: Vec<FastqReader>,
+    batch_size: usize,
+}
+
+impl Iterator for BatchedFqReader {
+    type Item = Vec<SmallVec<[fastq::Record; 4]>>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let mut batch = Vec::new();
+        let mut accumulated_length = 0;
+        while accumulated_length < self.batch_size {
+            let mut max_read = 0;
+            let mut min_read = usize::MAX;
+            let records: SmallVec<[_; 4]> = self
+                .readers
+                .iter_mut()
+                .flat_map(|reader| {
+                    let mut buffer = fastq::Record::default();
+                    let n = reader
+                        .read_record(&mut buffer)
+                        .expect("error reading fastq record");
+                    min_read = min_read.min(n);
+                    max_read = max_read.max(n);
+                    if n > 0 {
+                        accumulated_length += buffer.sequence().len();
+                        Some(buffer)
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            if max_read == 0 {
+                return None;
+            } else if min_read == 0 {
+                panic!("Unequal number of reads in the chunk");
+            } else {
+                assert!(
+                    records.iter().map(|r| get_read_name(r)).all_equal(),
+                    "read names mismatch"
+                );
+                batch.push(records);
+            }
+        }
+
+        Some(batch)
+    }
 }
 
 /// A FastqAnnotator that splits the reads into subregions, e.g., barcode, UMI, and

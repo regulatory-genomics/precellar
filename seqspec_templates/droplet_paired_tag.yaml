@@ -10,6 +10,7 @@ modalities:
 lib_struct: https://teichlab.github.io/scg_lib_structs/methods_html/10xChromium_multiome.html
 library_protocol: Custom
 library_kit: Illumina Truseq Dual Index
+chemistry_strandedness: reverse
 sequence_protocol: Illumina Nextseq 2000
 sequence_kit: NovaSeq 6000 v1.5
 sequence_spec: []
