@@ -1,0 +1,6 @@
+precellar.Assay.delete\_region
+==============================
+
+.. currentmodule:: precellar
+
+.. automethod:: Assay.delete_region

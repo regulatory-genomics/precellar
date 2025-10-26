@@ -1,0 +1,6 @@
+﻿precellar.utils.merge\_fastq\_files
+===================================
+
+.. currentmodule:: precellar.utils
+
+.. autofunction:: merge_fastq_files
