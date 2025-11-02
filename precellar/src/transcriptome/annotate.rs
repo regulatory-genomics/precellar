@@ -6,17 +6,108 @@ use itertools::Itertools;
 
 use crate::{fragment::Fragment, transcriptome::TxAlignment};
 
-pub struct UMIGroup(Vec<(usize, Vec<Vec<TxAlignment>>)>);
+type GeneIndex = usize;
 
-impl UMIGroup {
-    pub fn to_counts(&self) -> Vec<(usize, u32)> {
+pub enum Annotation {
+    Spliced,
+    Unspliced,
+    Ambiguous,
+}
+
+/// A group of transcript alignments corresponding to a single UMI.
+struct AlignmentGroup(Vec<TxAlignment>);
+
+impl AlignmentGroup {
+    /// Annotate spliced and unspliced alignments with transcript information.
+    ///
+    /// 1. A molecule was annotated as spliced if all of the reads in the set supporting a
+    ///    given molecule are exonic-only (Caveat: a read contained entirely within an exon
+    ///    is likely coming from unspliced transcripts technically)
+    /// 2. A molecule was annotated as unspliced if at least one read is spanning.
+    /// 3. A molecule was annotated as unspliced if ALL of the compatible transcript models
+    ///    had at least one read that maps to introns or exon-intron boundary.
+    /// 4. Other molecules are annotated as ambiguous.
+    fn to_annotation(&self) -> Annotation {
+        let mut exonic = true;
+        for aln in self.0.iter() {
+            if aln.is_spanning() {
+                return Annotation::Unspliced;
+            }
+
+            if !aln.is_exonic_only() {
+                exonic = false;
+            }
+        }
+
+        if exonic {
+            Annotation::Spliced
+        } else {
+            let transcript_groups = self
+                .0
+                .iter()
+                .flat_map(|x| x.alignments())
+                .sorted_by(|a, b| a.transcript_id.cmp(&b.transcript_id))
+                .chunk_by(|x| x.transcript_id.clone());
+            if transcript_groups.into_iter().all(|(_, group)| {
+                group
+                    .into_iter()
+                    .any(|x| x.is_intronic() || x.is_spanning())
+            }) {
+                Annotation::Unspliced
+            } else {
+                Annotation::Ambiguous
+            }
+        }
+    }
+
+    fn to_fragments(&self) -> Vec<Fragment> {
+        self.0
+            .iter()
+            .flat_map(|x| x.to_fragments())
+            .sorted_by(|a, b| {
+                a.strand
+                    .cmp(&b.strand)
+                    .then(a.chrom.cmp(&b.chrom))
+                    .then(a.start.cmp(&b.start))
+                    .then(a.end.cmp(&b.end))
+            })
+            .chunk_by(|x| x.strand)
+            .into_iter()
+            .flat_map(|(strand, group)| {
+                group.merge_sorted_bed().map(move |x| Fragment {
+                    chrom: x.chrom().to_string(),
+                    start: x.start(),
+                    end: x.end(),
+                    strand,
+                    barcode: None,
+                    count: 1,
+                    extended: None,
+                })
+            })
+            .collect()
+    }
+}
+
+impl From<Vec<TxAlignment>> for AlignmentGroup {
+    fn from(value: Vec<TxAlignment>) -> Self {
+        AlignmentGroup(value)
+    }
+}
+
+/// A list of TxAlignments grouped by gene index and UMI. Each entry contains the gene index
+/// and a list of lists of TxAlignments, where each inner list corresponds to a unique
+/// UMI within that gene.
+pub struct GeneCounter(Vec<(GeneIndex, Vec<AlignmentGroup>)>);
+
+impl GeneCounter {
+    pub fn to_counts(&self) -> Vec<(GeneIndex, u32)> {
         self.0
             .iter()
             .map(|(gene_idx, umi_group)| (*gene_idx, umi_group.len() as u32))
             .collect()
     }
 
-    pub fn to_spliced_counts(&self) -> (Vec<(usize, u32)>, Vec<(usize, u32)>) {
+    pub fn to_spliced_counts(&self) -> (Vec<(GeneIndex, u32)>, Vec<(GeneIndex, u32)>) {
         let mut spliced_counts = Vec::new();
         let mut unspliced_counts = Vec::new();
         self.0.iter().for_each(|(gene_idx, umi_group)| {
@@ -24,9 +115,13 @@ impl UMIGroup {
             let mut unspliced: u32 = 0;
             umi_group
                 .iter()
-                .for_each(|reads| match annotate_umi(reads) {
-                    Annotation::Spliced => { spliced = spliced.checked_add(1).unwrap(); },
-                    Annotation::Unspliced => { unspliced = unspliced.checked_add(1).unwrap(); },
+                .for_each(|reads| match reads.to_annotation() {
+                    Annotation::Spliced => {
+                        spliced = spliced.checked_add(1).unwrap();
+                    }
+                    Annotation::Unspliced => {
+                        unspliced = unspliced.checked_add(1).unwrap();
+                    }
                     Annotation::Ambiguous => {}
                 });
             if spliced > 0 {
@@ -42,16 +137,17 @@ impl UMIGroup {
     pub fn to_fragments(&self) -> impl Iterator<Item = Fragment> + '_ {
         self.0
             .iter()
-            .flat_map(|(_, umi_group)| umi_group.iter().flat_map(|reads| aggregate_reads(reads)))
+            .flat_map(|(_, umi_group)| umi_group.iter().flat_map(|reads| reads.to_fragments()))
     }
 }
 
 pub trait CorrectUMI {
-    fn correct_umi(self, genes: &IndexMap<String, String>) -> UMIGroup;
+    fn correct_umi(self, genes: &IndexMap<String, String>) -> GeneCounter;
 }
 
 impl<I: Iterator<Item = TxAlignment>> CorrectUMI for I {
-    fn correct_umi(self, genes: &IndexMap<String, String>) -> UMIGroup {
+    fn correct_umi(self, genes: &IndexMap<String, String>) -> GeneCounter {
+        // Group the Tx alignments by gene
         let mut gene_group = BTreeMap::new();
         self.for_each(|x| {
             let idx = genes.get_full(x.uniquely_mapped_gene().unwrap()).unwrap().0;
@@ -61,101 +157,42 @@ impl<I: Iterator<Item = TxAlignment>> CorrectUMI for I {
         let umi_group = gene_group
             .into_iter()
             .map(|(idx, group)| {
-                let mut umi_count = HashMap::new();
+                // Within each gene, compute UMI counts
+                let mut aln_with_umi = HashMap::new();
                 group.iter().for_each(|aln| {
-                    let umi = aln.umi().unwrap();
-                    *umi_count.entry(umi.as_bytes().to_vec()).or_insert(0) += 1;
+                    if let Some(umi) = aln.umi() {
+                        *aln_with_umi.entry(umi.as_bytes().to_vec()).or_insert(0) += 1;
+                    }
                 });
-                let umi_corrections = get_umi_mapping(&umi_count);
+
+                let umi_mapping = get_umi_mapping(&aln_with_umi);
+                let mut aln_without_umi = Vec::new();
+
                 let mut umi_group = HashMap::new();
                 group.into_iter().for_each(|aln| {
-                    let umi = aln.umi().unwrap().as_bytes();
-                    let corrected_umi = umi_corrections.get(umi).map_or(umi.to_vec(), |x| x.clone());
-                    umi_group
-                        .entry(corrected_umi)
-                        .or_insert_with(Vec::new)
-                        .push(aln);
+                    if let Some(umi) = aln.umi() {
+                        let umi = umi.as_bytes();
+                        let corrected_umi =
+                            umi_mapping.get(umi).map_or(umi.to_vec(), |x| x.clone());
+                        umi_group
+                            .entry(corrected_umi)
+                            .or_insert_with(Vec::new)
+                            .push(aln);
+                    } else {
+                        aln_without_umi.push(vec![aln]);
+                    }
                 });
-                (idx, umi_group.into_iter().map(|x| x.1).collect())
+
+                let result = aln_without_umi
+                    .into_iter()
+                    .chain(umi_group.into_iter().map(|x| x.1))
+                    .map(|x| x.into())
+                    .collect();
+                (idx, result)
             })
             .collect();
-        UMIGroup(umi_group)
+        GeneCounter(umi_group)
     }
-}
-
-pub enum Annotation {
-    Spliced,
-    Unspliced,
-    Ambiguous,
-}
-
-/// Annotate spliced and unspliced alignments with transcript information.
-///
-/// 1. A molecule was annotated as spliced if all of the reads in the set supporting a
-///    given molecule are exonic-only (Caveat: a read contained entirely within an exon
-///    is likely coming from unspliced transcripts technically)
-/// 2. A molecule was annotated as unspliced if at least one read is spanning.
-/// 3. A molecule was annotated as unspliced if ALL of the compatible transcript models
-///    had at least one read that maps to introns or exon-intron boundary.
-/// 4. Other molecules are annotated as ambiguous.
-fn annotate_umi(reads: &[TxAlignment]) -> Annotation {
-    let mut exonic = true;
-    for aln in reads {
-        if aln.is_spanning() {
-            return Annotation::Unspliced;
-        }
-
-        if !aln.is_exonic_only() {
-            exonic = false;
-        }
-    }
-
-    if exonic {
-        Annotation::Spliced
-    } else {
-        let transcript_groups = reads
-            .iter()
-            .flat_map(|x| x.alignments())
-            .sorted_by(|a, b| a.transcript_id.cmp(&b.transcript_id))
-            .chunk_by(|x| x.transcript_id.clone());
-        if transcript_groups.into_iter().all(|(_, group)| {
-            group
-                .into_iter()
-                .any(|x| x.is_intronic() || x.is_spanning())
-        }) {
-            Annotation::Unspliced
-        } else {
-            Annotation::Ambiguous
-        }
-    }
-}
-
-fn aggregate_reads(reads: &[TxAlignment]) -> Vec<Fragment> {
-    reads
-        .iter()
-        .flat_map(|x| x.to_fragments())
-        .sorted_by(|a, b| {
-            a.strand
-                .cmp(&b.strand)
-                .then(a.chrom.cmp(&b.chrom))
-                .then(a.start.cmp(&b.start))
-                .then(a.end.cmp(&b.end))
-        })
-        .chunk_by(|x| x.strand)
-        .into_iter()
-        .flat_map(|(strand, group)|
-            group
-                .merge_sorted_bed()
-            .map(move |x| Fragment {
-                chrom: x.chrom().to_string(),
-                start: x.start(),
-                end: x.end(),
-                strand,
-                barcode: None,
-                count: 1,
-                extended: None,
-            })
-        ).collect()
 }
 
 /// Returns a map from each UMI to its corrected UMI by correcting Hamming-distance-one UMIs.

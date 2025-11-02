@@ -46,15 +46,13 @@ pub(crate) fn barcode_counting(assay: &Assay, modality: Modality) -> (IndexMap<R
                     if let Ok(segments) = segment_info.split(&fq.unwrap()) {
                         segments.iter().for_each(|segment| {
                             if segment.is_barcode() {
-                                let wl =
-                                    whitelists.get_mut(segment.region_id()).expect(&format!(
-                                        "whitelist not found for region {}",
-                                        segment.region_id()
-                                    ));
-                                if is_reverse {
-                                    wl.count_barcode(&rev_compl(segment.seq));
-                                } else {
-                                    wl.count_barcode(segment.seq);
+                                // A barcoded region may not need a whitelist unless it is of SequenceType::Onlist
+                                if let Some(wl) = whitelists.get_mut(segment.region_id()) {
+                                    if is_reverse {
+                                        wl.count_barcode(&rev_compl(segment.seq));
+                                    } else {
+                                        wl.count_barcode(segment.seq);
+                                    }
                                 }
                             }
                         })

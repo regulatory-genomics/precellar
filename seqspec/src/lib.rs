@@ -13,7 +13,6 @@ pub use region::{Onlist, Region, RegionId, RegionType, SequenceType};
 use anyhow::{anyhow, bail, Context, Result};
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_yaml::{self, Value};
-use utils::rev_compl;
 use std::collections::HashMap;
 use std::path::Path;
 use std::{
@@ -22,6 +21,7 @@ use std::{
     str::FromStr,
     sync::{Arc, RwLock},
 };
+use utils::rev_compl;
 
 #[derive(Deserialize, Serialize, Debug, Copy, Clone, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
@@ -30,7 +30,6 @@ pub enum ChemistryStrandedness {
     Reverse,
     Unstranded,
 }
-
 
 /// Assay struct contains the information parsed from the sequence spec YAML file
 #[derive(Deserialize, Serialize, Debug, Clone, PartialEq)]
@@ -440,7 +439,7 @@ impl Assay {
         Some(segments)
     }
 
-    /// Return a map of whitelists for each barcode region in the assay.
+    /// Return the barcode-whitelist map for a given modality.
     pub fn get_whitelists(&self, modality: Modality) -> IndexMap<RegionId, IndexSet<Vec<u8>>> {
         let regions = self
             .library_spec
@@ -451,19 +450,24 @@ impl Assay {
         regions
             .subregions
             .iter()
-            .filter_map(|r| {
-                let r = r.read().unwrap();
+            .filter_map(|region| {
+                let r = region.read().unwrap();
                 if r.region_type.is_barcode() {
-                    let id = r.region_id.to_string();
-                    let list = if let Some(onlist) = r.onlist.as_ref() {
-                        onlist.read().unwrap()
-                    } else {
-                        if r.sequence_type == SequenceType::Onlist {
-                            warn!("Barcode region '{}' does not have a whitelist", id);
+                    if r.sequence_type == SequenceType::Onlist {
+                        let id = r.region_id.to_string();
+                        if let Some(onlist) = r.onlist.as_ref() {
+                            Some((id, onlist.read().unwrap()))
+                        } else {
+                            info!("Barcode region '{}' does not have a whitelist", id);
+                            Some((id, IndexSet::new()))
                         }
-                        IndexSet::new()
-                    };
-                    Some((id, list))
+                    } else {
+                        warn!(
+                            "Region '{}' contains barcodes but is not an onlist type. Barcode correction will not be performed.",
+                            r.region_id
+                        );
+                        None
+                    }
                 } else {
                     None
                 }

@@ -11,7 +11,7 @@ mod annotate;
 
 pub use quantification::Quantifier;
 pub use align::{TxAlignResult, TxAligner, TxAlignment};
-pub use annotate::{UMIGroup, CorrectUMI};
+pub use annotate::{GeneCounter, CorrectUMI};
 
 use anyhow::{bail, ensure, Result};
 use bed_utils::bed::Strand;

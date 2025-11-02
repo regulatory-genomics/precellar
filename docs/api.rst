@@ -43,4 +43,4 @@ Utilities
 
     utils.strip_barcode_from_fastq
     utils.bam_to_fastq
-    utils.merge_fastq_files
+    utils.multiplex_fastq

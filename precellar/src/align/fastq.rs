@@ -436,7 +436,12 @@ impl Iterator for BatchedFqReader {
                 })
                 .collect();
             if max_read == 0 {
-                return None;
+                // All readers have reached EOF.
+                if batch.is_empty() {
+                    return None;
+                } else {
+                    break;
+                }
             } else if min_read == 0 {
                 panic!("Unequal number of reads in the chunk");
             } else {
@@ -520,7 +525,6 @@ impl FastqAnnotator {
                             }
                         },
                     );
-
                     if let Some(bc) = &mut barcode {
                         bc.extend(&Barcode { raw: fq, corrected });
                     } else {
