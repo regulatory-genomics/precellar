@@ -1,72 +1,191 @@
+use crate::utils::rev_compl;
 use anyhow::{bail, Result};
 use indexmap::IndexMap;
 use indicatif::{ProgressBar, ProgressDrawTarget, ProgressIterator, ProgressStyle};
 use itertools::Itertools;
-use log::info;
+use log::{info, warn};
 use noodles::sam::alignment::{
     record::data::field::{Tag, Value},
     Record,
 };
 use rand::distr::{slice::Choose, Distribution};
-use seqspec::{Assay, Modality, RegionId};
+use seqspec::{Assay, Modality, RegionId, SequenceType};
 use std::{
     collections::HashMap,
     ops::{Deref, DerefMut},
 };
-use crate::utils::{rev_compl};
 
 const BC_MAX_QV: u8 = 66; // This is the illumina quality value
 pub(crate) const BASE_OPTS: [u8; 4] = [b'A', b'C', b'G', b'T'];
 
+/// Options for barcode correction
+pub struct BarcodeCorrectOptions {
+    /// threshold for sum of probability of error on barcode QVs. Barcodes exceeding
+    /// this threshold will be marked as not valid.
+    pub max_expected_errors: f64,
+    /// if the posterior probability of a correction
+    /// exceeds this threshold, the barcode will be corrected.
+    pub bc_confidence_threshold: f64,
+    /// The number of mismatches allowed in barcode
+    pub max_mismatch: usize,
+}
+
+impl Default for BarcodeCorrectOptions {
+    fn default() -> Self {
+        Self {
+            max_expected_errors: f64::MAX,
+            bc_confidence_threshold: 0.975,
+            max_mismatch: 1,
+        }
+    }
+}
+
+#[derive(Copy, Clone, Debug)]
+pub enum BarcodeError {
+    ExceedExpectedError(f64),
+    LowConfidence(f64),
+    NoMatch,
+}
+
 /// Count barcodes in a given assay and modality, returning a map of region IDs to their respective whitelists
-pub(crate) fn barcode_counting(assay: &Assay, modality: Modality) -> (IndexMap<RegionId, Whitelist>, usize) {
-    let spinner = ProgressBar::with_draw_target(None, ProgressDrawTarget::stderr_with_hz(1))
-    .with_style(
-        ProgressStyle::with_template(
-            "{spinner} Processed {human_pos} reads in {elapsed} ({per_sec}) ...",
-        )
-        .unwrap(),
-    );
+pub struct BarcodeAnalyzer {
+    whitelists: IndexMap<RegionId, Whitelist>,
+    contains_umi: bool,
+    num_reads: usize,
+    pub barcode_correct_options: Option<BarcodeCorrectOptions>,
+}
 
-    let mut whitelists: IndexMap<_, _> = assay.get_whitelists(modality).into_iter()
-        .map(|(k, v)| (k, Whitelist::new(v))).collect();
+impl BarcodeAnalyzer {
+    pub fn new(assay: &Assay, modality: Modality) -> Self {
+        // Determine if the assay contains UMI segments for the given modality
+        let contains_umi = assay
+            .get_segments_by_modality(modality)
+            .any(|(_, info)| info.iter().any(|x| x.is_umi()));
 
-    let mut num_reads = 0;
-    assay
-        .get_segments_by_modality(modality)
-        .filter(|(_, info)| info.iter().any(|x| x.is_barcode()))
-        .for_each(|(read, segment_info)| {
+        // Collect whitelists for barcode regions
+        let mut wl_builders: IndexMap<_, _> = assay
+            .get_whitelists(modality)
+            .into_iter()
+            .map(|(k, v)| {
+                let region = assay.library_spec.get(&k).unwrap().read().unwrap();
+                if region.sequence_type == SequenceType::Onlist {
+                    (k, WhitelistBuilder::new(v, true))
+                } else {
+                    warn!("Region '{}' contains barcodes but is not an onlist type. Barcode correction will not be performed.", k);
+                    (k, WhitelistBuilder::new(v, false))
+                }
+            })
+            .collect();
+
+        // Keep reads that contain barcoded regions
+        let barcoded_regions = assay
+            .get_segments_by_modality(modality)
+            .filter(|(_, info)| info.iter().any(|x| x.is_barcode()));
+
+        barcoded_regions.for_each(|(read, segment_info)| {
+            let read_id = &read.read_id;
             let is_reverse = read.is_reverse();
-            if let Some(mut reader) = read.open() {
-                info!("Counting barcodes in read {}...", read.read_id);
-                num_reads = 0;
-                for fq in reader.records().progress_with(spinner.clone())
-                {
-                    num_reads += 1;
-                    if let Ok(segments) = segment_info.split(&fq.unwrap()) {
-                        segments.iter().for_each(|segment| {
-                            if segment.is_barcode() {
-                                // A barcoded region may not need a whitelist unless it is of SequenceType::Onlist
-                                if let Some(wl) = whitelists.get_mut(segment.region_id()) {
-                                    if is_reverse {
-                                        wl.count_barcode(&rev_compl(segment.seq));
-                                    } else {
-                                        wl.count_barcode(segment.seq);
-                                    }
-                                }
+            let mut reader = read
+                .open()
+                .expect(&format!("Failed to open FASTQ file: {}", read_id));
+
+            info!("Counting barcodes in read {} ...", read_id);
+            let spinner =
+                ProgressBar::with_draw_target(None, ProgressDrawTarget::stderr_with_hz(1))
+                    .with_style(
+                        ProgressStyle::with_template(
+                            "{spinner} Processed {human_pos} reads in {elapsed} ({per_sec}) ...",
+                        )
+                        .unwrap(),
+                    );
+            for fq in reader.records().progress_with(spinner) {
+                if let Ok(segments) = segment_info.split(&fq.unwrap()) {
+                    segments.iter().for_each(|segment| {
+                        if segment.is_barcode() {
+                            let builder = wl_builders.get_mut(segment.region_id()).unwrap();
+                            if is_reverse {
+                                builder.add(&rev_compl(segment.seq));
+                            } else {
+                                builder.add(segment.seq);
                             }
-                        })
-                    }
+                        }
+                    });
                 }
             }
         });
-    (whitelists, num_reads)
-}
 
+        let whitelists: IndexMap<_, _> = wl_builders
+            .into_iter()
+            .map(|(k, v)| (k, v.finish()))
+            .collect();
+        let num_reads = whitelists.values().next().unwrap().total_count;
+        assert!(
+            whitelists.values().map(|x| x.total_count).all_equal(),
+            "All whitelists should have the same total read count"
+        );
+
+        Self {
+            whitelists,
+            num_reads,
+            contains_umi,
+            barcode_correct_options: None,
+        }
+    }
+
+    pub fn num_reads(&self) -> usize {
+        self.num_reads
+    }
+
+    pub fn summary(&self) {
+        for (region_id, whitelist) in &self.whitelists {
+            info!(
+                "{:.2}% of sequences have an exact match in whitelist '{}'. Number of unique barcodes: {}.",
+                whitelist.frac_exact_match() * 100.0,
+                region_id,
+                whitelist.num_seen_barcodes(),
+            );
+        }
+    }
+
+    /// Determine if a barcode is valid. A barcode is valid if any of the following conditions are met:
+    /// 1) It is in the whitelist and the number of expected errors is less than the max_expected_errors.
+    /// 2) It is not in the whitelist, but the number of expected errors is less than the max_expected_errors and the corrected barcode is in the whitelist.
+    /// 3) If the whitelist does not exist, the barcode is always valid.
+    ///
+    /// Return the corrected barcode
+    pub fn correct_barcode<'a>(
+        &'a self,
+        region_id: &str,
+        barcode: &'a [u8],
+        qual: &[u8],
+    ) -> Result<&'a [u8], BarcodeError> {
+        if let Some(options) = &self.barcode_correct_options {
+            let expected_errors: f64 = qual.iter().map(|&q| error_probability(q)).sum();
+            if expected_errors >= options.max_expected_errors {
+                return Err(BarcodeError::ExceedExpectedError(expected_errors));
+            }
+
+            let barcode_counts = &self
+                .whitelists
+                .get(region_id).unwrap()
+                .barcode_counts;
+            let (bc, prob) = barcode_counts.likelihood(barcode, qual, options.max_mismatch);
+            if prob <= 0.0 {
+                Err(BarcodeError::NoMatch)
+            } else if prob >= options.bc_confidence_threshold {
+                Ok(bc)
+            } else {
+                Err(BarcodeError::LowConfidence(prob))
+            }
+        } else {
+            Ok(barcode)
+        }
+    }
+}
 
 /// A map of oligo species to their frequency in a given library.
 #[derive(Debug, Clone)]
-pub struct OligoFrequncy(HashMap<Vec<u8>, usize>);
+struct OligoFrequncy(HashMap<Vec<u8>, usize>);
 
 impl Deref for OligoFrequncy {
     type Target = HashMap<Vec<u8>, usize>;
@@ -239,90 +358,15 @@ fn update_best_option<'a>(
 
 /// A whitelist manager that handles barcode validation, counting, and prediction.
 #[derive(Debug, Clone)]
-pub struct Whitelist {
-    whitelist_exists: bool,
+struct Whitelist {
     barcode_counts: OligoFrequncy,
     mismatch_count: usize,
     pub(crate) total_count: usize,
 }
 
 impl Whitelist {
-    /// Return the number of barcodes in the whitelist. If the whitelist does not exist, return 0.
-    pub fn len(&self) -> usize {
-        if self.whitelist_exists {
-            self.barcode_counts.len()
-        } else {
-            0
-        }
-    }
-
-    pub fn empty() -> Self {
-        Self {
-            whitelist_exists: false,
-            barcode_counts: OligoFrequncy::new(),
-            mismatch_count: 0,
-            total_count: 0,
-        }
-    }
-
-    /// Create a new whitelist from an iterator of strings.
-    pub fn new<I: IntoIterator<Item = S>, S: Into<Vec<u8>>>(iter: I) -> Self {
-        let mut whitelist = Self::empty();
-        whitelist.whitelist_exists = true;
-        whitelist.barcode_counts = iter.into_iter().map(|x| (x.into(), 0)).collect();
-        whitelist
-    }
-
-    /// Update the barcode counter with a barcode and its quality scores.
-    pub fn count_barcode(&mut self, barcode: &[u8]) {
-        if self.whitelist_exists {
-            if let Some(count) = self.barcode_counts.get_mut(barcode) {
-                *count += 1;
-            } else {
-                self.mismatch_count += 1;
-            }
-        } else if barcode.len() > 1 && barcode.iter().all(|x| BASE_OPTS.contains(x)) {
-            *self.barcode_counts.entry(barcode.to_vec()).or_insert(0) += 1;
-        } else {
-            self.mismatch_count += 1;
-        }
-
-        self.total_count += 1;
-    }
-
-    /// When there should be a whitelist (SequenceType::Onlist), but it does not exist,
-    /// predict the whitelist from the barcode counts using the OrdMag algorithm.
-    pub fn predict_whitelist(&mut self) {
-        if !self.whitelist_exists && !self.barcode_counts.is_empty() {
-            info!("Predicting whitelist from {} barcode ...", self.barcode_counts.len());
-            let counts = self
-                .barcode_counts
-                .iter()
-                .map(|x| x.1)
-                .copied()
-                .collect::<Vec<_>>();
-            let threshold = compute_cell_filter_threshold(&counts);
-            self.barcode_counts = self
-                .barcode_counts
-                .0
-                .clone()
-                .into_iter()
-                .filter(|x| x.1 >= threshold)
-                .collect();
-            self.whitelist_exists = true;
-            info!(
-                "Predicted whitelist contains {} barcodes",
-                self.barcode_counts.len()
-            );
-        }
-    }
-
     pub fn num_seen_barcodes(&self) -> usize {
         self.barcode_counts.values().filter(|&&x| x > 0).count()
-    }
-
-    pub fn get_barcode_counts(&self) -> &OligoFrequncy {
-        &self.barcode_counts
     }
 
     pub fn frac_exact_match(&self) -> f64 {
@@ -334,73 +378,82 @@ impl Whitelist {
     }
 }
 
-/// A barcode validator that uses a barcode counter to validate barcodes.
-#[derive(Debug, Clone)]
-pub struct BarcodeCorrector {
-    /// threshold for sum of probability of error on barcode QVs. Barcodes exceeding
-    /// this threshold will be marked as not valid.
-    max_expected_errors: f64,
-    /// if the posterior probability of a correction
-    /// exceeds this threshold, the barcode will be corrected.
-    bc_confidence_threshold: f64,
-    /// The number of mismatches allowed in barcode
-    max_mismatch: usize,
+struct WhitelistBuilder {
+    whitelist_exists: bool,
+    barcode_counts: OligoFrequncy,
+    mismatch_count: usize,
+    total_count: usize,
+    call_cell_enabled: bool,
 }
 
-impl Default for BarcodeCorrector {
-    fn default() -> Self {
+impl WhitelistBuilder {
+    /// Create a new whitelist builder from list of valid barcodes.
+    /// This list can be empty, in which case the whitelist will be predicted from the observed barcodes.
+    pub fn new<I: IntoIterator<Item = S>, S: Into<Vec<u8>>>(
+        valid_barcodes: I,
+        call_cell_enabled: bool,
+    ) -> Self {
+        let barcode_counts: OligoFrequncy =
+            valid_barcodes.into_iter().map(|x| (x.into(), 0)).collect();
+        let whitelist_exists = !barcode_counts.is_empty();
         Self {
-            max_expected_errors: f64::MAX,
-            bc_confidence_threshold: 0.975,
-            max_mismatch: 1,
+            whitelist_exists,
+            barcode_counts,
+            mismatch_count: 0,
+            total_count: 0,
+            call_cell_enabled,
         }
     }
-}
 
-impl BarcodeCorrector {
-    pub fn with_bc_confidence_threshold(mut self, threshold: f64) -> Self {
-        self.bc_confidence_threshold = threshold;
-        self
-    }
-
-    pub fn with_max_missmatch(mut self, max_mismatch: usize) -> Self {
-        self.max_mismatch = max_mismatch;
-        self
-    }
-}
-
-#[derive(Copy, Clone, Debug)]
-pub enum BarcodeError {
-    ExceedExpectedError(f64),
-    LowConfidence(f64),
-    NoMatch,
-}
-
-impl BarcodeCorrector {
-    /// Determine if a barcode is valid. A barcode is valid if any of the following conditions are met:
-    /// 1) It is in the whitelist and the number of expected errors is less than the max_expected_errors.
-    /// 2) It is not in the whitelist, but the number of expected errors is less than the max_expected_errors and the corrected barcode is in the whitelist.
-    /// 3) If the whitelist does not exist, the barcode is always valid.
-    ///
-    /// Return the corrected barcode
-    pub fn correct<'a>(
-        &'a self,
-        barcode_counts: &'a OligoFrequncy,
-        barcode: &'a [u8],
-        qual: &[u8],
-    ) -> Result<&'a [u8], BarcodeError> {
-        let expected_errors: f64 = qual.iter().map(|&q| error_probability(q)).sum();
-        if expected_errors >= self.max_expected_errors {
-            return Err(BarcodeError::ExceedExpectedError(expected_errors));
-        }
-
-        let (bc, prob) = barcode_counts.likelihood(barcode, qual, self.max_mismatch);
-        if prob <= 0.0 {
-            Err(BarcodeError::NoMatch)
-        } else if prob >= self.bc_confidence_threshold {
-            Ok(bc)
+    /// Add a barcode to the whitelist builder.
+    pub fn add(&mut self, barcode: &[u8]) {
+        if self.whitelist_exists {
+            // If a whitelist exists, only count barcodes in the whitelist
+            if let Some(count) = self.barcode_counts.get_mut(barcode) {
+                *count += 1;
+            } else {
+                self.mismatch_count += 1;
+            }
+        } else if barcode.len() > 1 && barcode.iter().all(|x| BASE_OPTS.contains(x)) {
+            // Whitelist does not exist, count all valid barcodes
+            *self.barcode_counts.entry(barcode.to_vec()).or_insert(0) += 1;
         } else {
-            Err(BarcodeError::LowConfidence(prob))
+            self.mismatch_count += 1;
+        }
+
+        self.total_count += 1;
+    }
+
+    /// Finalize the whitelist builder and return the whitelist.
+    /// If a whitelist was provided or cell_calling is false, the provided whitelist will be used.
+    /// Otherwise, cell calling will be performed to predict the whitelist.
+    pub fn finish(mut self) -> Whitelist {
+        if self.whitelist_exists || !self.call_cell_enabled {
+            Whitelist {
+                barcode_counts: self.barcode_counts,
+                mismatch_count: self.mismatch_count,
+                total_count: self.total_count,
+            }
+        } else {
+            let threshold = compute_cell_filter_threshold(self.barcode_counts.iter().map(|x| *x.1));
+            let barcode_counts = self
+                .barcode_counts
+                .0
+                .into_iter()
+                .filter(|x| {
+                    if x.1 >= threshold {
+                        true
+                    } else {
+                        self.mismatch_count += x.1;
+                        false
+                    }
+                })
+                .collect();
+            Whitelist {
+                barcode_counts,
+                mismatch_count: self.mismatch_count,
+                total_count: self.total_count,
+            }
         }
     }
 }
@@ -511,13 +564,8 @@ fn get_empty_drops_range(
 
 /// Use the OrdMag algorithm to compute the threshold for the whitelist prediction,
 /// where UMI counts are above the threshold are considered as cells (i.e., belongs to the whitelist).
-fn compute_cell_filter_threshold(counts: &[usize]) -> usize {
-    let nonzero_counts: Vec<_> = counts
-        .iter()
-        .filter(|&&x| x > 0)
-        .copied()
-        .sorted()
-        .collect();
+fn compute_cell_filter_threshold(counts: impl IntoIterator<Item = usize>) -> usize {
+    let nonzero_counts: Vec<_> = counts.into_iter().filter(|x| *x > 0).sorted().collect();
     let n = nonzero_counts.len();
     let quantile = 0.99;
     let num_bootstrap_samples = 1000;
@@ -601,31 +649,6 @@ fn compute_loss(num_obs: usize, num_exp: usize) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_empty_whitelist() {
-        let whitelist = Whitelist::empty();
-        assert_eq!(whitelist.num_seen_barcodes(), 0);
-        assert_eq!(whitelist.total_count, 0);
-        assert_eq!(whitelist.frac_exact_match(), 0.0);
-    }
-
-    #[test]
-    fn test_new_whitelist() {
-        let barcodes = ["ACGTACGT", "TGCATGCA", "GATCGATC"];
-        let whitelist = Whitelist::new(barcodes);
-
-        assert!(whitelist.whitelist_exists);
-        assert_eq!(whitelist.num_seen_barcodes(), 0); // No barcodes counted yet
-        assert_eq!(whitelist.total_count, 0);
-
-        // Check that the whitelist contains the correct barcodes
-        let barcode_counts = whitelist.get_barcode_counts();
-        for barcode in barcodes {
-            assert!(barcode_counts.contains_key(&barcode.as_bytes().to_vec()));
-            assert_eq!(barcode_counts[&barcode.as_bytes().to_vec()], 0);
-        }
-    }
 
     #[test]
     fn test_find_within_ordmag() {

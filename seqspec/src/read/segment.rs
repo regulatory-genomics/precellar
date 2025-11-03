@@ -428,6 +428,10 @@ impl SegmentInfoElem {
     pub fn is_barcode(&self) -> bool {
         self.region_type.is_barcode()
     }
+
+    pub fn is_umi(&self) -> bool {
+        self.region_type.is_umi()
+    }
 }
 
 /// Find a pattern with the Knuth-Morris-Pratt (KMP) algorithm - more efficient for large patterns
