@@ -10,7 +10,7 @@ use std::{
     collections::HashMap,
     io::BufRead,
     ops::Deref,
-    path::Path,
+    path::{Path, PathBuf},
     sync::{Arc, RwLock},
 };
 
@@ -457,9 +457,13 @@ pub struct Onlist {
 
 impl Onlist {
     pub fn read(&self) -> Result<IndexSet<Vec<u8>>> {
-        let cache_dir = home::home_dir().unwrap().join(".cache/seqspec");
-        let downloader = Downloader::new(Some(cache_dir))?;
-        let file_path = downloader.retrieve(&self.url, Some(&self.filename), None, false)?;
+        let file_path = if self.urltype == UrlType::Local {
+            PathBuf::from(&self.url)
+        } else {
+            let cache_dir = home::home_dir().unwrap().join(".cache/seqspec");
+            let downloader = Downloader::new(Some(cache_dir))?;
+            downloader.retrieve(&self.url, Some(&self.filename), None, false)?
+        };
         let reader = std::io::BufReader::new(crate::utils::open_file(file_path)?);
         reader.lines().map(|x| Ok(x?.into_bytes())).collect()
     }

@@ -3,6 +3,23 @@ use pyo3::prelude::*;
 use std::{collections::HashMap, path::PathBuf};
 
 #[pyfunction]
+fn dnbelabc4_rna_v1(py: Python<'_>) -> Result<HashMap<&str, PathBuf>> {
+    let rna_r1 = retrieve_file(
+        py,
+        "https://osf.io/download/q52kf",
+        "md5:721b0be9713a18f61108a8832d528293",
+        "dnbelabc4_rna_v1_R1.fq.zst",
+    )?;
+    let rna_r2 = retrieve_file(
+        py,
+        "https://osf.io/download/8c9wk",
+        "md5:ff5d0888bcb8ba9e9001509323f433c0",
+        "dnbelabc4_rna_v1_R2.fq.zst",
+    )?;
+    Ok(HashMap::from([("R1", rna_r1), ("R2", rna_r2)]))
+}
+
+#[pyfunction]
 fn txg_rna_v3(py: Python<'_>) -> Result<HashMap<&str, PathBuf>> {
     let rna_r1 = retrieve_file(
         py,
@@ -311,6 +328,7 @@ pub(crate) fn register_examples(parent_module: &Bound<'_, PyModule>) -> PyResult
     m.add_function(wrap_pyfunction!(snare_seq, &m)?)?;
     m.add_function(wrap_pyfunction!(droplet_paired_tag, &m)?)?;
     m.add_function(wrap_pyfunction!(mars_seq, &m)?)?;
+    m.add_function(wrap_pyfunction!(dnbelabc4_rna_v1, &m)?)?;
 
     parent_module.add_submodule(&m)
 }
