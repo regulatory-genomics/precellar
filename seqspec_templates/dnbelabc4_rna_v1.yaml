@@ -87,9 +87,9 @@ library_spec:
       filetype: txt
       filesize: 5842
       url: https://osf.io/download/ryn2k/
-      urltype: local
+      urltype: https
       md5: dd0269f6573ce96ca2fd85421e8a07d8
-      location: local
+      location: remote
     regions: null
   - !Region
     region_id: rna-umi

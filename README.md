@@ -114,6 +114,30 @@ print(rna_qc)
 
 </details>
 
+<details>
+<summary>MGI DNBelab C4 scRNA-seq v1</summary>
+
+```python
+import precellar
+
+assay = precellar.Assay('https://raw.githubusercontent.com/regulatory-genomics/precellar/refs/heads/main/seqspec_templates/dnbelabc4_rna_v1.yaml')
+
+data = precellar.examples.dnbelabc4_rna_v1()
+assay.update_read('R1', fastq=data['R1'])
+assay.update_read('R2', fastq=data['R2'])
+
+rna_qc = precellar.align(
+    assay,
+    precellar.aligners.STAR("STAR_reference/refdata-gex-GRCh38-2024-A"), 
+    modality="rna",
+    output="gene_matrix.h5ad",
+    output_type="gene_quantification",
+    num_threads=8,
+)
+print(rna_qc)
+```
+
+</details>
 
 ### Chromatin accessibility and protein-DNA interactions
 
