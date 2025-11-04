@@ -453,8 +453,8 @@ impl Assay {
             .filter_map(|region| {
                 let r = region.read().unwrap();
                 if r.region_type.is_barcode() {
+                    let id = r.region_id.to_string();
                     if r.sequence_type == SequenceType::Onlist {
-                        let id = r.region_id.to_string();
                         if let Some(onlist) = r.onlist.as_ref() {
                             Some((id, onlist.read().unwrap()))
                         } else {
@@ -462,11 +462,7 @@ impl Assay {
                             Some((id, IndexSet::new()))
                         }
                     } else {
-                        warn!(
-                            "Region '{}' contains barcodes but is not an onlist type. Barcode correction will not be performed.",
-                            r.region_id
-                        );
-                        None
+                        Some((id, IndexSet::new()))
                     }
                 } else {
                     None

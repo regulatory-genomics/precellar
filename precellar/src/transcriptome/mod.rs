@@ -1,28 +1,28 @@
 //! Transcriptome module: handling transcripts, spliced alignments, and quantification.
-//! 
+//!
 //! Key structs:
 //! * SplicedRecord: represents a spliced BAM/SAM record, split at refskips.
 //! * TranscriptAlignment: represents the alignment of a SplicedRecord to a Transcript.
 //! * AnnotatedAlignment: final annotated alignment, with gene information.
 
-mod quantification;
 mod align;
 mod annotate;
+mod quantification;
 
-pub use quantification::Quantifier;
 pub use align::{TxAlignResult, TxAligner, TxAlignment};
-pub use annotate::{GeneCounter, CorrectUMI};
+pub use annotate::GeneCounter;
+pub use quantification::Quantifier;
 
 use anyhow::{bail, ensure, Result};
 use bed_utils::bed::Strand;
 
-/// Represents a transcript. 
+/// Represents a transcript.
 #[derive(Debug, Clone)]
 pub struct Transcript {
     pub id: String,
     pub chrom: String,
     pub start: u64, // 0-based, half-open
-    pub end: u64, // exclusive
+    pub end: u64,   // exclusive
     pub strand: Strand,
     pub gene_id: String,
     pub gene_name: String,
@@ -41,8 +41,14 @@ impl TryFrom<star_aligner::transcript::Transcript> for Transcript {
             _ => bail!("Strand must be Forward or Reverse"),
         };
         let exons = Exons::new(transcript.exons.iter().map(|exon| {
-            assert!(exon.start < exon.end, "Exon start must be less than exon end");
-            assert!(exon.start >= start, "Exon start must be greater than transcript start");
+            assert!(
+                exon.start < exon.end,
+                "Exon start must be less than exon end"
+            );
+            assert!(
+                exon.start >= start,
+                "Exon start must be greater than transcript start"
+            );
             assert!(exon.end <= end, "Exon end must be less than transcript end");
             (exon.start, exon.end)
         }))?;

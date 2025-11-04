@@ -102,7 +102,11 @@ impl BarcodeAnalyzer {
                 if let Ok(segments) = segment_info.split(&fq.unwrap()) {
                     segments.iter().for_each(|segment| {
                         if segment.is_barcode() {
-                            let builder = wl_builders.get_mut(segment.region_id()).unwrap();
+                            let builder =
+                                wl_builders.get_mut(segment.region_id()).expect(&format!(
+                                    "Region '{}' not found in whitelist builders",
+                                    segment.region_id()
+                                ));
                             if is_reverse {
                                 builder.add(&rev_compl(segment.seq));
                             } else {
@@ -165,10 +169,7 @@ impl BarcodeAnalyzer {
                 return Err(BarcodeError::ExceedExpectedError(expected_errors));
             }
 
-            let barcode_counts = &self
-                .whitelists
-                .get(region_id).unwrap()
-                .barcode_counts;
+            let barcode_counts = &self.whitelists.get(region_id).unwrap().barcode_counts;
             let (bc, prob) = barcode_counts.likelihood(barcode, qual, options.max_mismatch);
             if prob <= 0.0 {
                 Err(BarcodeError::NoMatch)

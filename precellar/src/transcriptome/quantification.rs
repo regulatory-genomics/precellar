@@ -10,20 +10,21 @@ use itertools::Itertools;
 use nalgebra_sparse::CsrMatrix;
 use noodles::sam::Header;
 use polars::df;
-use rayon::iter::{IntoParallelIterator, ParallelIterator};
+use rayon::{iter::ParallelIterator, slice::ParallelSlice};
 
 use super::TxAligner;
 use crate::{
     align::MultiMapR,
     genome::GenomeBaseIndex,
     qc::QcGeneQuant,
-    transcriptome::{CorrectUMI, TxAlignment},
+    transcriptome::{GeneCounter, TxAlignment},
 };
 
 pub struct Quantifier {
     annotator: TxAligner,
     genes: IndexMap<String, String>,
     chunk_size: usize,
+    pub num_threads: usize,
 }
 
 impl Quantifier {
@@ -37,6 +38,7 @@ impl Quantifier {
             annotator,
             genes,
             chunk_size: 10000000,
+            num_threads: 16,
         })
     }
 
@@ -85,16 +87,19 @@ impl Quantifier {
             // Sort alignments by cell barcodes
             let sorted_aln = sort_alignments(tx_alignments, self.chunk_size);
             let aln_cell_group = sorted_aln.chunk_by(|x| x.barcode().unwrap().to_string());
+            let chunk_size = 30_000_000;
             let aln_chunks = aln_cell_group
                 .into_iter()
-                .map(|(barcode, group)| {
+                .scan(0, |count, (barcode, group)| {
                     barcodes.push(barcode);
-                    group.collect::<Vec<_>>()
+                    let aln = group.collect::<Vec<_>>();
+                    *count += aln.len();
+                    Some((*count / chunk_size, aln))
                 })
-                .chunks(9012);
+                .chunk_by(|(chunk_id, _)| *chunk_id);
 
-            aln_chunks.into_iter().for_each(|chunk| {
-                let ((t, s), (uns, cov)) = self.count_one_cell(&genome_index, chunk);
+            aln_chunks.into_iter().for_each(|(_, chunk)| {
+                let ((t, s), (uns, cov)) = self.count_one_cell(&genome_index, chunk.map(|x| x.1));
                 umi_cache.add(t).unwrap();
                 spliced_cache.add(s).unwrap();
                 unspliced_cache.add(uns).unwrap();
@@ -159,15 +164,13 @@ impl Quantifier {
         (Vec<Vec<(usize, u32)>>, Vec<Vec<(usize, u32)>>),
         (Vec<Vec<(usize, u32)>>, Vec<Vec<(usize, i32)>>),
     ) {
+        let alignments = alignments.collect::<Vec<_>>();
+        let chunk_size = (alignments.len() / self.num_threads).max(1);
         alignments
-            .chunks(32)
-            .into_iter()
-            .map(|x| x.collect::<Vec<_>>())
-            .collect::<Vec<_>>()
-            .into_par_iter()
+            .par_chunks(chunk_size)
             .flat_map_iter(|chunk| {
                 chunk.into_iter().map(|aln| {
-                    let umi_group = aln.into_iter().correct_umi(&self.genes);
+                    let umi_group = GeneCounter::new(aln, &self.genes);
                     let coverage = index.count_fragments(umi_group.to_fragments());
                     let (spliced, unspliced) = umi_group.to_spliced_counts();
                     ((umi_group.to_counts(), spliced), (unspliced, coverage))

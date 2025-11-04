@@ -15,9 +15,9 @@ pub enum Annotation {
 }
 
 /// A group of transcript alignments corresponding to a single UMI.
-struct AlignmentGroup(Vec<TxAlignment>);
+struct AlignmentGroup<'a>(Vec<&'a TxAlignment>);
 
-impl AlignmentGroup {
+impl AlignmentGroup<'_> {
     /// Annotate spliced and unspliced alignments with transcript information.
     ///
     /// 1. A molecule was annotated as spliced if all of the reads in the set supporting a
@@ -88,8 +88,8 @@ impl AlignmentGroup {
     }
 }
 
-impl From<Vec<TxAlignment>> for AlignmentGroup {
-    fn from(value: Vec<TxAlignment>) -> Self {
+impl<'a> From<Vec<&'a TxAlignment>> for AlignmentGroup<'a> {
+    fn from(value: Vec<&'a TxAlignment>) -> Self {
         AlignmentGroup(value)
     }
 }
@@ -97,59 +97,13 @@ impl From<Vec<TxAlignment>> for AlignmentGroup {
 /// A list of TxAlignments grouped by gene index and UMI. Each entry contains the gene index
 /// and a list of lists of TxAlignments, where each inner list corresponds to a unique
 /// UMI within that gene.
-pub struct GeneCounter(Vec<(GeneIndex, Vec<AlignmentGroup>)>);
+pub struct GeneCounter<'a>(Vec<(GeneIndex, Vec<AlignmentGroup<'a>>)>);
 
-impl GeneCounter {
-    pub fn to_counts(&self) -> Vec<(GeneIndex, u32)> {
-        self.0
-            .iter()
-            .map(|(gene_idx, umi_group)| (*gene_idx, umi_group.len() as u32))
-            .collect()
-    }
-
-    pub fn to_spliced_counts(&self) -> (Vec<(GeneIndex, u32)>, Vec<(GeneIndex, u32)>) {
-        let mut spliced_counts = Vec::new();
-        let mut unspliced_counts = Vec::new();
-        self.0.iter().for_each(|(gene_idx, umi_group)| {
-            let mut spliced: u32 = 0;
-            let mut unspliced: u32 = 0;
-            umi_group
-                .iter()
-                .for_each(|reads| match reads.to_annotation() {
-                    Annotation::Spliced => {
-                        spliced = spliced.checked_add(1).unwrap();
-                    }
-                    Annotation::Unspliced => {
-                        unspliced = unspliced.checked_add(1).unwrap();
-                    }
-                    Annotation::Ambiguous => {}
-                });
-            if spliced > 0 {
-                spliced_counts.push((*gene_idx, spliced));
-            }
-            if unspliced > 0 {
-                unspliced_counts.push((*gene_idx, unspliced));
-            }
-        });
-        (spliced_counts, unspliced_counts)
-    }
-
-    pub fn to_fragments(&self) -> impl Iterator<Item = Fragment> + '_ {
-        self.0
-            .iter()
-            .flat_map(|(_, umi_group)| umi_group.iter().flat_map(|reads| reads.to_fragments()))
-    }
-}
-
-pub trait CorrectUMI {
-    fn correct_umi(self, genes: &IndexMap<String, String>) -> GeneCounter;
-}
-
-impl<I: Iterator<Item = TxAlignment>> CorrectUMI for I {
-    fn correct_umi(self, genes: &IndexMap<String, String>) -> GeneCounter {
+impl<'a> GeneCounter<'a> {
+    pub fn new(data: &'a Vec<TxAlignment>, genes: &IndexMap<String, String>) -> Self {
         // Group the Tx alignments by gene
         let mut gene_group = BTreeMap::new();
-        self.for_each(|x| {
+        data.iter().for_each(|x| {
             let idx = genes.get_full(x.uniquely_mapped_gene().unwrap()).unwrap().0;
             gene_group.entry(idx).or_insert_with(Vec::new).push(x);
         });
@@ -192,6 +146,46 @@ impl<I: Iterator<Item = TxAlignment>> CorrectUMI for I {
             })
             .collect();
         GeneCounter(umi_group)
+    }
+
+    pub fn to_counts(&self) -> Vec<(GeneIndex, u32)> {
+        self.0
+            .iter()
+            .map(|(gene_idx, umi_group)| (*gene_idx, umi_group.len() as u32))
+            .collect()
+    }
+
+    pub fn to_spliced_counts(&self) -> (Vec<(GeneIndex, u32)>, Vec<(GeneIndex, u32)>) {
+        let mut spliced_counts = Vec::new();
+        let mut unspliced_counts = Vec::new();
+        self.0.iter().for_each(|(gene_idx, umi_group)| {
+            let mut spliced: u32 = 0;
+            let mut unspliced: u32 = 0;
+            umi_group
+                .iter()
+                .for_each(|reads| match reads.to_annotation() {
+                    Annotation::Spliced => {
+                        spliced = spliced.checked_add(1).unwrap();
+                    }
+                    Annotation::Unspliced => {
+                        unspliced = unspliced.checked_add(1).unwrap();
+                    }
+                    Annotation::Ambiguous => {}
+                });
+            if spliced > 0 {
+                spliced_counts.push((*gene_idx, spliced));
+            }
+            if unspliced > 0 {
+                unspliced_counts.push((*gene_idx, unspliced));
+            }
+        });
+        (spliced_counts, unspliced_counts)
+    }
+
+    pub fn to_fragments(&self) -> impl Iterator<Item = Fragment> + '_ {
+        self.0
+            .iter()
+            .flat_map(|(_, umi_group)| umi_group.iter().flat_map(|reads| reads.to_fragments()))
     }
 }
 
