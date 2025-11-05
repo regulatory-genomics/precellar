@@ -1,3 +1,5 @@
+use std::path::{Path, PathBuf};
+
 use anndata::{
     data::utils::{from_csr_data, to_csr_data},
     AnnData, AnnDataOp, ArrayData, AxisArraysOp, ElemCollectionOp,
@@ -6,7 +8,9 @@ use anndata_hdf5::H5;
 use anyhow::Result;
 use bed_utils::extsort::{ExternalChunkBuilder, ExternalSorterBuilder};
 use indexmap::IndexMap;
+use indicatif::{ProgressBar, ProgressStyle};
 use itertools::Itertools;
+use log::info;
 use nalgebra_sparse::CsrMatrix;
 use noodles::sam::Header;
 use polars::df;
@@ -24,6 +28,7 @@ pub struct Quantifier {
     annotator: TxAligner,
     genes: IndexMap<String, String>,
     chunk_size: usize,
+    pub temp_dir: Option<PathBuf>,
     pub num_threads: usize,
 }
 
@@ -39,6 +44,7 @@ impl Quantifier {
             genes,
             chunk_size: 10000000,
             num_threads: 16,
+            temp_dir: None,
         })
     }
 
@@ -85,15 +91,25 @@ impl Quantifier {
             });
 
             // Sort alignments by cell barcodes
-            let sorted_aln = sort_alignments(tx_alignments, self.chunk_size);
+            let sorted_aln = sort_alignments(tx_alignments, self.chunk_size, self.temp_dir.as_ref());
+
+            let sty = ProgressStyle::with_template(
+                "{percent}%|{wide_bar:.cyan/blue}| {human_pos:>}/{human_len:} [{elapsed}<{eta}, {per_sec}]",
+            )
+            .unwrap();
+            let bar = ProgressBar::new(sorted_aln.len() as u64).with_style(sty);
+
+            info!("Generating gene counts ...");
             let aln_cell_group = sorted_aln.chunk_by(|x| x.barcode().unwrap().to_string());
-            let chunk_size = 30_000_000;
+            let chunk_size = self.num_threads * 1_000_000;
             let aln_chunks = aln_cell_group
                 .into_iter()
                 .scan(0, |count, (barcode, group)| {
                     barcodes.push(barcode);
                     let aln = group.collect::<Vec<_>>();
-                    *count += aln.len();
+                    let n = aln.len();
+                    *count += n;
+                    bar.inc(n as u64);
                     Some((*count / chunk_size, aln))
                 })
                 .chunk_by(|(chunk_id, _)| *chunk_id);
@@ -105,6 +121,8 @@ impl Quantifier {
                 unspliced_cache.add(uns).unwrap();
                 coverage_cache.add(cov).unwrap();
             });
+
+            bar.abandon();
         }
 
         let umi_count = umi_cache.finish()?.map(|x| {
@@ -183,13 +201,17 @@ impl Quantifier {
 fn sort_alignments<I>(
     alignments: I,
     chunk_size: usize,
+    temp_dir: Option<impl AsRef<Path>>,
 ) -> impl ExactSizeIterator<Item = TxAlignment>
 where
     I: Iterator<Item = TxAlignment>,
 {
-    let sorter = ExternalSorterBuilder::new()
+    let mut sorter = ExternalSorterBuilder::new()
         .with_chunk_size(chunk_size)
         .with_compression(2);
+    if let Some(tmp) = temp_dir {
+        sorter = sorter.with_tmp_dir(tmp);
+    }
     sorter
         .build()
         .unwrap()

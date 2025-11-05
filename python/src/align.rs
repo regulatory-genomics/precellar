@@ -256,6 +256,7 @@ pub fn align<'py>(
         OutputType::GeneQuantification => {
             let mut quantifier = Quantifier::new(transcript_annotator.unwrap())?;
             quantifier.num_threads = num_threads as usize;
+            quantifier.temp_dir = temp_dir;
             let quant_qc = quantifier.quantify(&header, alignments, output.clone())?;
             qc_metrics.insert("gene_quantification".to_owned(), quant_qc.into());
         }

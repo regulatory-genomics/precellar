@@ -5,8 +5,8 @@ edition = "2021"
 
 [dependencies]
 anyhow = "1.0"
-anndata = { git = "https://github.com/kaizhang/anndata-rs.git", rev = "abe4c2cf7ec7af1cc03a9e337b2af8bdf602ef5b"}
-anndata-hdf5 = { git = "https://github.com/kaizhang/anndata-rs.git", rev = "abe4c2cf7ec7af1cc03a9e337b2af8bdf602ef5b"}
+anndata = "0.6.2"
+anndata-hdf5 = "0.5.2"
 #bed-utils = "0.9.5"
 bed-utils = { git = "https://github.com/kaizhang/bed-utils.git", rev = "c2b90997086622d9e07de96aa59aedd8ff88fe30" }
 bwa-mem2 = { git = "https://github.com/regulatory-genomics/bwa-mem2-rust.git", rev = "e3b64904adcb379b3814f6408796fd371d56e5cf" }
