@@ -16,10 +16,10 @@ jobs:
       with:
         ref: ${{ github.event.workflow_run.head_sha }}
 
-    - uses: actions/setup-python@v5
+    - uses: actions/setup-python@v6
       name: Install Python
       with:
-          python-version: '3.10'
+          python-version: '3.14'
 
     - name: Install dependency
       run: |
