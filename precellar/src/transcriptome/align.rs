@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use anyhow::Result;
 use bincode::{Decode, Encode};
 use noodles::sam;
@@ -23,10 +25,28 @@ pub enum Orientation {
 /// Indicates whether a transcript alignment is exonic, intronic, or spans exon-intron boundaries.
 #[derive(Eq, PartialEq, Debug, Clone, Encode, Decode)]
 pub enum AlignType {
-    Exonic,
-    Intronic,
-    Spanning,
-    Discordant,
+    Exonic,     // Read maps entirely within exons
+    Intronic,   // Read maps entirely within introns
+    Spanning,   // Read spans exon-intron boundaries
+    Discordant, // Read maps discordantly to the transcript (splice junctions do not match)
+}
+
+impl AlignType {
+    pub fn is_exonic(&self) -> bool {
+        matches!(self, AlignType::Exonic)
+    }
+
+    pub fn is_intronic(&self) -> bool {
+        matches!(self, AlignType::Intronic)
+    }
+
+    pub fn is_spanning(&self) -> bool {
+        matches!(self, AlignType::Spanning)
+    }
+
+    pub fn is_discordant(&self) -> bool {
+        matches!(self, AlignType::Discordant)
+    }
 }
 
 #[derive(Eq, PartialEq, Debug, Clone, Encode, Decode)]
@@ -38,24 +58,9 @@ pub struct TxAlignResult {
 }
 
 impl TxAlignResult {
-    pub fn is_exonic(&self) -> bool {
-        self.align_type == AlignType::Exonic
-    }
-
-    pub fn is_intronic(&self) -> bool {
-        self.align_type == AlignType::Intronic
-    }
-
-    pub fn is_spanning(&self) -> bool {
-        self.align_type == AlignType::Spanning
-    }
-
-    pub fn is_discordant(&self) -> bool {
-        self.align_type == AlignType::Discordant
-    }
-
+    /// Returns true if the alignment is to the transcriptome (i.e., not discordant and sense strand).
     pub fn is_transcriptomic(&self) -> bool {
-        !self.is_discordant() && self.strand == Orientation::Sense
+        !self.align_type.is_discordant() && self.strand == Orientation::Sense
     }
 }
 
@@ -295,24 +300,39 @@ fn find_exons(
     }
 }
 
+/// Represents the result of aligning a read to the transcriptome.
 #[derive(Debug, Encode, Decode)]
 pub enum TxAlignment {
     Intergenic,
+    /// Read maps to intergenic region
     Discordant,
+    /// Read maps discordantly
     Multimapped,
+    /// Read maps to multiple genes
     Antisense,
+    /// Read maps antisense to a gene
     SeAligned {
         read: SplicedRecord,
-        alignment: Vec<TxAlignResult>,
+        alignment: Vec<(String, AlignType)>, // transcritopmic alignments represented as (transcript_id, AlignType)
+        gene_id: String,
+        barcode: String,
+        umi: Option<String>,
+    },
+    PeAligned {
+        read1: SplicedRecord,
+        read2: SplicedRecord,
+        alignment: Vec<(String, AlignType)>, // transcritopmic alignments represented as (transcript_id, AlignType)
+        gene_id: String,
         barcode: String,
         umi: Option<String>,
     },
 }
 
 impl TxAlignment {
-    pub fn alignments(&self) -> Box<dyn Iterator<Item = &TxAlignResult> + '_> {
+    pub fn alignments(&self) -> Box<dyn Iterator<Item = &(String, AlignType)> + '_> {
         match self {
             TxAlignment::SeAligned { alignment, .. } => Box::new(alignment.iter()),
+            TxAlignment::PeAligned { alignment, .. } => Box::new(alignment.iter()),
             _ => Box::new(std::iter::empty()),
         }
     }
@@ -320,7 +340,8 @@ impl TxAlignment {
     /// Returns the gene if the read is confidently mapped to a single gene.
     pub fn uniquely_mapped_gene(&self) -> Option<&str> {
         match self {
-            TxAlignment::SeAligned { alignment, .. } => Some(alignment[0].gene_id.as_str()),
+            TxAlignment::SeAligned { gene_id, .. } => Some(gene_id.as_str()),
+            TxAlignment::PeAligned { gene_id, .. } => Some(gene_id.as_str()),
             _ => None,
         }
     }
@@ -328,6 +349,7 @@ impl TxAlignment {
     pub fn barcode(&self) -> Option<&str> {
         match self {
             TxAlignment::SeAligned { barcode, .. } => Some(barcode.as_str()),
+            TxAlignment::PeAligned { barcode, .. } => Some(barcode.as_str()),
             _ => None,
         }
     }
@@ -335,20 +357,30 @@ impl TxAlignment {
     pub fn umi(&self) -> Option<&str> {
         match self {
             TxAlignment::SeAligned { umi, .. } => umi.as_deref(),
+            TxAlignment::PeAligned { umi, .. } => umi.as_deref(),
             _ => None,
+        }
+    }
+
+    pub fn is_confidently_mapped(&self) -> bool {
+        match self {
+            TxAlignment::SeAligned { .. } | TxAlignment::PeAligned { .. } => true,
+            _ => false,
         }
     }
 
     pub fn is_exonic_only(&self) -> bool {
         match self {
-            TxAlignment::SeAligned { alignment, .. } => alignment.iter().all(|x| x.is_exonic()),
+            TxAlignment::SeAligned { alignment, .. } => alignment.iter().all(|x| x.1.is_exonic()),
+            TxAlignment::PeAligned { alignment, .. } => alignment.iter().all(|x| x.1.is_exonic()),
             _ => false,
         }
     }
 
     pub fn is_intronic_only(&self) -> bool {
         match self {
-            TxAlignment::SeAligned { alignment, .. } => alignment.iter().all(|x| x.is_intronic()),
+            TxAlignment::SeAligned { alignment, .. } => alignment.iter().all(|x| x.1.is_intronic()),
+            TxAlignment::PeAligned { alignment, .. } => alignment.iter().all(|x| x.1.is_intronic()),
             _ => false,
         }
     }
@@ -358,8 +390,12 @@ impl TxAlignment {
     pub fn is_spanning(&self) -> bool {
         match self {
             TxAlignment::SeAligned { alignment, .. } => {
-                alignment.iter().any(|x| x.is_spanning())
-                    && alignment.iter().all(|x| !x.is_exonic())
+                alignment.iter().any(|x| x.1.is_spanning())
+                    && alignment.iter().all(|x| !x.1.is_exonic())
+            }
+            TxAlignment::PeAligned { alignment, .. } => {
+                alignment.iter().any(|x| x.1.is_spanning())
+                    && alignment.iter().all(|x| !x.1.is_exonic())
             }
             _ => false,
         }
@@ -368,6 +404,7 @@ impl TxAlignment {
     pub fn to_fragments(&self) -> Box<dyn Iterator<Item = Fragment> + '_> {
         match self {
             TxAlignment::SeAligned { read, .. } => Box::new(read.to_fragments()),
+            TxAlignment::PeAligned { read1, read2, .. } => Box::new(read1.to_fragments().chain(read2.to_fragments())),
             _ => Box::new(std::iter::empty()),
         }
     }
@@ -415,7 +452,11 @@ impl TxAligner {
         ) -> impl Iterator<Item = Option<TxAlignment>> + 'a {
             records.into_iter().map(move |(read1, read2)| {
                 if read1.is_some() && read2.is_some() {
-                    tx_aligner._align_pe(read1.as_ref().unwrap(), read2.as_ref().unwrap())
+                    tx_aligner._align_pe(
+                        read1.as_ref().unwrap(),
+                        read2.as_ref().unwrap(),
+                        strandedness,
+                    )
                 } else if read1.is_some() {
                     tx_aligner._align_se(read1.as_ref().unwrap(), false, strandedness)
                 } else {
@@ -443,8 +484,9 @@ impl TxAligner {
     /// mapped to a single gene. The confident alignment will be returned if found.
     ///
     /// # Arguments
-    /// * `header` - Reference to the SAM header.
     /// * `multi_map` - Vector of single-end alignment records.
+    /// * `is_read2` - Indicates if the read is the second read in a paired-end alignment.
+    /// * `strandedness` - The strandedness of the RNA-seq data.
     ///
     /// Returns `Some(AnnotatedAlignment)` if a confident alignment is found, otherwise `None`.
     fn _align_se(
@@ -465,8 +507,10 @@ impl TxAligner {
         if aln.is_empty() {
             None
         } else if aln.iter().all(|(_, items)| items.is_empty()) {
+            // All alignments are intergenic
             Some(TxAlignment::Intergenic)
         } else {
+            // Count the number of unique genes that the read maps to transcriptomically (i.e., sense and not discordant)
             let num_unique_genes: usize = aln
                 .iter()
                 .flat_map(|(_, items)| {
@@ -491,7 +535,7 @@ impl TxAligner {
                         .iter()
                         .flat_map(|(_, items)| {
                             items.iter().filter_map(|x| {
-                                if x.is_discordant() {
+                                if x.align_type.is_discordant() {
                                     None
                                 } else {
                                     Some(x.strand == Orientation::Antisense)
@@ -518,7 +562,11 @@ impl TxAligner {
                     .unwrap();
                 Some(TxAlignment::SeAligned {
                     read,
-                    alignment,
+                    gene_id: alignment[0].gene_id.clone(),
+                    alignment: alignment
+                        .into_iter()
+                        .map(|x| (x.transcript_id, x.align_type))
+                        .collect(),
                     barcode,
                     umi: multi_map.umi().unwrap().clone(),
                 })
@@ -526,8 +574,84 @@ impl TxAligner {
         }
     }
 
-    fn _align_pe(&self, multi_map1: &MultiMapR, multi_map2: &MultiMapR) -> Option<TxAlignment> {
-        todo!()
+    fn _align_pe(
+        &self,
+        multi_map1: &MultiMapR,
+        multi_map2: &MultiMapR,
+        strandedness: ChemistryStrandedness,
+    ) -> Option<TxAlignment> {
+        let barcode = multi_map1.barcode().unwrap()?.clone();
+        let mut has_antisense = false;
+        let mut has_discordant = false;
+        let mut multimapped = false;
+        let mut gene_id = None;
+        let aln: Vec<_> = multi_map1
+            .iter()
+            .zip(multi_map2.iter())
+            .flat_map(|(rec1, rec2)| {
+                let mut alignments: Vec<(String, AlignType)> = Vec::new();
+                let rec1 = SplicedRecord::new(rec1, &self.header, false).unwrap()?;
+                let rec2 = SplicedRecord::new(rec2, &self.header, true).unwrap()?;
+                let aln1: HashMap<_, _> = self
+                    ._align_one(&rec1, strandedness)
+                    .into_iter()
+                    .map(|x| (x.transcript_id.clone(), x))
+                    .collect();
+                self._align_one(&rec2, strandedness).into_iter().for_each(|a2| {
+                    if let Some(a1) = aln1.get(&a2.transcript_id) {
+                        if a1.strand == a2.strand {
+                            if a1.strand == Orientation::Antisense {
+                                has_antisense = true;
+                            } else {
+                                let ty = match (&a1.align_type, a2.align_type) {
+                                    (AlignType::Intronic, AlignType::Intronic) => AlignType::Intronic,
+                                    (AlignType::Exonic, AlignType::Exonic) => AlignType::Exonic,
+                                    (AlignType::Discordant, _) | (_, AlignType::Discordant) => AlignType::Discordant,
+                                    _ => AlignType::Spanning,
+                                };
+                                if ty == AlignType::Discordant {
+                                    has_discordant = true;
+                                } else {
+                                    if let Some(gid) = &gene_id {
+                                        if gid != &a1.gene_id {
+                                            multimapped = true;
+                                        }
+                                    } else {
+                                        gene_id = Some(a1.gene_id.clone());
+                                    }
+                                    alignments.push((a1.transcript_id.clone(), ty));
+                                }
+                            }
+                        }
+                    }
+                });
+                Some((rec1, rec2, alignments))
+            }).collect();
+
+        if aln.is_empty() {
+            None
+        } else if multimapped {
+            Some(TxAlignment::Multimapped)
+        } else if gene_id.is_none() {
+            if has_discordant {
+                Some(TxAlignment::Discordant)
+            } else if has_antisense {
+                Some(TxAlignment::Antisense)
+            } else {
+                Some(TxAlignment::Intergenic)
+            }
+        } else {
+            // Now we know there's exactly one gene, we choose the first non-discordant alignment
+            let (read1, read2, alignment) = aln.into_iter().next().unwrap();
+            Some(TxAlignment::PeAligned {
+                read1,
+                read2,
+                gene_id: gene_id.unwrap(),
+                alignment,
+                barcode,
+                umi: multi_map1.umi().unwrap().clone(),
+            })
+        }
     }
 
     fn _align_one(

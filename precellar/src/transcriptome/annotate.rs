@@ -46,12 +46,12 @@ impl AlignmentGroup<'_> {
                 .0
                 .iter()
                 .flat_map(|x| x.alignments())
-                .sorted_by(|a, b| a.transcript_id.cmp(&b.transcript_id))
-                .chunk_by(|x| x.transcript_id.clone());
+                .sorted_by(|a, b| a.0.cmp(&b.0))
+                .chunk_by(|x| x.0.clone());
             if transcript_groups.into_iter().all(|(_, group)| {
                 group
                     .into_iter()
-                    .any(|x| x.is_intronic() || x.is_spanning())
+                    .any(|x| x.1.is_intronic() || x.1.is_spanning())
             }) {
                 Annotation::Unspliced
             } else {

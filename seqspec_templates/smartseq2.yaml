@@ -110,7 +110,7 @@ library_spec:
     sequence_type: random
     sequence: X
     min_len: 1
-    max_len: 98
+    max_len: 1000
     onlist: null
     regions: null
     parent_id: RNA
