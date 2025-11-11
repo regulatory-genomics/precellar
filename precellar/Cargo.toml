@@ -11,7 +11,7 @@ anndata-hdf5 = "0.5.2"
 bed-utils = { git = "https://github.com/kaizhang/bed-utils.git", rev = "c2b90997086622d9e07de96aa59aedd8ff88fe30" }
 bwa-mem2 = { git = "https://github.com/regulatory-genomics/bwa-mem2-rust.git", rev = "e3b64904adcb379b3814f6408796fd371d56e5cf" }
 star-aligner = { git = "https://github.com/regulatory-genomics/star-aligner", rev = "ff62b1d7d6ccbade4396398960ffcb1eb3d629e7" }
-minimap2 = "0.1"
+minimap2 = "0.1.27"
 smallvec = "1.15"
 bstr = "1.12"
 itertools = "0.14"
