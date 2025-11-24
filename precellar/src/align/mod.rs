@@ -3,6 +3,7 @@
 mod aligners;
 mod fastq;
 mod snv;
+mod wrapper;
 
 pub use aligners::{Aligner, BurrowsWheelerAligner, MultiMap, MultiMapR, StarAligner, Minimap2Aligner};
 pub use fastq::{extend_fastq_record, AnnotatedFastq, Barcode, FastqProcessor, AlignmentResult, NameCollatedRecords};
