@@ -7,36 +7,6 @@ use noodles::sam::alignment::record::cigar::Op;
 use noodles::fastq;
 use std::path::PathBuf;
 
-/// Parse a CIGAR string (e.g., "10M2I5D") into a vector of CIGAR operations
-fn parse_cigar_string(cigar_str: &str) -> Result<Vec<Op>> {
-    let mut ops = Vec::new();
-    let mut current_len = 0u32;
-
-    for ch in cigar_str.chars() {
-        if ch.is_ascii_digit() {
-            current_len = current_len * 10 + ch.to_digit(10).unwrap();
-        } else {
-            let kind = match ch {
-                'M' => Kind::Match,
-                'I' => Kind::Insertion,
-                'D' => Kind::Deletion,
-                'N' => Kind::Skip,
-                'S' => Kind::SoftClip,
-                'H' => Kind::HardClip,
-                'P' => Kind::Pad,
-                '=' => Kind::SequenceMatch,
-                'X' => Kind::SequenceMismatch,
-                _ => return Err(anyhow::anyhow!("Invalid CIGAR operation: {}", ch)),
-            };
-
-            ops.push(Op::new(kind, current_len as usize));
-            current_len = 0;
-        }
-    }
-
-    Ok(ops)
-}
-
 /// Options for Minimap2 aligner
 #[derive(Clone)]
 pub struct Minimap2Opts {
@@ -103,9 +73,10 @@ impl Minimap2Aligner {
     pub fn align_read(&mut self, record: &fastq::Record) -> Result<Vec<RecordBuf>> {
         let seq = record.sequence();
         let name = record.name();
+        let qual = record.quality_scores();
 
         // Map the sequence using the minimap2 API
-        // Parameters: seq, cs (long cs tag), md (MD tag), max_frag_len, extra_flags, query_name
+        // Parameters: seq, cs (long cs tag), md (MD tag), max_frag_len, extra_flags, query_name (default values)
         let mappings = self.aligner.map(
             seq,
             false,  // cs - long cs tag
@@ -121,12 +92,50 @@ impl Minimap2Aligner {
         for mapping in mappings {
             let mut record_buf = RecordBuf::default();
 
+            // Set flags
+            let mut flags = noodles::sam::alignment::record::Flags::empty();
+            let is_reverse = mapping.strand == minimap2::Strand::Reverse;
+
+            if is_reverse {
+                flags |= noodles::sam::alignment::record::Flags::REVERSE_COMPLEMENTED;
+            }
+            if !mapping.is_primary {
+                flags |= noodles::sam::alignment::record::Flags::SECONDARY;
+            }
+            if mapping.is_supplementary {
+                flags |= noodles::sam::alignment::record::Flags::SUPPLEMENTARY;
+            }
+            *record_buf.flags_mut() = flags;
+
             // Set name (Option<BString>)
             *record_buf.name_mut() = Some(name.to_vec().into());
-            // Set sequence (using Vec<u8> then into())
-            *record_buf.sequence_mut() = seq.to_vec().into();
-            // Set quality scores (using Vec<u8> then into())
-            *record_buf.quality_scores_mut() = record.quality_scores().to_vec().into();
+
+            // For reverse-complemented alignments, sequence and quality scores of SAM record should be reversed as well
+            if is_reverse {
+                let rc_seq: Vec<u8> = seq.iter()
+                    .rev()
+                    .map(|&b| match b {
+                        b'A' => b'T', b'C' => b'G', b'G' => b'C', b'T' => b'A',
+                        b'a' => b't', b'c' => b'g', b'g' => b'c', b't' => b'a',
+                        b'N' => b'N', b'n' => b'n',
+                        _ => b,
+                    })
+                    .collect();
+                *record_buf.sequence_mut() = rc_seq.into();
+
+                let rev_qual: Vec<u8> = qual.iter()
+                    .rev()
+                    .map(|&b| b.saturating_sub(33)) // NOTE: Decode FASTQ ASCII (Phred+33) to raw Phred score required by RecordBuf
+                    .collect();
+                *record_buf.quality_scores_mut() = rev_qual.into();
+            } else {
+                *record_buf.sequence_mut() = seq.to_vec().into();
+                
+                let decoded_qual: Vec<u8> = qual.iter()
+                    .map(|&b| b.saturating_sub(33)) // NOTE: Decode FASTQ ASCII (Phred+33) to raw Phred score required by RecordBuf
+                    .collect();
+                *record_buf.quality_scores_mut() = decoded_qual.into();
+            }   
 
             // Set mapping information
             if let Some(target_name) = &mapping.target_name {
@@ -151,31 +160,65 @@ impl Minimap2Aligner {
                 *record_buf.mapping_quality_mut() = Some(mq);
             }
 
-            // Set flags
-            let mut flags = noodles::sam::alignment::record::Flags::empty();
-            if mapping.strand == minimap2::Strand::Reverse {
-                flags |= noodles::sam::alignment::record::Flags::REVERSE_COMPLEMENTED;
-            }
-            if !mapping.is_primary {
-                flags |= noodles::sam::alignment::record::Flags::SECONDARY;
-            }
-            if mapping.is_supplementary {
-                flags |= noodles::sam::alignment::record::Flags::SUPPLEMENTARY;
-            }
-            *record_buf.flags_mut() = flags;
-
             // Add alignment information if available
             if let Some(ref alignment) = mapping.alignment {
-                // Parse and set CIGAR string
-                if let Some(cigar_string) = &alignment.cigar_str {
-                    match parse_cigar_string(cigar_string) {
-                        Ok(ops) => {
-                            *record_buf.cigar_mut() = ops.into_iter().collect();
-                        }
-                        Err(e) => {
-                            eprintln!("Failed to parse CIGAR string '{}': {}", cigar_string, e);
-                        }
+                // Set CIGAR from pre-parsed minimap2 cigar operations
+                // Note: minimap2's CIGAR doesn't include soft clips for unaligned query regions
+                // We need to add them based on query_start and query_end (both 0-based)
+                if let Some(cigar_ops) = &alignment.cigar {
+                    let mut ops: Vec<Op> = Vec::new();
+
+                    // Calculate leading and trailing soft clip sizes
+                    let query_len = mapping.query_len.map(|l| l.get() as i32).unwrap_or(seq.len() as i32);
+
+                    let leading_clip = if mapping.query_start > 0 {
+                        mapping.query_start as usize
+                    } else {
+                        0
+                    };
+                    let trailing_clip = if mapping.query_end < query_len {
+                        (query_len - mapping.query_end) as usize
+                    } else {
+                        0
+                    };
+
+                    // For reverse-complemented alignments, swap the soft clip positions
+                    // Add leading soft clip (or trailing if reverse)
+                    if is_reverse && trailing_clip > 0 {
+                        ops.push(Op::new(Kind::SoftClip, trailing_clip));
+                    } else if !is_reverse && leading_clip > 0 {
+                        ops.push(Op::new(Kind::SoftClip, leading_clip));
                     }
+
+                    // Add minimap2 CIGAR operations
+                    for (len, op_type) in cigar_ops {
+                        if *len == 0 {
+                            continue
+                        }
+
+                        let kind = match op_type {
+                            0 => Kind::Match,           // M - Match/Mismatch
+                            1 => Kind::Insertion,       // I - Insertion
+                            2 => Kind::Deletion,        // D - Deletion
+                            3 => Kind::Skip,            // N - Skip (intron)
+                            4 => Kind::SoftClip,        // S - Soft clip
+                            5 => Kind::HardClip,        // H - Hard clip
+                            6 => Kind::Pad,             // P - Pad
+                            7 => Kind::SequenceMatch,   // = - Sequence match
+                            8 => Kind::SequenceMismatch, // X - Sequence mismatch
+                            _ => Kind::Match,           // Default to match for unknown types
+                        };
+                        ops.push(Op::new(kind, *len as usize));
+                    }
+
+                    // Add trailing soft clip (or leading if reverse)
+                    if is_reverse && leading_clip > 0 {
+                        ops.push(Op::new(Kind::SoftClip, leading_clip));
+                    } else if !is_reverse && trailing_clip > 0 {
+                        ops.push(Op::new(Kind::SoftClip, trailing_clip));
+                    }
+
+                    *record_buf.cigar_mut() = ops.into_iter().collect();
                 }
 
                 // Add alignment score if available
@@ -282,9 +325,10 @@ mod tests {
         // Write alignments to output SAM file
         let output_file = File::create(&output_sam_path)?;
         let mut writer = sam::io::Writer::new(output_file);
+
         writer.write_header(&header)?;
 
-        for alignment in &all_alignments {
+        for alignment in all_alignments.iter() {
             writer.write_alignment_record(&header, alignment)?;
         }
 
