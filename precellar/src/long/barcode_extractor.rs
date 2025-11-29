@@ -7,9 +7,25 @@ use seqspec::region::{LibSpec, Region};
 use seqspec::Modality;
 
 use super::{
-    find_innermost_regions, EndRegions, LongReadBarcodeResult,
+    find_innermost_regions, EndRegions,
     sequence_aligner::{FittingAligner, FixedSequenceAlignment, find_non_overlapping_alignments, fitting_alignment_distance}
 };
+
+/// Long-read barcode extraction result
+#[derive(Debug, Clone)]
+pub struct LongReadBarcodeResult {
+    /// Extracted barcode sequence (standardized from whitelist)
+    pub barcode: Option<Vec<u8>>,
+    /// Extraction confidence (0.0 if no barcode extracted)
+    pub confidence: f64,
+}
+
+impl LongReadBarcodeResult {
+    /// Whether extraction was successful
+    pub fn is_success(&self) -> bool {
+        self.barcode.is_some()
+    }
+}
 
 /// Successfully extracted barcode with metadata
 #[derive(Debug, Clone)]
@@ -364,17 +380,34 @@ pub struct BarcodeExtractor {
     five_prime_regions: EndRegions,
     three_prime_regions: EndRegions,
     barcode_locator: BarcodeLocator,
+    /// Barcode whitelists: String for region_id
+    whitelists: IndexMap<String, IndexSet<Vec<u8>>>,
 }
 
 impl BarcodeExtractor {
-    /// Create a new barcode extractor for the given library_spec and modality.
-    pub fn new(lib_spec: &LibSpec, modality: &Modality) -> Result<Self> {
+    /// Create a new barcode extractor for the given library_spec, modality, and whitelists.
+    pub fn new(
+        lib_spec: &LibSpec, 
+        modality: &Modality,
+        whitelists: IndexMap<String, IndexSet<Vec<u8>>>,
+    ) -> Result<Self> {
+        // Check that all barcode regions have non-empty whitelists
+        for (region_id, whitelist) in &whitelists {
+            if whitelist.is_empty() {
+                anyhow::bail!(
+                    "Barcode region '{}' does not have a whitelist. Long-read processing requires all barcode regions to have whitelists.", 
+                    region_id
+                );
+            }
+        }
+
         let (five_prime_regions, three_prime_regions) = find_innermost_regions(lib_spec, modality)?;
         
         Ok(Self {
             five_prime_regions,
             three_prime_regions,
             barcode_locator: BarcodeLocator::new(),
+            whitelists,
         })
     }
 
@@ -382,7 +415,6 @@ impl BarcodeExtractor {
     pub fn extract_barcode(
         &self,
         record: &noodles::fastq::Record,
-        whitelists: &IndexMap<String, IndexSet<Vec<u8>>>,
     ) -> Result<LongReadBarcodeResult> {
         let sequence = record.sequence();
         let quality = record.quality_scores();
@@ -396,20 +428,25 @@ impl BarcodeExtractor {
         // Step 2 & 3: Process 5' end
         if let Some((seq, _qual)) = five_prime_segment {
             let barcode_results = self
-                .process_end_for_barcode(&seq, &self.five_prime_regions, whitelists)?;
+                .process_end_for_barcode(&seq, &self.five_prime_regions, &self.whitelists)?;
             extracted_barcodes.extend(barcode_results);
         }
 
         // Step 2 & 3: Process 3' end  
         if let Some((seq, _qual)) = three_prime_segment {
             let barcode_results = self
-                .process_end_for_barcode(&seq, &self.three_prime_regions, whitelists)?;
+                .process_end_for_barcode(&seq, &self.three_prime_regions, &self.whitelists)?;
             extracted_barcodes.extend(barcode_results);
         }
 
         // Step 4: Combine multiple barcodes if present
         let final_result = self.combine_barcodes(extracted_barcodes)?;
         Ok(final_result)
+    }
+
+    /// Get whitelists reference for external access
+    pub fn whitelists(&self) -> &IndexMap<String, IndexSet<Vec<u8>>> {
+        &self.whitelists
     }
 
     /// Process one end to extract all valid barcodes.
@@ -515,7 +552,6 @@ impl BarcodeExtractor {
             return Ok(LongReadBarcodeResult {
                 barcode: None,
                 confidence: 0.0,
-                success: false,
             });
         }
 
@@ -524,7 +560,6 @@ impl BarcodeExtractor {
             return Ok(LongReadBarcodeResult {
                 barcode: Some(barcode.barcode.clone()),
                 confidence: barcode.confidence,
-                success: true,
             });
         }
 
@@ -542,7 +577,6 @@ impl BarcodeExtractor {
         Ok(LongReadBarcodeResult {
             barcode: Some(combined_barcode),
             confidence: average_confidence,
-            success: true,
         })
     }
 }

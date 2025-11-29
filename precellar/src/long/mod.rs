@@ -1,5 +1,4 @@
-use anyhow::{anyhow, bail, Result};
-use indexmap::{IndexMap, IndexSet};
+use anyhow::{anyhow, Result};
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
@@ -7,57 +6,8 @@ pub mod barcode_extractor;
 pub mod sequence_aligner;
 
 use seqspec::region::{Region, LibSpec};
+pub use barcode_extractor::{BarcodeExtractor, LongReadBarcodeResult};
 
-/// Long-read barcode extraction result
-#[derive(Debug, Clone)]
-pub struct LongReadBarcodeResult {
-    /// Extracted barcode sequence (standardized from whitelist)
-    pub barcode: Option<Vec<u8>>,
-    /// Extraction confidence
-    pub confidence: f64,
-    /// Whether extraction was successful
-    pub success: bool,
-}
-
-/// Main interface for long-read processing
-#[derive(Debug)]
-pub struct LongReadProcessor {
-    /// Barcode whitelists: String for region_id
-    whitelists: IndexMap<String, IndexSet<Vec<u8>>>,
-}
-
-impl LongReadProcessor {
-    /// Create a new long-read processor
-    pub fn new(
-        whitelists: IndexMap<String, IndexSet<Vec<u8>>>,
-    ) -> Result<Self> {
-        // Check that all barcode regions have non-empty whitelists
-        for (region_id, whitelist) in &whitelists {
-            if whitelist.is_empty() {
-                bail!(
-                    "Barcode region '{}' does not have a whitelist. Long-read processing requires all barcode regions to have whitelists.", 
-                    region_id
-                );
-            }
-        }
-        
-        Ok(Self {
-            whitelists,
-        })
-    }
-
-    /// Extract barcode from FASTQ record
-    pub fn extract_barcode(
-        &self,
-        record: &noodles::fastq::Record,
-        lib_spec: &LibSpec,
-        modality: &seqspec::Modality,
-    ) -> Result<LongReadBarcodeResult> {
-        let extractor = barcode_extractor::BarcodeExtractor::new(lib_spec, modality)?;
-
-        extractor.extract_barcode(record, &self.whitelists)
-    }
-}
 
 /// End type information for describing 5' or 3' end of sequence
 #[derive(Debug, Clone, PartialEq)]
@@ -207,6 +157,7 @@ pub fn find_innermost_regions(lib_spec: &LibSpec, modality: &seqspec::Modality) 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use indexmap::{IndexMap, IndexSet};
     use seqspec::region::Region;
     use seqspec::{Modality, RegionType, SequenceType};
 
@@ -388,7 +339,8 @@ mod tests {
         };
 
         let lib_spec = LibSpec::new(vec![modality_region]).unwrap();
-        let processor = LongReadProcessor::new(whitelists).unwrap();
+    
+        let extractor = BarcodeExtractor::new(&lib_spec, &Modality::RNA, whitelists).unwrap();
 
         // Test sequences with indels and mismatches
         // Record 1: Perfect match with barcode1, 1 mismatch in fixed region
@@ -436,29 +388,29 @@ mod tests {
         );
 
         // Test barcode extraction
-        let result1 = processor.extract_barcode(&record1, &lib_spec, &Modality::RNA).unwrap();
-        let result2 = processor.extract_barcode(&record2, &lib_spec, &Modality::RNA).unwrap();
-        let result3 = processor.extract_barcode(&record3, &lib_spec, &Modality::RNA).unwrap();
-        let result4 = processor.extract_barcode(&record4, &lib_spec, &Modality::RNA).unwrap();
+        let result1 = extractor.extract_barcode(&record1).unwrap();
+        let result2 = extractor.extract_barcode(&record2).unwrap();
+        let result3 = extractor.extract_barcode(&record3).unwrap();
+        let result4 = extractor.extract_barcode(&record4).unwrap();
 
         // Verify results
         // Record 1 should successfully extract barcode1
-        assert!(result1.success, "Record 1 should successfully extract barcode");
+        assert!(result1.is_success(), "Record 1 should successfully extract barcode");
         assert!(result1.barcode.is_some(), "Record 1 should have extracted barcode");
         assert_eq!(result1.barcode.unwrap(), barcode1.as_bytes(), "Record 1 should match barcode1");
         
         // Record 2 should successfully extract barcode2 (despite deletion)
-        assert!(result2.success, "Record 2 should successfully extract barcode");
+        assert!(result2.is_success(), "Record 2 should successfully extract barcode");
         assert!(result2.barcode.is_some(), "Record 2 should have extracted barcode");
         assert_eq!(result2.barcode.unwrap(), barcode2.as_bytes(), "Record 2 should match barcode2");
         
         // Record 3 should successfully extract barcode3 (despite mismatches)
-        assert!(result3.success, "Record 3 should successfully extract barcode");
+        assert!(result3.is_success(), "Record 3 should successfully extract barcode");
         assert!(result3.barcode.is_some(), "Record 3 should have extracted barcode");
         assert_eq!(result3.barcode.unwrap(), barcode3.as_bytes(), "Record 3 should match barcode3");
         
         // Record 4 should fail to extract any barcode
-        assert!(!result4.success, "Record 4 should fail to extract barcode");
+        assert!(!result4.is_success(), "Record 4 should fail to extract barcode");
         assert!(result4.barcode.is_none(), "Record 4 should not have extracted barcode");
         
         println!("All barcode extraction tests with indels/mismatches passed!");
