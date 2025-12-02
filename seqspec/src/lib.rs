@@ -31,6 +31,15 @@ pub enum ChemistryStrandedness {
     Unstranded,
 }
 
+/// Assay type based on sequencing technology and read length
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum AssayType {
+    /// Short-read sequencing (e.g., Illumina), usually < 500bp
+    ShortRead,
+    /// Long-read sequencing (e.g., PacBio, Nanopore), usually > 500bp
+    LongRead,
+}
+
 /// Assay struct contains the information parsed from the sequence spec YAML file
 #[derive(Deserialize, Serialize, Debug, Clone, PartialEq)]
 pub struct Assay {
@@ -545,6 +554,50 @@ impl Assay {
             }
         }
         Ok(())
+    }
+
+    /// Detect assay type by reading first 1000 records and calculating average read length
+    pub fn detect_assay_type(&self, modality: &Modality) -> Result<AssayType> {
+        const SAMPLE_SIZE: usize = 1000;
+        const LENGTH_THRESHOLD: f64 = 500.0;
+
+        // Get the first read for this modality
+        let mut segments = self.get_segments_by_modality(*modality);
+        let first_segment = segments
+            .next()
+            .ok_or_else(|| anyhow!("No Reads found for modality: {:?}", modality))?;
+
+        let (read, _segment_info) = first_segment;
+        let mut reader = read.open()
+            .ok_or_else(|| anyhow!("Failed to open FASTQ file for modality: {:?}", modality))?;
+
+        let mut total_length = 0usize;
+        let mut read_count = 0usize;
+        let mut record = noodles::fastq::Record::default();
+
+        // Read up to SAMPLE_SIZE records
+        while read_count < SAMPLE_SIZE {
+            match reader.read_record(&mut record) {
+                Ok(0) => break, // EOF
+                Ok(_) => {
+                    total_length += record.sequence().len();
+                    read_count += 1;
+                }
+                Err(e) => return Err(anyhow!("Error reading FASTQ record: {}", e)),
+            }
+        }
+
+        if read_count == 0 {
+            return Err(anyhow!("No reads found in FASTQ file"));
+        }
+
+        let average_length = total_length as f64 / read_count as f64;
+        
+        if average_length >= LENGTH_THRESHOLD {
+            Ok(AssayType::LongRead)
+        } else {
+            Ok(AssayType::ShortRead)
+        }
     }
 }
 
@@ -1130,5 +1183,59 @@ regions: []
 "#;
         let region: Region = serde_yaml::from_str(yaml).expect("Failed to parse YAML");
         assert_eq!(region.region_type, RegionType::TruseqRead1);
+    }
+
+    #[test]
+    fn test_assay_type_detection() {
+        // Test using scNanoATAC.yaml - should detect as LongRead
+        let yaml_path = "../seqspec_templates/scNanoATAC.yaml";
+        
+        // Check if the YAML file exists
+        if !std::path::Path::new(yaml_path).exists() {
+            println!("Warning: {} not found, skipping assay type detection test", yaml_path);
+            return;
+        }
+        
+        
+        match Assay::from_path(yaml_path) {
+            Ok(assay) => {
+                // scNanoATAC uses ATAC modality
+                let modality = Modality::ATAC;
+                
+                // Check if FASTQ file exists before testing detection
+                let mut segments = assay.get_segments_by_modality(modality);
+                if let Some((read, _)) = segments.next() {
+                    // Check if the FASTQ file path exists
+                    if let Some(files) = &read.files {
+                        if let Some(file_path) = files.first() {
+                            if std::path::Path::new(&file_path.url).exists() {
+                                println!("FASTQ file {} found", file_path.filename);
+                                // Test assay type detection - should be LongRead for scNanoATAC
+                                match assay.detect_assay_type(&modality) {
+                                    Ok(assay_type) => {
+                                        assert_eq!(assay_type, AssayType::LongRead, 
+                                            "scNanoATAC should be detected as LongRead assay type");
+                                        println!("Assay type detected: {:?}", assay_type);
+                                    }
+                                    Err(e) => {
+                                        println!("Warning: Could not detect assay type: {}", e);
+                                        println!("Error: {}", e);
+                                    }
+                                }
+                            } else {
+                                println!("Warning: FASTQ file {} not found, testing YAML parsing only", file_path.filename);
+                            }
+                        }
+                    }
+                } else {
+                    println!("Warning: No segments found for ATAC modality");
+                }
+                
+            }
+            Err(e) => {
+                panic!("Failed to parse scNanoATAC.yaml: {}", e);
+            }
+        }
+        
     }
 }

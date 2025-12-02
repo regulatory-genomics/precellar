@@ -12,7 +12,23 @@ library_protocol: Custom
 library_kit: Custom
 sequence_protocol: Oxfold Nanopore
 sequence_kit: Custom
-sequence_spec: []
+sequence_spec:
+- !Read
+  read_id: R1
+  name: Read 1
+  modality: atac
+  primer_id: mix_seq
+  min_len: 1000
+  max_len: 2147483647
+  strand: pos
+  files:
+  - file_id: SRR17666426.fastq
+    filename: SRR17666426.fastq
+    filetype: fastq
+    filesize: 0
+    url: /data/scNanoATAC/K562/SRR17666426.fastq
+    urltype: local
+    md5: ""
 library_spec:
 - !Region
   region_id: atac
@@ -26,7 +42,7 @@ library_spec:
   regions:
   - !Region
     region_id: mix_seq
-    region_type: mix_seq
+    region_type: custom_primer
     name: mixture sequence
     sequence_type: random
     sequence: XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
@@ -43,15 +59,17 @@ library_spec:
     min_len: 1000
     max_len: 2147483647
     onlist: null
+    regions: null
   - !Region
     region_id: adapter
-    region_type: adapter
+    region_type: named
     name: adapter
     sequence_type: fixed
     sequence: CTGTCTCTTATACACATCTGACGCTGCCGACGA
     min_len: 33
     max_len: 33
     onlist: null
+    regions: null
   - !Region
     region_id: inner barcode
     region_type: barcode
@@ -61,14 +79,15 @@ library_spec:
     min_len: 24
     max_len: 24
     onlist: !Onlist
-      file_id: inner_barcode.txt.gz
-      filename: inner_barcode.txt.gz
+      file_id: 96_barcode.txt
+      filename: 96_barcode.txt
       filetype: txt
       filesize: 0
-      url: https://osf.io/download/inner_barcode.txt.gz
-      urltype: https
-      md5: null
-      location: remote
+      url: /data/scNanoATAC/96_barcode.txt
+      urltype: local
+      md5: ""
+      location: local
+    regions: null
   - !Region
     region_id: linker
     region_type: linker
@@ -88,6 +107,15 @@ library_spec:
     min_len: 24
     max_len: 24
     onlist: !Onlist
+      file_id: 96_barcode.txt
+      filename: 96_barcode.txt
+      filetype: txt
+      filesize: 0
+      url: /data/scNanoATAC/96_barcode.txt
+      urltype: local
+      md5: ""
+      location: local
+    regions: null
   - !Region
     region_id: end_linker
     region_type: linker
