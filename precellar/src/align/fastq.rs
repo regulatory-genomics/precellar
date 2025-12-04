@@ -1,6 +1,7 @@
 use super::aligners::{Aligner, MultiMap, MultiMapR};
 
 use crate::barcode::{BarcodeAnalyzer, BarcodeCorrectOptions};
+use crate::long::BarcodeExtractor;
 use crate::qc::{QcAlign, QcFastq};
 use crate::utils::{rev_compl_fastq_record, PrefetchIterator};
 use anyhow::Result;
@@ -10,10 +11,11 @@ use log::{debug, info};
 use noodles::{bam, fastq};
 use rayon::iter::ParallelIterator;
 use rayon::slice::ParallelSlice;
-use seqspec::{Assay, FastqReader, Modality, SegmentInfo, SplitError};
+use seqspec::{Assay, AssayType, FastqReader, Modality, SegmentInfo, SplitError};
 use smallvec::SmallVec;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
+use indexmap::{IndexMap, IndexSet};
 
 /// FastqProcessor manages the preprocessing of FASTQ files including barcode correction,
 /// alignment, and QC metrics.
@@ -94,12 +96,13 @@ impl FastqProcessor {
         chunk_size: usize,
     ) -> AlignmentResult<'a, A> {
         let fq_reader = self.gen_barcoded_fastq(true, chunk_size);
-        let n_reads: String = fq_reader
-            .readers
-            .iter()
-            .map(|r| indicatif::HumanCount(r.barcode_analyzer.num_reads() as u64).to_string())
-            .intersperse(" + ".to_string())
-            .collect();
+        let n_reads: String = itertools::Itertools::intersperse(
+            fq_reader
+                .readers
+                .iter()
+                .map(|r| indicatif::HumanCount(r.num_reads() as u64).to_string()),
+            " + ".to_string()
+        ).collect();
         info!("Aligning {} reads to reference genome ...", n_reads);
         let result = AlignmentResult::new(aligner, fq_reader, &self.mito_dna, num_threads);
         self.qc_align.insert(self.modality(), result.qc.clone());
@@ -125,31 +128,126 @@ impl FastqProcessor {
                     if num_assays > 1 {
                         info!(">>>Processing assay {}/{}<<<", i + 1, num_assays);
                     }
+                    // Detect assay type
+                    let assay_type = match assay.detect_assay_type(&modality) {
+                        Ok(assay_type) => {
+                            info!("Detected assay type: {:?}", assay_type);
+                            assay_type
+                        }
+                        Err(e) => {
+                            log::warn!("Failed to detect assay type, defaulting to short-read: {}", e);
+                            AssayType::ShortRead
+                        }
+                    };
 
-                    let mut barcode_analyzer = BarcodeAnalyzer::new(assay, modality);
-                    barcode_analyzer.summary();
-                    if correct_barcode {
-                        barcode_analyzer.barcode_correct_options = Some(BarcodeCorrectOptions {
-                            bc_confidence_threshold: self.barcode_correct_prob,
-                            max_mismatch: self.mismatch_in_barcode,
-                            ..Default::default()
-                        });
+                    match assay_type {
+                        AssayType::ShortRead => {
+                            // Create short-read reader
+                            let mut barcode_analyzer = BarcodeAnalyzer::new(assay, modality);
+                            barcode_analyzer.summary();
+                            if correct_barcode {
+                                barcode_analyzer.barcode_correct_options = Some(BarcodeCorrectOptions {
+                                    bc_confidence_threshold: self.barcode_correct_prob,
+                                    max_mismatch: self.mismatch_in_barcode,
+                                    ..Default::default()
+                                });
+                            }
+
+                            let readers = assay.get_segments_by_modality(modality).filter_map(
+                                |(read, segment_info)| {
+                                    let annotator = FastqAnnotator::new(
+                                        &read.read_id,
+                                        segment_info,
+                                    )?;
+                                    let reader = read.open()?;
+                                    Some((annotator, reader))
+                                },
+                            );
+                            let reader = AnnotatedFastqReader::new(readers, self.get_fastq_qc().clone(), barcode_analyzer, chunk_size);
+                            AnnotatedFqReaderType::ShortRead(reader)
+                        }
+                        AssayType::LongRead => {                         
+                            // Extract whitelists for long-read processing
+                            let whitelists = match self.extract_whitelists_for_long_read(assay, modality) {
+                                Ok(whitelists) => whitelists,
+                                Err(e) => {
+                                    log::warn!("Failed to extract whitelists for long-read processing: {}", e);
+                                    IndexMap::new()
+                                }
+                            };
+
+                            let readers = assay.get_segments_by_modality(modality).filter_map(
+                                |(read, segment_info)| {
+                                    // Create BarcodeExtractor for this segment
+                                    let barcode_extractor = match BarcodeExtractor::new(
+                                        &assay.library_spec,
+                                        &modality,
+                                        whitelists.clone(),
+                                    ) {
+                                        Ok(extractor) => extractor,
+                                        Err(e) => {
+                                            log::warn!("Failed to create BarcodeExtractor: {}", e);
+                                            return None;
+                                        }
+                                    };
+
+                                    let annotator = LRFqAnnotator::new(
+                                        &read.read_id,
+                                        segment_info,
+                                        barcode_extractor,
+                                    )?;
+                                    let reader = read.open()?;
+                                    Some((annotator, reader))
+                                },
+                            );
+                            let reader = LRAnnotatedFqReader::new(readers, self.get_fastq_qc().clone(), chunk_size);
+                            AnnotatedFqReaderType::LongRead(reader)
+                        }
                     }
-
-                    let readers = assay.get_segments_by_modality(modality).filter_map(
-                        |(read, segment_info)| {
-                            let annotator = FastqAnnotator::new(
-                                &read.read_id,
-                                segment_info,
-                            )?;
-                            let reader = read.open()?;
-                            Some((annotator, reader))
-                        },
-                    );
-                    AnnotatedFastqReader::new(readers, self.get_fastq_qc().clone(), barcode_analyzer, chunk_size)
                 })
                 .collect();
         MultiAnnotatedFqReader::new(result)
+    }
+
+    /// Extract whitelists from assay for long-read processing
+    fn extract_whitelists_for_long_read(
+        &self,
+        assay: &Assay,
+        modality: Modality,
+    ) -> Result<IndexMap<String, IndexSet<Vec<u8>>>> {
+        let mut whitelists = IndexMap::new();
+        
+        // Get the library spec for this modality
+        let lib_spec = &assay.library_spec;
+        if let Some(modality_region) = lib_spec.get_modality(&modality) {
+            let modality_guard = modality_region.read().unwrap();
+            
+            // Traverse all subregions to find barcode regions with onlists
+            for region in &modality_guard.subregions {
+                let region_guard = region.read().unwrap();
+                if region_guard.region_type.is_barcode() {
+                    if let Some(onlist) = &region_guard.onlist {
+                        // Read the whitelist file
+                            match onlist.read() {
+                                Ok(sequences) => {
+                                    let whitelist: IndexSet<Vec<u8>> = sequences
+                                        .into_iter()
+                                        .collect();
+                                    whitelists.insert(region_guard.region_id.clone(), whitelist);
+                                }
+                            Err(e) => {
+                                log::warn!(
+                                    "Failed to read whitelist for region '{}': {}",
+                                    region_guard.region_id, e
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        
+        Ok(whitelists)
     }
 }
 
@@ -234,9 +332,9 @@ impl<'a, A: Aligner> Iterator for AlignmentResult<'a, A> {
     }
 }
 
-/// AnnotatedFastqReaders is formed by concatenating multiple AnnotatedFastqReader instances.
+/// MultiAnnotatedFqReader is formed by concatenating multiple AnnotatedFqReader (short or long read) instances.
 pub struct MultiAnnotatedFqReader {
-    readers: Vec<AnnotatedFastqReader>,
+    readers: Vec<AnnotatedFqReaderType>,
     current: usize,
 }
 
@@ -255,7 +353,7 @@ impl Iterator for MultiAnnotatedFqReader {
 }
 
 impl MultiAnnotatedFqReader {
-    fn new(readers: Vec<AnnotatedFastqReader>) -> Self {
+    fn new(readers: Vec<AnnotatedFqReaderType>) -> Self {
         Self {
             readers,
             current: 0,
@@ -263,7 +361,7 @@ impl MultiAnnotatedFqReader {
     }
 
     pub fn num_records(&self) -> usize {
-        self.readers.iter().map(|x| x.barcode_analyzer.num_reads()).sum()
+        self.readers.iter().map(|x| x.num_reads()).sum()
     }
 
     pub fn is_paired_end(&self) -> Result<bool> {
@@ -272,6 +370,39 @@ impl MultiAnnotatedFqReader {
             .map(|x| x.is_paired_end())
             .all_equal_value()
             .map_err(|_| anyhow::anyhow!("Not all readers are with the same paired-end status"))
+    }
+}
+
+/// Enum to hold either short-read or long-read annotated readers
+enum AnnotatedFqReaderType {
+    ShortRead(AnnotatedFastqReader),
+    LongRead(LRAnnotatedFqReader),
+}
+
+impl AnnotatedFqReaderType {
+    fn is_paired_end(&self) -> bool {
+        match self {
+            AnnotatedFqReaderType::ShortRead(reader) => reader.is_paired_end(),
+            AnnotatedFqReaderType::LongRead(reader) => reader.is_paired_end(),
+        }
+    }
+
+    fn num_reads(&self) -> usize {
+        match self {
+            AnnotatedFqReaderType::ShortRead(reader) => reader.num_reads(),
+            AnnotatedFqReaderType::LongRead(reader) => reader.num_reads(),
+        }
+    }
+}
+
+impl Iterator for AnnotatedFqReaderType {
+    type Item = Vec<AnnotatedFastq>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self {
+            AnnotatedFqReaderType::ShortRead(reader) => reader.next(),
+            AnnotatedFqReaderType::LongRead(reader) => reader.next(),
+        }
     }
 }
 
@@ -327,6 +458,10 @@ impl AnnotatedFastqReader {
         });
         has_read1 && has_read2
     }
+
+    fn num_reads(&self) -> usize {
+        self.barcode_analyzer.num_reads()
+    }
 }
 
 impl Iterator for AnnotatedFastqReader {
@@ -346,6 +481,110 @@ impl Iterator for AnnotatedFastqReader {
             .collect();
         Some(result)
     }
+}
+
+/// Long-read specific AnnotatedFastqReader that uses LRFqAnnotator
+struct LRAnnotatedFqReader {
+    annotators: Vec<LRFqAnnotator>,
+    readers: PrefetchIterator<Vec<SmallVec<[fastq::Record; 4]>>>,
+    qc: Arc<Mutex<QcFastq>>,
+}
+
+impl LRAnnotatedFqReader {
+    fn new<T: IntoIterator<Item = (LRFqAnnotator, FastqReader)>>(
+        iter: T,
+        qc: Arc<Mutex<QcFastq>>,
+        chunk_size: usize,
+    ) -> Self {
+        let (annotators, readers): (Vec<_>, Vec<_>) = iter.into_iter().unzip();
+        Self {
+            annotators,
+            readers: PrefetchIterator::new(
+                BatchedFqReader {
+                    readers,
+                    batch_size: chunk_size,
+                },
+                1,
+            ),
+            qc,
+        }
+    }
+
+    fn is_paired_end(&self) -> bool {
+        let mut has_read1 = false;
+        let mut has_read2 = false;
+        self.annotators.iter().for_each(|x| {
+            x.segment_info.iter().for_each(|info| {
+                if info.region_type.is_target() {
+                    if x.segment_info.is_reverse() {
+                        has_read2 = true;
+                    } else {
+                        has_read1 = true;
+                    }
+                }
+            });
+        });
+        has_read1 && has_read2
+    }
+
+    fn num_reads(&self) -> usize {
+        // For now, return 0 as we don't have a barcode analyzer in LR reader
+        // TODO: implement proper read counting for long reads
+        0
+    }
+}
+
+impl Iterator for LRAnnotatedFqReader {
+    type Item = Vec<AnnotatedFastq>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let chunk = self.readers.next()?;
+        let n = chunk.len();
+        let annotators = &self.annotators;
+        let result: Vec<_> = chunk
+            .par_chunks(n / 128)
+            .flat_map_iter(|chunk| {
+                let (fq, qc) = process_lr_chunk(&annotators, chunk);
+                self.qc.lock().unwrap().extend(std::iter::once(qc));
+                fq
+            })
+            .collect();
+        Some(result)
+    }
+}
+
+fn process_lr_chunk<'a, I: IntoIterator<Item = &'a SmallVec<[fastq::Record; 4]>>>(
+    annotators: &[LRFqAnnotator],
+    chunk: I,
+) -> (Vec<AnnotatedFastq>, QcFastq) {
+    let mut qc = QcFastq::default();
+    let annotated = chunk
+        .into_iter()
+        .flat_map(|records| {
+            let fq = records
+                .iter()
+                .enumerate()
+                .flat_map(|(i, record)| {
+                    let annotator = &annotators[i];
+                    let id = &annotator.read_id;
+                    *qc.num_reads.entry(id.clone()).or_insert(0) += 1;
+                    if let Ok(anno) = annotator.annotate(record) {
+                        Some(anno)
+                    } else {
+                        *qc.num_defect.entry(id.clone()).or_insert(0) += 1;
+                        None
+                    }
+                })
+                .reduce(|mut this, other| {
+                    this.join(other);
+                    this
+                })?;
+            qc.update(&fq);
+            // For long reads, we keep records even without barcodes as they might still be useful
+            Some(fq)
+        })
+        .collect();
+    (annotated, qc)
 }
 
 fn process_chunk<'a, I: IntoIterator<Item = &'a SmallVec<[fastq::Record; 4]>>>(
@@ -512,6 +751,87 @@ impl FastqAnnotator {
         Ok(AnnotatedFastq {
             barcode,
             umi,
+            read1,
+            read2,
+        })
+    }
+}
+
+/// Long-read specific FASTQ annotator that uses BarcodeExtractor for barcode extraction
+#[derive(Debug)]
+struct LRFqAnnotator {
+    read_id: String,
+    segment_info: SegmentInfo,
+    barcode_extractor: BarcodeExtractor,
+}
+
+impl LRFqAnnotator {
+    pub fn new(
+        read_id: impl Into<String>, 
+        segment_info: SegmentInfo,
+        barcode_extractor: BarcodeExtractor,
+    ) -> Option<Self> {
+        if !segment_info.iter().any(|x| {
+            x.region_type.is_barcode() || x.region_type.is_target()
+        }) {
+            None
+        } else {
+            Some(Self {
+                read_id: read_id.into(),
+                segment_info,
+                barcode_extractor,
+            })
+        }
+    }
+
+    /// Annotate a single long-read FASTQ record using BarcodeExtractor
+    fn annotate(&self, record: &fastq::Record) -> Result<AnnotatedFastq, anyhow::Error> {
+        // Extract barcode using the long-read pipeline
+        let lr_result = self.barcode_extractor.extract_barcode(record)?;
+
+        // Convert LongReadBarcodeResult to Barcode struct
+        let barcode = if lr_result.is_success() {
+            if let Some(extracted_bc) = lr_result.barcode {
+                // Create a FASTQ record for the barcode
+                let bc_record = fastq::Record::new(
+                    record.definition().clone(),
+                    extracted_bc.clone(),
+                    vec![b'I'; extracted_bc.len()], // Use default quality scores
+                );
+                Some(Barcode {
+                    raw: bc_record,
+                    corrected: Some(extracted_bc),
+                })
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        // For long reads, the entire sequence is typically the target
+        // Determine if it's read1 or read2 based on segment_info
+        let mut read1 = None;
+        let mut read2 = None;
+        
+        // Check if there are target regions in segment_info
+        let has_target = self.segment_info.iter().any(|x| x.region_type.is_target());
+        
+        if has_target {
+            // Use segment_info to determine read orientation
+            if self.segment_info.is_reverse() {
+                read2 = Some(record.clone());
+            } else {
+                read1 = Some(record.clone());
+            }
+        } else {
+            // Default to read1 for long reads without explicit target regions
+            read1 = Some(record.clone());
+        }
+
+        Ok(AnnotatedFastq {
+            barcode,
+            umi: None, // Long reads typically don't have UMIs
             read1,
             read2,
         })

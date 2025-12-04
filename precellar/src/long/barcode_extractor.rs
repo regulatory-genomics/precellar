@@ -126,6 +126,7 @@ impl AnchorFinder {
 }
 
 /// Barcode locator component responsible for determining barcode extraction ranges
+#[derive(Debug)]
 pub struct BarcodeLocator;
 
 impl BarcodeLocator {
@@ -376,6 +377,7 @@ fn find_best_fitting_match(
 
 /// Main barcode extractor for long reads.
 /// Acts as an orchestrator, delegating tasks to specialized components.
+#[derive(Debug)]
 pub struct BarcodeExtractor {
     five_prime_regions: EndRegions,
     three_prime_regions: EndRegions,
