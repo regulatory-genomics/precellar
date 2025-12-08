@@ -150,7 +150,7 @@ fn make_fastq(
         if i % 1000000 == 0 {
             py.check_signals().unwrap();
         }
-        let Barcode { mut raw, corrected } = record.barcode.unwrap();
+        let Barcode { mut raw, corrected, .. } = record.barcode.unwrap();
         if !correct_barcode || corrected.is_some() {
             if let Some(corrected) = corrected {
                 *raw.sequence_mut() = corrected;

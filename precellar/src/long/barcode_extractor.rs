@@ -451,6 +451,16 @@ impl BarcodeExtractor {
         &self.whitelists
     }
 
+    /// Get 5' end regions for external access
+    pub fn five_prime_regions(&self) -> &EndRegions {
+        &self.five_prime_regions
+    }
+
+    /// Get 3' end regions for external access
+    pub fn three_prime_regions(&self) -> &EndRegions {
+        &self.three_prime_regions
+    }
+
     /// Process one end to extract all valid barcodes.
     /// Returns a vector of all successfully extracted barcodes from this end.
     fn process_end_for_barcode(

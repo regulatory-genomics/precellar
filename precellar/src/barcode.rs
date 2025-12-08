@@ -19,6 +19,7 @@ const BC_MAX_QV: u8 = 66; // This is the illumina quality value
 pub(crate) const BASE_OPTS: [u8; 4] = [b'A', b'C', b'G', b'T'];
 
 /// Options for barcode correction
+#[derive(Debug)]
 pub struct BarcodeCorrectOptions {
     /// threshold for sum of probability of error on barcode QVs. Barcodes exceeding
     /// this threshold will be marked as not valid.
@@ -48,6 +49,7 @@ pub enum BarcodeError {
 }
 
 /// Count barcodes in a given assay and modality, returning a map of region IDs to their respective whitelists
+#[derive(Debug)]
 pub struct BarcodeAnalyzer {
     whitelists: IndexMap<RegionId, Whitelist>,
     contains_umi: bool,

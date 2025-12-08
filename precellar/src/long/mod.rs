@@ -6,7 +6,7 @@ pub mod barcode_extractor;
 pub mod sequence_aligner;
 
 use seqspec::region::{Region, LibSpec};
-pub use barcode_extractor::{BarcodeExtractor, LongReadBarcodeResult};
+pub use barcode_extractor::BarcodeExtractor;
 
 
 /// End type information for describing 5' or 3' end of sequence
