@@ -272,21 +272,13 @@ impl Aligner for Minimap2Aligner {
         records: Vec<AnnotatedFastq>,
     ) -> Vec<(Option<MultiMapR>, Option<MultiMapR>)> {
         let chunk_size = get_chunk_size(records.len(), num_threads as usize);
-        let opts = self.get_opts().clone();
 
         // Use Rayon for parallel processing with chunks
         records
             .par_chunks(chunk_size)
             .flat_map_iter(|chunk| {
-                // Create a new aligner for this thread using the getter methods
-                let mut thread_aligner = match Minimap2Aligner::new(opts.clone()) {
-                    Ok(aligner) => aligner,
-                    Err(e) => {
-                        // If we can't create an aligner, log error and return empty results for this chunk
-                        log::error!("Failed to create Minimap2Aligner: {}", e);
-                        return vec![(None, None); chunk.len()];
-                    }
-                };
+                // Clone aligner for this thread (efficient: only clones Arc pointers to shared index)
+                let mut thread_aligner = self.clone();
 
                 chunk.iter().map(move |rec| {
                     let bc = rec.barcode.as_ref().expect("Barcode is missing");

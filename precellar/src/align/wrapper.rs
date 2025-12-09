@@ -7,6 +7,35 @@ use noodles::sam::alignment::record::cigar::Op;
 use noodles::fastq;
 use std::path::PathBuf;
 
+/// Static lookup table for nucleotide complement
+/// This is computed at compile time and provides O(1) branch-free complement lookups
+static COMPLEMENT_TABLE: [u8; 256] = {
+    let mut table = [0u8; 256];
+    
+    // Initialize all entries to themselves (for non-ACGT characters)
+    let mut i = 0;
+    while i < 256 {
+        table[i] = i as u8;
+        i += 1;
+    }
+    
+    // Set complementary bases (uppercase)
+    table[b'A' as usize] = b'T';
+    table[b'T' as usize] = b'A';
+    table[b'C' as usize] = b'G';
+    table[b'G' as usize] = b'C';
+    
+    // Set complementary bases (lowercase)
+    table[b'a' as usize] = b't';
+    table[b't' as usize] = b'a';
+    table[b'c' as usize] = b'g';
+    table[b'g' as usize] = b'c';
+    
+    // N and other characters stay as themselves
+    
+    table
+};
+
 /// Options for Minimap2 aligner
 #[derive(Clone)]
 pub struct Minimap2Opts {
@@ -29,6 +58,7 @@ impl Minimap2Opts {
 }
 
 /// Wrapper around community minimap2::Aligner to match the expected interface
+#[derive(Clone)]
 pub struct Minimap2Aligner {
     aligner: minimap2::Aligner<minimap2::Built>,
     header: sam::Header,
@@ -112,14 +142,10 @@ impl Minimap2Aligner {
 
             // For reverse-complemented alignments, sequence and quality scores of SAM record should be reversed as well
             if is_reverse {
+                // Use lookup table for fast, branch-free complement
                 let rc_seq: Vec<u8> = seq.iter()
                     .rev()
-                    .map(|&b| match b {
-                        b'A' => b'T', b'C' => b'G', b'G' => b'C', b'T' => b'A',
-                        b'a' => b't', b'c' => b'g', b'g' => b'c', b't' => b'a',
-                        b'N' => b'N', b'n' => b'n',
-                        _ => b,
-                    })
+                    .map(|&b| COMPLEMENT_TABLE[b as usize])
                     .collect();
                 *record_buf.sequence_mut() = rc_seq.into();
 
@@ -166,7 +192,9 @@ impl Minimap2Aligner {
                 // Note: minimap2's CIGAR doesn't include soft clips for unaligned query regions
                 // We need to add them based on query_start and query_end (both 0-based)
                 if let Some(cigar_ops) = &alignment.cigar {
-                    let mut ops: Vec<Op> = Vec::new();
+                    // Pre-allocate capacity: soft clips (0-2) + cigar operations
+                    let estimated_capacity = cigar_ops.len() + 2;
+                    let mut ops: Vec<Op> = Vec::with_capacity(estimated_capacity);
 
                     // Calculate leading and trailing soft clip sizes
                     let query_len = mapping.query_len.map(|l| l.get() as i32).unwrap_or(seq.len() as i32);
