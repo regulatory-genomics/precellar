@@ -1,0 +1,4 @@
+# Cargo configuration for precellar
+
+[target.x86_64-unknown-linux-gnu]
+rustflags = ["-C", "link-arg=-Wl,--allow-multiple-definition"]
