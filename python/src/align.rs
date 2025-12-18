@@ -184,8 +184,10 @@ pub fn align<'py>(
     } else {
         if assay[0].chemistry_strandedness.is_some() {
             assay[0].chemistry_strandedness
-        } else {
+        } else if modality == Modality::RNA {
             panic!("strandedness must be provided if not specified in the assay. Possible values are 'unstranded', 'forward', 'reverse' or 'auto'")
+        } else {
+            None
         }
     };
 
