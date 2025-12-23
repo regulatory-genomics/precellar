@@ -55,6 +55,10 @@ impl Minimap2Opts {
         self.preset = Some(preset);
         self
     }
+
+    pub fn preset(&self) -> Option<&minimap2::Preset> {
+        self.preset.as_ref()
+    }
 }
 
 /// Wrapper around community minimap2::Aligner to match the expected interface
