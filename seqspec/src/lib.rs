@@ -1236,6 +1236,49 @@ regions: []
                 panic!("Failed to parse scNanoATAC.yaml: {}", e);
             }
         }
-        
+
+    }
+
+    #[test]
+    fn test_blaze_lr_rna() {
+        let yaml_path = "../seqspec_templates/10x_lr_rna_BLAZE.yaml";
+
+        if !std::path::Path::new(yaml_path).exists() {
+            println!("Warning: {} not found", yaml_path);
+            return;
+        }
+
+        match Assay::from_path(yaml_path) {
+            Ok(assay) => {
+                let modality = Modality::RNA;
+
+                // Test assay type detection
+                match assay.detect_assay_type(&modality) {
+                    Ok(assay_type) => {
+                        assert_eq!(assay_type, AssayType::LongRead);
+                        println!("Detected as LongRead");
+                    }
+                    Err(e) => println!("Error: {}", e),
+                }
+
+                // Test barcode extractor creation
+                let whitelists = assay.get_whitelists(modality);
+                println!("Loaded {} barcode whitelists", whitelists.len());
+                let detail_str: String = whitelists
+                    .iter()
+                    .map(|(k, v)| format!("{}({})", k, v.len()))
+                    .collect::<Vec<String>>()
+                    .join(", ");
+                
+                println!("Total whitelists entries breakdown: {}", detail_str);
+
+                // Test segment parsing
+                for (read, segment_info) in assay.get_segments_by_modality(modality) {
+                    println!("Read {}: {:?}", read.read_id,
+                        segment_info.iter().map(|s| s.region_type).collect::<Vec<_>>());
+                }
+            }
+            Err(e) => panic!("Failed to parse: {}", e),
+        }
     }
 }
