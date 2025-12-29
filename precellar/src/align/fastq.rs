@@ -413,6 +413,7 @@ impl Iterator for BatchedFqReader {
                     max_read = max_read.max(n);
                     if n > 0 {
                         accumulated_length += buffer.sequence().len();
+                        strip_fq_suffix(&mut buffer);
                         Some(buffer)
                     } else {
                         None
@@ -430,7 +431,7 @@ impl Iterator for BatchedFqReader {
                 panic!("Unequal number of reads in the chunk");
             } else {
                 assert!(
-                    records.iter().map(|r| get_read_name(r)).all_equal(),
+                    records.iter().map(|r| r.name()).all_equal(),
                     "read names mismatch"
                 );
                 batch.push(records);
@@ -601,13 +602,15 @@ pub fn extend_fastq_record(this: &mut fastq::Record, other: &fastq::Record) {
         .extend_from_slice(other.quality_scores());
 }
 
-/// Get the read name from a Fastq record, stripping any /1 or /2 suffix.
-fn get_read_name(record: &fastq::Record) -> String {
-    let name = record.name().to_string();
-    name.strip_suffix("/1")
-        .or_else(|| name.strip_suffix("/2"))
-        .map(|x| x.to_owned())
-        .unwrap_or(name)
+fn strip_fq_suffix(record: &mut fastq::Record) {
+    let read_name = record.name();
+    let n = read_name.len();
+    if n > 2 {
+        let suffix = &read_name[n - 2..];
+        if suffix == b"/1" || suffix == b"/2" {
+            record.name_mut().truncate(n - 2);
+        }
+    }
 }
 
 pub struct NameCollatedRecords<'a, R> {

@@ -1,15 +1,15 @@
 !Assay
 seqspec_version: 0.3.0
-assay_id: DNBelabC4_RNAv1
-name: DNBelabC4_RNAv1
+assay_id: DNBelabC4_ATACv1
+name: DNBelabC4_ATACv1
 doi: https://doi.org/10.1101/818450
 date: 27 November 2019
-description: MGI DNBelab C4 based single-cell RNA sequencing
+description: DNBelab C Series Single-Cell ATAC Sequencing
 modalities:
-- rna
+- atac
 lib_struct: https://github.com/MGI-tech-bioinformatics/DNBelab_C_Series_scRNA-analysis-software/blob/master/config/DNBelabC4_scRNA_readStructure.json
 sequence_protocol: Not-specified
-sequence_kit: Not-specified
+sequence_kit: MGI #1000021878
 library_protocol: MGI DNBelab C4 v1
 library_kit: Not-specified
 chemistry_strandedness: reverse
@@ -17,25 +17,25 @@ sequence_spec:
 - !Read
   read_id: R1
   name: Read 1
-  modality: rna
-  primer_id: rna-primer1
+  modality: atac
+  primer_id: atac-primer1
   min_len: 1
   max_len: 98
   strand: pos
 - !Read
   read_id: R2
   name: Read 2
-  modality: rna
-  primer_id: rna-primer2
+  modality: atac
+  primer_id: atac-primer2
   min_len: 1
   max_len: 98
   strand: neg
 library_spec:
 - !Region
   parent_id: null
-  region_id: rna
-  region_type: rna
-  name: DNBelabC4v1 RNA
+  region_id: atac
+  region_type: atac
+  name: ATAC
   sequence_type: joined
   sequence: NNNNNNNNNNNNNNNNNNNNNNNNNNN
   min_len: 153
@@ -43,8 +43,8 @@ library_spec:
   onlist: null
   regions:
   - !Region
-    parent_id: rna
-    region_id: rna-primer1
+    parent_id: atac
+    region_id: atac-primer1
     region_type: custom_primer
     name: Custom Primer 1
     sequence_type: fixed
@@ -54,8 +54,8 @@ library_spec:
     onlist: null
     regions: null
   - !Region
-    parent_id: rna
-    region_id: rna-cell_barcode1
+    parent_id: atac
+    region_id: atac-cell_barcode1
     region_type: barcode
     name: Cell Barcode 1
     sequence_type: onlist
@@ -73,8 +73,8 @@ library_spec:
       location: remote
     regions: null
   - !Region
-    parent_id: rna
-    region_id: rna-cell_barcode2
+    parent_id: atac
+    region_id: atac-cell_barcode2
     region_type: barcode
     name: Cell Barcode 2
     sequence_type: onlist
@@ -92,32 +92,10 @@ library_spec:
       location: remote
     regions: null
   - !Region
-    region_id: rna-umi
-    region_type: umi
-    name: GEX UMI
-    sequence_type: random
-    sequence: XXXXXXXXXX
-    min_len: 10
-    max_len: 10
-    onlist: null
-    regions: null
-    parent_id: rna
-  - !Region
-    parent_id: rna
-    region_id: rna-polyT
-    region_type: poly_t
-    name: rna-polyT
-    sequence_type: random
-    sequence: XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
-    min_len: 10
-    max_len: 250
-    onlist: null
-    regions: null
-  - !Region
-    parent_id: rna
-    region_id: rna-cDNA
-    region_type: cdna
-    name: rna-cDNA
+    parent_id: atac
+    region_id: atac-gDNA
+    region_type: gdna
+    name: atac-gDNA
     sequence_type: random
     sequence: XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
     min_len: 1
@@ -125,8 +103,8 @@ library_spec:
     onlist: null
     regions: null
   - !Region
-    parent_id: rna
-    region_id: rna-primer2
+    parent_id: atac
+    region_id: atac-primer2
     region_type: custom_primer
     name: Custom Primer 2
     sequence_type: fixed

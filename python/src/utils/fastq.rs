@@ -137,7 +137,7 @@ pub fn strip_barcode_from_fastq(
                 files.push(p);
             }
             _ => {
-                let dict = output.downcast::<PyDict>().unwrap();
+                let dict = output.cast::<PyDict>().unwrap();
                 dict.iter().for_each(|(k, v)| {
                     if let Ok(k) = k.extract::<usize>() {
                         keys.push(k.into());

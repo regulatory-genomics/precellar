@@ -20,6 +20,24 @@ fn dnbelabc4_rna_v1(py: Python<'_>) -> Result<HashMap<&str, PathBuf>> {
 }
 
 #[pyfunction]
+fn dnbelabc4_atac_v1(py: Python<'_>) -> Result<HashMap<&str, PathBuf>> {
+    let atac_r1 = retrieve_file(
+        py,
+        "https://osf.io/download/grnu7",
+        "md5:90c227aaf8bb82a3e4489dd898528278",
+        "dnbelabc4_atac_v1_R1.fq.zst",
+    )?;
+    let atac_r2 = retrieve_file(
+        py,
+        "https://osf.io/download/a7dxw",
+        "md5:523dcd86eb7a9ad48bc1b28f7fe7cbf6",
+        "dnbelabc4_atac_v1_R2.fq.zst",
+    )?;
+    Ok(HashMap::from([("R1", atac_r1), ("R2", atac_r2)]))
+}
+
+
+#[pyfunction]
 fn txg_rna_v3(py: Python<'_>) -> Result<HashMap<&str, PathBuf>> {
     let rna_r1 = retrieve_file(
         py,
@@ -329,6 +347,7 @@ pub(crate) fn register_examples(parent_module: &Bound<'_, PyModule>) -> PyResult
     m.add_function(wrap_pyfunction!(droplet_paired_tag, &m)?)?;
     m.add_function(wrap_pyfunction!(mars_seq, &m)?)?;
     m.add_function(wrap_pyfunction!(dnbelabc4_rna_v1, &m)?)?;
+    m.add_function(wrap_pyfunction!(dnbelabc4_atac_v1, &m)?)?;
 
     parent_module.add_submodule(&m)
 }
