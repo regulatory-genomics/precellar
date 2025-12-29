@@ -18,7 +18,7 @@ sequence_spec:
   name: Read 1
   modality: rna
   primer_id: illumina_p5
-  min_len: 300
+  min_len: 100
   max_len: 2147483647
   strand: pos
   files:
@@ -26,7 +26,7 @@ sequence_spec:
     filename: LR_sc-RNA-seq_GridION_Q20_pass
     filetype: fastq
     filesize: 0
-    url: /data2/xurui/data/BLAZE_LR_scRNA/LR_sc-RNA-seq_GridION_Q20_pass.fastq.gz
+    url: /data2/xurui/data/BLAZE_LR_scRNA/test/LR_sc-RNA-seq_GridION_Q20_pass.1pct_s100.fastq.gz
     urltype: local
     md5: ""
 library_spec:
@@ -36,7 +36,7 @@ library_spec:
   name: rna
   sequence_type: joined
   sequence:
-  min_len: 300
+  min_len: 100
   max_len: 2147483647
   onlist: null
   regions:
@@ -109,7 +109,7 @@ library_spec:
     name: cdna
     sequence_type: random
     sequence: XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
-    min_len: 300
+    min_len: 100
     max_len: 2147483647
     onlist: null
     regions: null

@@ -199,12 +199,18 @@ impl BWAMEM2 {
     Minimap2 is a versatile aligner for long reads (Oxford Nanopore, PacBio),
     splice alignment, assembly-to-assembly alignment, and more.
 
+    **Important**: Use the same preset that was used during index creation with
+    `make_minimap2_index()`. The preset determines indexing parameters (k-mer size,
+    window size, etc.) that are embedded in the .mmi file and cannot be changed
+    during alignment.
+
     Parameters
     ----------
     index_path : str
         The path to the Minimap2 index file (.mmi).
     preset : str | None
-        The minimap2 preset to use. Available presets:
+        The minimap2 preset to use.
+        Available presets:
         - 'map-ont': Oxford Nanopore genomic reads (default)
         - 'map-pb': PacBio CLR genomic reads
         - 'map-hifi': PacBio HiFi/CCS genomic reads

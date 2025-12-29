@@ -530,7 +530,7 @@ impl BarcodeExtractor {
         is_five_prime: bool,
     ) -> Result<Option<(Vec<u8>, Vec<u8>)>> {
         let cut_length = end_regions.calculate_cut_length();
-        
+
         if sequence.len() < cut_length {
             // If sequence is shorter than cut length, report error and skip this fastq record
             warn!(
@@ -540,10 +540,13 @@ impl BarcodeExtractor {
             return Ok(None);
         }
 
-        if sequence.len() > 300 {
-            // If segment is too long (>300bp), skip this record
-            warn!("Sequence length ({}) is longer than 300bp, skipping record", sequence.len());
-            return Ok(None);
+        // Check if the cut segment is too long for barcode search
+        if cut_length > 300 {
+            // If the segment to be cut is too long (>300bp), warn but continue
+            warn!(
+                "Cut segment (for barcode extraction) ({}) is longer than 300bp, barcode search may be slow. Consider adjusting seqspec regions.",
+                cut_length
+            );
         }
 
         let (seq_segment, qual_segment) = if is_five_prime {

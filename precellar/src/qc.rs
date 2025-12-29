@@ -365,8 +365,8 @@ pub struct QcFragment {
     mito_dna: HashSet<String>,
     num_pcr_duplicates: u64,
     num_unique_fragments: u64,
-    num_frag_nfr: u64,
-    num_frag_single: u64,
+    num_frag_nfr: u64, // Nucleosome-free region fragments (<147 bp)
+    num_frag_single: u64, // Flanking single nucleosome fragments (147-294 bp)
 }
 
 impl From<QcFragment> for Value {

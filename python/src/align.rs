@@ -64,12 +64,16 @@ pub fn make_bwa_index(fasta: PathBuf, genome_prefix: PathBuf) -> Result<()> {
 /// This function creates a `.mmi` index file that can be used with the MINIMAP2 aligner.
 /// The index is created with k-mer and window sizes optimized for the selected preset.
 ///
+/// **Important**: The preset used during indexing determines parameters like k-mer size (-k), 
+/// window size (-w), and other indexing parameters (-H, -I) that cannot be changed during mapping
+/// Recommand using the same preset for both indexing and alignment.
+///
 /// Parameters
 /// ----------
 /// fasta: Path
 ///    File path to the FASTA file containing reference sequences.
 /// output_index: Path
-///   File path for the output minimap2 index (.mmi file).
+///   Full path for the output minimap2 index file.
 /// preset: str | None
 ///    Optional preset to optimize index for specific read types:
 ///    - 'map-ont': Oxford Nanopore reads (default)
@@ -85,9 +89,15 @@ pub fn make_bwa_index(fasta: PathBuf, genome_prefix: PathBuf) -> Result<()> {
 /// Examples
 /// --------
 /// >>> from precellar import make_minimap2_index
-/// >>> make_minimap2_index("genome.fa", "genome.mmi", preset="map-ont")
-/// >>> # For RNA-seq
-/// >>> make_minimap2_index("transcriptome.fa", "transcriptome.mmi", preset="splice")
+/// >>> # For Oxford Nanopore reads - use same preset for indexing and mapping
+/// >>> make_minimap2_index("genome.fa", "genome_ont.mmi", preset="map-ont")
+/// >>> # For high-quality RNA-seq reads (Q20+ ONT)
+/// >>> make_minimap2_index("genome.fa", "genome_splice_hq.mmi", preset="splice:hq")
+///
+/// Notes
+/// -----
+/// The preset determines indexing parameters that are embedded in the .mmi file.
+/// Use the same preset when creating the MINIMAP2 aligner object for alignment.
 ///
 /// See Also
 /// --------
