@@ -118,7 +118,9 @@ pub fn find_innermost_regions(lib_spec: &LibSpec, modality: &seqspec::Modality) 
     let mut three_prime_regions = EndRegions::new(EndType::ThreePrime);
 
     // Traverse from 5' end
-    for region in subregions.iter() {
+    // Find the innermost fixed or barcode region, then include all regions from outermost to that point
+    let mut innermost_5p_idx = None;
+    for (idx, region) in subregions.iter().enumerate() {
         let region_guard = region.read().unwrap();
         let region_type = &region_guard.region_type;
 
@@ -127,15 +129,34 @@ pub fn find_innermost_regions(lib_spec: &LibSpec, modality: &seqspec::Modality) 
             break;
         }
 
-        // Add to 5' collection if fixed or barcode type
+        // Track the last fixed or barcode region
         if region_guard.sequence_type.is_fixed() || region_type.is_barcode() {
-            drop(region_guard);
-            five_prime_regions.add_region(region.clone());
+            innermost_5p_idx = Some(idx);
+        }
+    }
+
+    // Now add all regions from outermost to innermost fixed/barcode (inclusive)
+    if let Some(last_idx) = innermost_5p_idx {
+        for (idx, region) in subregions.iter().enumerate() {
+            let region_guard = region.read().unwrap();
+            let region_type = &region_guard.region_type;
+
+            // Stop if encounter cDNA or gDNA
+            if region_type.is_target() {
+                break;
+            }
+
+            // Add all regions up to and including the innermost fixed/barcode
+            if idx <= last_idx {
+                drop(region_guard);
+                five_prime_regions.add_region(region.clone());
+            }
         }
     }
 
     // Traverse from 3' end (reverse)
-    for region in subregions.iter().rev() {
+    let mut innermost_3p_idx = None;
+    for (idx, region) in subregions.iter().enumerate().rev() {
         let region_guard = region.read().unwrap();
         let region_type = &region_guard.region_type;
 
@@ -144,10 +165,27 @@ pub fn find_innermost_regions(lib_spec: &LibSpec, modality: &seqspec::Modality) 
             break;
         }
 
-        // Add to 3' collection if fixed or barcode type
         if region_guard.sequence_type.is_fixed() || region_type.is_barcode() {
-            drop(region_guard);
-            three_prime_regions.add_region(region.clone());
+            innermost_3p_idx = Some(idx);
+        }
+    }
+
+    // Now add all regions from outermost to innermost fixed/barcode (inclusive) from 3' end
+    if let Some(last_idx) = innermost_3p_idx {
+        for (idx, region) in subregions.iter().enumerate().rev() {
+            let region_guard = region.read().unwrap();
+            let region_type = &region_guard.region_type;
+
+            // Stop if encounter cDNA or gDNA
+            if region_type.is_target() {
+                break;
+            }
+
+            // Add all regions from 3' end up to and including the innermost fixed/barcode
+            if idx >= last_idx {
+                drop(region_guard);
+                three_prime_regions.add_region(region.clone());
+            }
         }
     }
 
@@ -205,7 +243,18 @@ mod tests {
 
     #[test]
     fn test_find_innermost_regions() {
-        // Create test regions
+        // Test structure: 
+        // primer (random) -> barcode1 (onlist) -> linker (fixed) -> cdna (target) -> barcode2 (onlist)
+
+        let primer = Arc::new(RwLock::new(create_test_region(
+            "primer",
+            RegionType::IlluminaP5,
+            SequenceType::Random,
+            30,
+            60,
+            "",
+        )));
+
         let barcode1 = Arc::new(RwLock::new(create_test_region(
             "bc1",
             RegionType::Barcode,
@@ -214,7 +263,7 @@ mod tests {
             8,
             "",
         )));
-        
+
         let linker = Arc::new(RwLock::new(create_test_region(
             "linker",
             RegionType::Linker,
@@ -223,7 +272,7 @@ mod tests {
             20,
             "AGATCGGAAGAGCGTCGTGT",
         )));
-        
+
         let cdna = Arc::new(RwLock::new(create_test_region(
             "cdna",
             RegionType::Cdna,
@@ -232,7 +281,7 @@ mod tests {
             1000,
             "",
         )));
-        
+
         let barcode2 = Arc::new(RwLock::new(create_test_region(
             "bc2",
             RegionType::Barcode,
@@ -252,16 +301,22 @@ mod tests {
             min_len: 0,
             max_len: 0,
             onlist: None,
-            subregions: vec![barcode1, linker, cdna, barcode2],
+            subregions: vec![primer, barcode1, linker, cdna, barcode2],
         };
 
         let lib_spec = LibSpec::new(vec![modality_region]).unwrap();
         let (five_prime, three_prime) = find_innermost_regions(&lib_spec, &Modality::RNA).unwrap();
 
-        // 5' end should contain barcode1 and linker
-        assert_eq!(five_prime.regions.len(), 2);
+        // 5' end should contain primer, barcode1, and linker (all regions up to innermost fixed/barcode)
+        assert_eq!(five_prime.regions.len(), 3);
         assert!(five_prime.has_barcode);
-        
+
+        // Check that cut length includes the primer
+        // max_len sum: 60 + 8 + 20 = 88
+        // With 15% buffer: 88 * 1.15 = 101.2 -> 102
+        assert_eq!(five_prime.max_len, 88);
+        assert_eq!(five_prime.calculate_cut_length(), 102);
+
         // 3' end should contain barcode2
         assert_eq!(three_prime.regions.len(), 1);
         assert!(three_prime.has_barcode);
