@@ -120,7 +120,7 @@ print(rna_qc)
 ```python
 import precellar
 
-assay = precellar.Assay('https://raw.githubusercontent.com/regulatory-genomics/precellar/refs/heads/main/seqspec_templates/dnbelabc4_rna_v1.yaml')
+assay = precellar.Assay('https://raw.githubusercontent.com/regulatory-genomics/precellar/refs/heads/main/seqspec_templates/dnbelabc4_rna_v1_dark.yaml')
 
 data = precellar.examples.dnbelabc4_rna_v1()
 assay.update_read('R1', fastq=data['R1'])

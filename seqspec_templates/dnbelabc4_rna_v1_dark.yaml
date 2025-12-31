@@ -63,8 +63,8 @@ library_spec:
     min_len: 10
     max_len: 10
     onlist: !Onlist
-      file_id: dnbelabc4_rna_v1-cell_barcode_1.txt.gz
-      filename: dnbelabc4_rna_v1-cell_barcode_1.txt.gz
+      file_id: dnbelabc4_rna_v1-cell_barcode_1536.txt.gz
+      filename: dnbelabc4_rna_v1-cell_barcode_1536.txt.gz
       filetype: txt
       filesize: 5842
       url: https://osf.io/download/b3vmy/
@@ -82,13 +82,13 @@ library_spec:
     min_len: 10
     max_len: 10
     onlist: !Onlist
-      file_id: dnbelabc4_rna_v1-cell_barcode_2.txt.gz
-      filename: dnbelabc4_rna_v1-cell_barcode_2.txt.gz
+      file_id: dnbelabc4_rna_v1-cell_barcode_1536.txt.gz
+      filename: dnbelabc4_rna_v1-cell_barcode_1536.txt.gz
       filetype: txt
       filesize: 5842
-      url: https://osf.io/download/ryn2k/
+      url: https://osf.io/download/b3vmy/
       urltype: https
-      md5: dd0269f6573ce96ca2fd85421e8a07d8
+      md5: e46102db3f0d40cdfed66067384dc805
       location: remote
     regions: null
   - !Region
