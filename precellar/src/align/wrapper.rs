@@ -312,8 +312,8 @@ mod tests {
     #[ignore] 
     fn test_alignment() -> Result<()> {
         let ref_path = "/data/Public/genome/GRCh38/GRCh38.primary_assembly.genome.fa.gz";
-        let reads_path = "/data/xurui/project/minimap2-rs/data/h38_dna/SRR17666426_20.fastq";
-        let output_sam_path = "/data/xurui/project/minimap2-rs/data/h38_dna/SRR17666426_20_rs.sam";
+        let reads_path = "/data/xurui/project/archive/minimap2-rs/data/h38_dna/SRR17666426_20.fastq";
+        let output_sam_path = "/data/xurui/project/archive/minimap2-rs/data/h38_dna/SRR17666426_20_rs.sam";
 
         // Set expected results from minimap2 (RNAME, POS, FLAG)
         let expected_results = vec![
