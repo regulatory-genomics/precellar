@@ -6,6 +6,7 @@ use anyhow::{bail, ensure, Result};
 pub use bwa_mem2::BurrowsWheelerAligner;
 use noodles::sam::alignment::Record;
 pub use star_aligner::StarAligner;
+pub use super::wrapper::Minimap2Aligner;
 
 use log;
 use noodles::sam;
@@ -259,6 +260,65 @@ impl Aligner for StarAligner {
             .collect()
     }
 }
+
+impl Aligner for Minimap2Aligner {
+    fn header(&self) -> sam::Header {
+        self.get_header().clone()
+    }
+
+    fn align_reads(
+        &mut self,
+        num_threads: u16,
+        records: Vec<AnnotatedFastq>,
+    ) -> Vec<(Option<MultiMapR>, Option<MultiMapR>)> {
+        let chunk_size = get_chunk_size(records.len(), num_threads as usize);
+
+        // Use Rayon for parallel processing with chunks
+        records
+            .par_chunks(chunk_size)
+            .flat_map_iter(|chunk| {
+                // Clone aligner for this thread (efficient: only clones Arc pointers to shared index)
+                let mut thread_aligner = self.clone();
+
+                chunk.iter().map(move |rec| {
+                    let bc = rec.barcode.as_ref().expect("Barcode is missing");
+
+                    // Align Read 1 independently
+                    let read1_result = if let Some(read1_record) = rec.read1.as_ref() {
+                        let mut alignments = thread_aligner.align_read(read1_record).unwrap_or_default();
+
+                        if !alignments.is_empty() {
+                            // Add Barcode and UMI information to all alignment results
+                            for aln in &mut alignments {
+                                add_cell_barcode(
+                                    aln,
+                                    bc.raw.sequence(),
+                                    bc.raw.quality_scores(),
+                                    bc.corrected.as_deref(),
+                                );
+                                if let Some(umi) = &rec.umi {
+                                    add_umi(aln, umi.sequence(), umi.quality_scores());
+                                }
+                            }
+                            // Convert alignment results Vec<RecordBuf> to MultiMapR
+                            Some(alignments.try_into().expect("Failed to convert Vec<RecordBuf> to MultiMap"))
+                        } else {
+                            None // No alignment found
+                        }
+                    } else {
+                        None // Read 1 does not exist
+                    };
+
+                    // No pair-alignment for long-read data
+                    let read2_result = None;
+
+                    (read1_result, read2_result)
+                }).collect::<Vec<_>>()
+            })
+            .collect()
+    }
+}
+
 
 fn get_chunk_size(total_length: usize, num_threads: usize) -> usize {
     let chunk_size = total_length / num_threads;
