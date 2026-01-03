@@ -41,6 +41,7 @@ Utilities
 .. autosummary::
     :toctree: _autosummary
 
+    utils.extract_barcode_from_name
     utils.strip_barcode_from_fastq
     utils.bam_to_fastq
     utils.multiplex_fastq

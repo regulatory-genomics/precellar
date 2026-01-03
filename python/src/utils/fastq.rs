@@ -5,8 +5,12 @@ use noodles::fastq::{self, io::Writer};
 use precellar::utils::strip_fastq;
 use pyo3::{prelude::*, types::PyDict};
 use regex::Regex;
-use seqspec::utils::{create_file, is_url, open_file_async, Compression};
-use std::{io::BufWriter, path::PathBuf, str::FromStr};
+use seqspec::utils::{create_file, is_url, open_file, open_file_async, Compression};
+use std::{
+    io::{BufReader, BufWriter},
+    path::PathBuf,
+    str::FromStr,
+};
 use tokio::runtime::Runtime;
 
 /// Remove barcode from the read names of fastq records.
@@ -217,8 +221,123 @@ pub fn strip_barcode_from_fastq(
     })
 }
 
+/// Remove barcode from the read names of fastq records.
+///
+/// The old practice of storing barcodes in read names is not recommended. This
+/// function extracts barcodes from read names and
+/// writes them to a separate fastq file.
+///
+/// Parameters
+/// ----------
+/// in_fq: str
+///     File path or URL to the input fastq file.
+/// out_fq: Path
+///     File path to the output fastq file.
+/// rename: Callable[str, str] | None
+///     A function that takes in the original read name and returns the new read name.   
+/// get_barcode: Callable[str, str] | None
+///     A function that takes in the original read name and returns the barcode sequence.
+/// barcode_fq: Path | None
+///     File path to the output barcode fastq file.
+/// compression: Literal['gzip', 'zst'] | None
+///     Compression algorithm to use. If None, the compression algorithm will be inferred from the file extension.
+/// compression_level: int | None
+///     Compression level to use.
+/// num_threads: int
+///     The number of threads to use.
+///
+#[pyfunction]
+#[pyo3(
+    signature = (in_fq, *, out_fq=None, rename=None, get_barcode=None, barcode_fq=None,
+        compression=None, compression_level=None, num_threads=16
+    ),
+    text_signature = "(in_fq, *, out_fq=None, rename=None, get_barcode=None, barcode_fq=None,
+        compression=None, compression_level=None, num_threads=16)",
+)]
+pub fn extract_barcode_from_name(
+    py: Python<'_>,
+    in_fq: PathBuf,
+    out_fq: Option<PathBuf>,
+    rename: Option<Bound<'_, PyAny>>,
+    get_barcode: Option<Bound<'_, PyAny>>,
+    barcode_fq: Option<PathBuf>,
+    compression: Option<&str>,
+    compression_level: Option<u32>,
+    num_threads: u32,
+) -> Result<()> {
+    let mut fq_writer = out_fq.map(|fq| {
+        let compression = compression
+            .map(|x| Compression::from_str(x).unwrap())
+            .or((&fq).try_into().ok());
+        Writer::new(BufWriter::new(create_file(
+            fq,
+            compression,
+            compression_level,
+            num_threads,
+        ).unwrap()))
+    });
+    let mut barcode_writer = barcode_fq.map(|fq| {
+        let compression = compression
+            .map(|x| Compression::from_str(x).unwrap())
+            .or((&fq).try_into().ok());
+        Writer::new(BufWriter::new(create_file(
+            fq,
+            compression,
+            compression_level,
+            num_threads,
+        ).unwrap()))
+    });
+
+    let reader = open_file(in_fq)?;
+    let mut reader = fastq::io::Reader::new(BufReader::new(reader));
+    let mut i = 0u32;
+    reader.records().for_each(|record| {
+        if i % 1000000 == 0 {
+            py.check_signals().unwrap();
+        }
+        i += 1;
+
+        let mut record = record.unwrap();
+        let text = record.name().to_string() + " " + &record.definition().description().to_string();
+
+        let new_name: String = if let Some(ref rename) = rename {
+            rename
+                .call1((&text,))
+                .unwrap()
+                .extract()
+                .unwrap()
+        } else {
+            text.clone()
+        };
+
+        if let Some(ref mut fq_writer) = fq_writer {
+            *record.definition_mut() = fastq::record::Definition::new(new_name.clone(), "");
+            fq_writer.write_record(&record).unwrap();
+        }
+
+        if let Some(ref mut barcode_writer) = barcode_writer {
+            let barcode: String = get_barcode.as_ref().unwrap()
+                .call1((text,))
+                .unwrap()
+                .extract()
+                .unwrap();
+            let qual_score = vec![b'~'; barcode.len()];
+            let fq = fastq::Record::new(
+                fastq::record::Definition::new(new_name, ""),
+                barcode.into_bytes(),
+                qual_score,
+            );
+            barcode_writer.write_record(&fq).unwrap();
+        }
+    });
+
+    Ok(())
+}
+
 /// Create multiplexed FASTQ files by merging multiple FASTQ files into single output files,
 /// while generating barcodes for each read based on their file of origin.
+///
+/// This function is useful for methods such as SMART-seq.
 ///
 /// Parameters
 /// ----------
@@ -295,7 +414,9 @@ pub fn multiplex_fastq(
 
     let barcodes = gen_unique_barcodes(n_files);
     Runtime::new()?.block_on(async {
-        for (idx, (input1_file, barcode)) in input_read1.into_iter().zip_eq(barcodes.iter()).enumerate() {
+        for (idx, (input1_file, barcode)) in
+            input_read1.into_iter().zip_eq(barcodes.iter()).enumerate()
+        {
             let mut count = 0;
 
             let reader1 = open_file_async(&input1_file, None).await?;
@@ -303,59 +424,74 @@ pub fn multiplex_fastq(
 
             if let Some(ref input2) = input_read2 {
                 let reader2 = open_file_async(&input2[idx], None).await?;
-                let mut reader2 = fastq::r#async::io::Reader::new(tokio::io::BufReader::new(reader2));
-                reader1.records().zip(reader2.records()).for_each(|(record1, record2)| {
-                    if count % 100000 == 0 {
-                        py.check_signals().unwrap();
-                    }
+                let mut reader2 =
+                    fastq::r#async::io::Reader::new(tokio::io::BufReader::new(reader2));
+                reader1
+                    .records()
+                    .zip(reader2.records())
+                    .for_each(|(record1, record2)| {
+                        if count % 100000 == 0 {
+                            py.check_signals().unwrap();
+                        }
 
-                    let record1 = record1.unwrap();
-                    let record2 = record2.unwrap();
-                    let barcode_record = fastq::Record::new(
-                        record1.definition().clone(),
-                        barcode.clone(),
-                        vec![b'~'; barcode.len()],
-                    );
+                        let record1 = record1.unwrap();
+                        let record2 = record2.unwrap();
+                        let barcode_record = fastq::Record::new(
+                            record1.definition().clone(),
+                            barcode.clone(),
+                            vec![b'~'; barcode.len()],
+                        );
 
-                    assert_eq!(
-                        record1.name(),
-                        record2.name(),
-                        "Read names do not match: {} != {}",
-                        record1.name(),
-                        record2.name()
-                    );
-                    read1_writer.write_record(&record1).unwrap();
-                    read2_writer.as_mut().unwrap().write_record(&record2).unwrap();
-                    barcode_writer.write_record(&barcode_record).unwrap();
+                        assert_eq!(
+                            record1.name(),
+                            record2.name(),
+                            "Read names do not match: {} != {}",
+                            record1.name(),
+                            record2.name()
+                        );
+                        read1_writer.write_record(&record1).unwrap();
+                        read2_writer
+                            .as_mut()
+                            .unwrap()
+                            .write_record(&record2)
+                            .unwrap();
+                        barcode_writer.write_record(&barcode_record).unwrap();
 
-                    count += 1;
-                    futures::future::ready(())
-                }).await;
+                        count += 1;
+                        futures::future::ready(())
+                    })
+                    .await;
             } else {
-                reader1.records().for_each(|record| {
-                    if count % 100000 == 0 {
-                        py.check_signals().unwrap();
-                    }
+                reader1
+                    .records()
+                    .for_each(|record| {
+                        if count % 100000 == 0 {
+                            py.check_signals().unwrap();
+                        }
 
-                    let record = record.unwrap();
-                    let barcode_record = fastq::Record::new(
-                        record.definition().clone(),
-                        barcode.clone(),
-                        vec![b'~'; barcode.len()],
-                    );
-                    read1_writer.write_record(&record).unwrap();
-                    barcode_writer.write_record(&barcode_record).unwrap();
+                        let record = record.unwrap();
+                        let barcode_record = fastq::Record::new(
+                            record.definition().clone(),
+                            barcode.clone(),
+                            vec![b'~'; barcode.len()],
+                        );
+                        read1_writer.write_record(&record).unwrap();
+                        barcode_writer.write_record(&barcode_record).unwrap();
 
-                    count += 1;
-                    futures::future::ready(())
-                }).await;
+                        count += 1;
+                        futures::future::ready(())
+                    })
+                    .await;
             }
         }
 
         anyhow::Ok(())
     })?;
 
-    Ok(barcodes.into_iter().map(|b| String::from_utf8_lossy(&b).to_string()).collect())
+    Ok(barcodes
+        .into_iter()
+        .map(|b| String::from_utf8_lossy(&b).to_string())
+        .collect())
 }
 
 /// Generate n unique barcodes
