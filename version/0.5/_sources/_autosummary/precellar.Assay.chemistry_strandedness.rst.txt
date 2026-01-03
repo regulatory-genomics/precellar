@@ -1,0 +1,6 @@
+precellar.Assay.chemistry\_strandedness
+=======================================
+
+.. currentmodule:: precellar
+
+.. autoattribute:: Assay.chemistry_strandedness

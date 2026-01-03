@@ -1,0 +1,6 @@
+﻿precellar.utils.multiplex\_fastq
+================================
+
+.. currentmodule:: precellar.utils
+
+.. autofunction:: multiplex_fastq
