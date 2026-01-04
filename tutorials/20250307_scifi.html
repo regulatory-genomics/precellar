@@ -1,0 +1,1036 @@
+
+<!DOCTYPE html>
+
+
+<html lang="en" data-content_root="../" >
+
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>Set up &#8212; precellar 0.5.2 documentation</title>
+  
+  
+  
+  <script data-cfasync="false">
+    document.documentElement.dataset.mode = localStorage.getItem("mode") || "";
+    document.documentElement.dataset.theme = localStorage.getItem("theme") || "";
+  </script>
+  
+  <!-- Loaded before other Sphinx assets -->
+  <link href="../_static/styles/theme.css?digest=dfe6caa3a7d634c4db9b" rel="stylesheet" />
+<link href="../_static/styles/bootstrap.css?digest=dfe6caa3a7d634c4db9b" rel="stylesheet" />
+<link href="../_static/styles/pydata-sphinx-theme.css?digest=dfe6caa3a7d634c4db9b" rel="stylesheet" />
+
+  
+  <link href="../_static/vendor/fontawesome/6.5.2/css/all.min.css?digest=dfe6caa3a7d634c4db9b" rel="stylesheet" />
+  <link rel="preload" as="font" type="font/woff2" crossorigin href="../_static/vendor/fontawesome/6.5.2/webfonts/fa-solid-900.woff2" />
+<link rel="preload" as="font" type="font/woff2" crossorigin href="../_static/vendor/fontawesome/6.5.2/webfonts/fa-brands-400.woff2" />
+<link rel="preload" as="font" type="font/woff2" crossorigin href="../_static/vendor/fontawesome/6.5.2/webfonts/fa-regular-400.woff2" />
+
+    <link rel="stylesheet" type="text/css" href="../_static/pygments.css?v=a746c00c" />
+    <link rel="stylesheet" type="text/css" href="../_static/nbsphinx-code-cells.css?v=2aa19091" />
+    <link rel="stylesheet" type="text/css" href="../_static/css/custom.css?v=3c7e44a1" />
+  
+  <!-- Pre-loaded scripts that we'll load fully later -->
+  <link rel="preload" as="script" href="../_static/scripts/bootstrap.js?digest=dfe6caa3a7d634c4db9b" />
+<link rel="preload" as="script" href="../_static/scripts/pydata-sphinx-theme.js?digest=dfe6caa3a7d634c4db9b" />
+  <script src="../_static/vendor/fontawesome/6.5.2/js/all.min.js?digest=dfe6caa3a7d634c4db9b"></script>
+
+    <script src="../_static/documentation_options.js?v=8e576371"></script>
+    <script src="../_static/doctools.js?v=9a2dae69"></script>
+    <script src="../_static/sphinx_highlight.js?v=dc90522c"></script>
+    <script crossorigin="anonymous" integrity="sha256-Ae2Vz/4ePdIu6ZyI/5ZGsYnb+m0JlOmKPjt6XZ9JJkA=" src="https://cdnjs.cloudflare.com/ajax/libs/require.js/2.3.4/require.min.js"></script>
+    <script>window.MathJax = {"tex": {"inlineMath": [["$", "$"], ["\\(", "\\)"]], "processEscapes": true}, "options": {"ignoreHtmlClass": "tex2jax_ignore|mathjax_ignore|document", "processHtmlClass": "tex2jax_process|mathjax_process|math|output_area"}}</script>
+    <script defer="defer" src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"></script>
+    <script>DOCUMENTATION_OPTIONS.pagename = 'tutorials/20250307_scifi';</script>
+    <script>
+        DOCUMENTATION_OPTIONS.theme_version = '0.15.4';
+        DOCUMENTATION_OPTIONS.theme_switcher_json_url = 'https://raw.githubusercontent.com/regulatory-genomics/precellar/refs/heads/main/docs/_static/versions.json';
+        DOCUMENTATION_OPTIONS.theme_switcher_version_match = '0.5';
+        DOCUMENTATION_OPTIONS.show_version_warning_banner = false;
+        </script>
+    <link rel="index" title="Index" href="../genindex.html" />
+    <link rel="search" title="Search" href="../search.html" />
+    <link rel="next" title="Write a seqspec file for your custom datasets" href="make_seqspec.html" />
+    <link rel="prev" title="Cel-Seq2" href="20250221_celseq2.html" />
+
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <meta name="docsearch:language" content="en"/>
+<!-- Google tag (gtag.js) -->
+<script async src="https://www.googletagmanager.com/gtag/js?id=G-YM9RKG56ZV"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
+
+  gtag('config', 'G-YM9RKG56ZV');
+</script>
+
+  </head>
+  
+  
+  <body data-bs-spy="scroll" data-bs-target=".bd-toc-nav" data-offset="180" data-bs-root-margin="0px 0px -60%" data-default-mode="">
+
+  
+  
+  <div id="pst-skip-link" class="skip-link d-print-none"><a href="#main-content">Skip to main content</a></div>
+  
+  <div id="pst-scroll-pixel-helper"></div>
+  
+  <button type="button" class="btn rounded-pill" id="pst-back-to-top">
+    <i class="fa-solid fa-arrow-up"></i>Back to top</button>
+
+  
+  <input type="checkbox"
+          class="sidebar-toggle"
+          id="pst-primary-sidebar-checkbox"/>
+  <label class="overlay overlay-primary" for="pst-primary-sidebar-checkbox"></label>
+  
+  <input type="checkbox"
+          class="sidebar-toggle"
+          id="pst-secondary-sidebar-checkbox"/>
+  <label class="overlay overlay-secondary" for="pst-secondary-sidebar-checkbox"></label>
+  
+  <div class="search-button__wrapper">
+    <div class="search-button__overlay"></div>
+    <div class="search-button__search-container">
+<form class="bd-search d-flex align-items-center"
+      action="../search.html"
+      method="get">
+  <i class="fa-solid fa-magnifying-glass"></i>
+  <input type="search"
+         class="form-control"
+         name="q"
+         id="search-input"
+         placeholder="Search the docs ..."
+         aria-label="Search the docs ..."
+         autocomplete="off"
+         autocorrect="off"
+         autocapitalize="off"
+         spellcheck="false"/>
+  <span class="search-button__kbd-shortcut"><kbd class="kbd-shortcut__modifier">Ctrl</kbd>+<kbd>K</kbd></span>
+</form></div>
+  </div>
+
+  <div class="pst-async-banner-revealer d-none">
+  <aside id="bd-header-version-warning" class="d-none d-print-none" aria-label="Version warning"></aside>
+</div>
+
+  
+    <header class="bd-header navbar navbar-expand-lg bd-navbar d-print-none">
+<div class="bd-header__inner bd-page-width">
+  <button class="pst-navbar-icon sidebar-toggle primary-toggle" aria-label="Site navigation">
+    <span class="fa-solid fa-bars"></span>
+  </button>
+  
+  
+  <div class=" navbar-header-items__start">
+    
+      <div class="navbar-item">
+
+  
+    
+  
+
+<a class="navbar-brand logo" href="../index.html">
+  
+  
+  
+  
+  
+  
+    <p class="title logo__title">precellar</p>
+  
+</a></div>
+    
+  </div>
+  
+  <div class=" navbar-header-items">
+    
+    <div class="me-auto navbar-header-items__center">
+      
+        <div class="navbar-item">
+<script>
+document.write(`
+  <div class="version-switcher__container dropdown">
+    <button id="pst-version-switcher-button-2"
+      type="button"
+      class="version-switcher__button btn btn-sm dropdown-toggle"
+      data-bs-toggle="dropdown"
+      aria-haspopup="listbox"
+      aria-controls="pst-version-switcher-list-2"
+      aria-label="Version switcher list"
+    >
+      Choose version  <!-- this text may get changed later by javascript -->
+      <span class="caret"></span>
+    </button>
+    <div id="pst-version-switcher-list-2"
+      class="version-switcher__menu dropdown-menu list-group-flush py-0"
+      role="listbox" aria-labelledby="pst-version-switcher-button-2">
+      <!-- dropdown will be populated by javascript on page load -->
+    </div>
+  </div>
+`);
+</script></div>
+      
+        <div class="navbar-item">
+<nav>
+  <ul class="bd-navbar-elements navbar-nav">
+    
+<li class="nav-item ">
+  <a class="nav-link nav-internal" href="../install.html">
+    Installation
+  </a>
+</li>
+
+
+<li class="nav-item current active">
+  <a class="nav-link nav-internal" href="index.html">
+    Tutorials
+  </a>
+</li>
+
+
+<li class="nav-item ">
+  <a class="nav-link nav-internal" href="../api.html">
+    API reference
+  </a>
+</li>
+
+  </ul>
+</nav></div>
+      
+    </div>
+    
+    
+    <div class="navbar-header-items__end">
+      
+        <div class="navbar-item navbar-persistent--container">
+          
+
+ <script>
+ document.write(`
+   <button class="btn search-button-field search-button__button" title="Search" aria-label="Search" data-bs-placement="bottom" data-bs-toggle="tooltip">
+    <i class="fa-solid fa-magnifying-glass"></i>
+    <span class="search-button__default-text">Search</span>
+    <span class="search-button__kbd-shortcut"><kbd class="kbd-shortcut__modifier">Ctrl</kbd>+<kbd class="kbd-shortcut__modifier">K</kbd></span>
+   </button>
+ `);
+ </script>
+        </div>
+      
+      
+        <div class="navbar-item">
+
+<script>
+document.write(`
+  <button class="btn btn-sm nav-link pst-navbar-icon theme-switch-button" title="light/dark" aria-label="light/dark" data-bs-placement="bottom" data-bs-toggle="tooltip">
+    <i class="theme-switch fa-solid fa-sun fa-lg" data-mode="light"></i>
+    <i class="theme-switch fa-solid fa-moon fa-lg" data-mode="dark"></i>
+    <i class="theme-switch fa-solid fa-circle-half-stroke fa-lg" data-mode="auto"></i>
+  </button>
+`);
+</script></div>
+      
+        <div class="navbar-item"><ul class="navbar-icon-links"
+    aria-label="Icon Links">
+        <li class="nav-item">
+          
+          
+          
+          
+          
+          
+          
+          
+          <a href="https://github.com/regulatory-genomics/precellar" title="GitHub" class="nav-link pst-navbar-icon" rel="noopener" target="_blank" data-bs-toggle="tooltip" data-bs-placement="bottom"><i class="fa-brands fa-square-github fa-lg" aria-hidden="true"></i>
+            <span class="sr-only">GitHub</span></a>
+        </li>
+</ul></div>
+      
+    </div>
+    
+  </div>
+  
+  
+    <div class="navbar-persistent--mobile">
+
+ <script>
+ document.write(`
+   <button class="btn search-button-field search-button__button" title="Search" aria-label="Search" data-bs-placement="bottom" data-bs-toggle="tooltip">
+    <i class="fa-solid fa-magnifying-glass"></i>
+    <span class="search-button__default-text">Search</span>
+    <span class="search-button__kbd-shortcut"><kbd class="kbd-shortcut__modifier">Ctrl</kbd>+<kbd class="kbd-shortcut__modifier">K</kbd></span>
+   </button>
+ `);
+ </script>
+    </div>
+  
+
+  
+    <button class="pst-navbar-icon sidebar-toggle secondary-toggle" aria-label="On this page">
+      <span class="fa-solid fa-outdent"></span>
+    </button>
+  
+</div>
+
+    </header>
+  
+
+  <div class="bd-container">
+    <div class="bd-container__inner bd-page-width">
+      
+      
+      
+      <div class="bd-sidebar-primary bd-sidebar">
+        
+
+  
+  <div class="sidebar-header-items sidebar-primary__section">
+    
+    
+      <div class="sidebar-header-items__center">
+        
+          
+          
+            <div class="navbar-item">
+<script>
+document.write(`
+  <div class="version-switcher__container dropdown">
+    <button id="pst-version-switcher-button-3"
+      type="button"
+      class="version-switcher__button btn btn-sm dropdown-toggle"
+      data-bs-toggle="dropdown"
+      aria-haspopup="listbox"
+      aria-controls="pst-version-switcher-list-3"
+      aria-label="Version switcher list"
+    >
+      Choose version  <!-- this text may get changed later by javascript -->
+      <span class="caret"></span>
+    </button>
+    <div id="pst-version-switcher-list-3"
+      class="version-switcher__menu dropdown-menu list-group-flush py-0"
+      role="listbox" aria-labelledby="pst-version-switcher-button-3">
+      <!-- dropdown will be populated by javascript on page load -->
+    </div>
+  </div>
+`);
+</script></div>
+          
+        
+          
+          
+            <div class="navbar-item">
+<nav>
+  <ul class="bd-navbar-elements navbar-nav">
+    
+<li class="nav-item ">
+  <a class="nav-link nav-internal" href="../install.html">
+    Installation
+  </a>
+</li>
+
+
+<li class="nav-item current active">
+  <a class="nav-link nav-internal" href="index.html">
+    Tutorials
+  </a>
+</li>
+
+
+<li class="nav-item ">
+  <a class="nav-link nav-internal" href="../api.html">
+    API reference
+  </a>
+</li>
+
+  </ul>
+</nav></div>
+          
+        
+      </div>
+    
+    
+    
+      <div class="sidebar-header-items__end">
+        
+          <div class="navbar-item">
+
+<script>
+document.write(`
+  <button class="btn btn-sm nav-link pst-navbar-icon theme-switch-button" title="light/dark" aria-label="light/dark" data-bs-placement="bottom" data-bs-toggle="tooltip">
+    <i class="theme-switch fa-solid fa-sun fa-lg" data-mode="light"></i>
+    <i class="theme-switch fa-solid fa-moon fa-lg" data-mode="dark"></i>
+    <i class="theme-switch fa-solid fa-circle-half-stroke fa-lg" data-mode="auto"></i>
+  </button>
+`);
+</script></div>
+        
+          <div class="navbar-item"><ul class="navbar-icon-links"
+    aria-label="Icon Links">
+        <li class="nav-item">
+          
+          
+          
+          
+          
+          
+          
+          
+          <a href="https://github.com/regulatory-genomics/precellar" title="GitHub" class="nav-link pst-navbar-icon" rel="noopener" target="_blank" data-bs-toggle="tooltip" data-bs-placement="bottom"><i class="fa-brands fa-square-github fa-lg" aria-hidden="true"></i>
+            <span class="sr-only">GitHub</span></a>
+        </li>
+</ul></div>
+        
+      </div>
+    
+  </div>
+  
+    <div class="sidebar-primary-items__start sidebar-primary__section">
+        <div class="sidebar-primary-item">
+<nav class="bd-docs-nav bd-links"
+     aria-label="Section Navigation">
+  <p class="bd-links__title" role="heading" aria-level="1">Section Navigation</p>
+  <div class="bd-toc-item navbar-nav"><ul class="current nav bd-sidenav">
+<li class="toctree-l1"><a class="reference internal" href="txg_rna.html">Analyzing 10x Genomics scRNA-seq Data</a></li>
+<li class="toctree-l1"><a class="reference internal" href="txg_atac.html">10X ATAC-seq pipeline</a></li>
+<li class="toctree-l1"><a class="reference internal" href="txg_multiome.html">Preprocess 10X Genomics Gene Expression + ATAC Data</a></li>
+
+<li class="toctree-l1"><a class="reference internal" href="generic.html">Processing barcoded Fastq files</a></li>
+<li class="toctree-l1"><a class="reference internal" href="20250219_smartseq_final_run.html">Smart-seq2</a></li>
+<li class="toctree-l1"><a class="reference internal" href="20250221_celseq2.html">Cel-Seq2</a></li>
+<li class="toctree-l1 current active"><a class="current reference internal" href="#">Set up</a></li>
+
+
+<li class="toctree-l1"><a class="reference internal" href="make_seqspec.html">Write a seqspec file for your custom datasets</a></li>
+</ul>
+</div>
+</nav></div>
+    </div>
+  
+  
+  <div class="sidebar-primary-items__end sidebar-primary__section">
+  </div>
+  
+  <div id="rtd-footer-container"></div>
+
+
+      </div>
+      
+      <main id="main-content" class="bd-main" role="main">
+        
+        
+          <div class="bd-content">
+            <div class="bd-article-container">
+              
+              <div class="bd-header-article d-print-none">
+<div class="header-article-items header-article__inner">
+  
+    <div class="header-article-items__start">
+      
+        <div class="header-article-item">
+
+
+
+<nav aria-label="Breadcrumb" class="d-print-none">
+  <ul class="bd-breadcrumbs">
+    
+    <li class="breadcrumb-item breadcrumb-home">
+      <a href="../index.html" class="nav-link" aria-label="Home">
+        <i class="fa-solid fa-home"></i>
+      </a>
+    </li>
+    
+    <li class="breadcrumb-item"><a href="index.html" class="nav-link">Tutorials</a></li>
+    
+    <li class="breadcrumb-item active" aria-current="page">Set up</li>
+  </ul>
+</nav>
+</div>
+      
+    </div>
+  
+  
+</div>
+</div>
+              
+              
+              
+                
+<div id="searchbox"></div>
+                <article class="bd-article">
+                  
+  <section id="Set-up">
+<h1>Set up<a class="headerlink" href="#Set-up" title="Link to this heading">#</a></h1>
+<div class="nbinput docutils container">
+<div class="prompt highlight-none notranslate"><div class="highlight"><pre><span></span>[22]:
+</pre></div>
+</div>
+<div class="input_area highlight-ipython3 notranslate"><div class="highlight"><pre><span></span>import precellar
+precellar.__version__
+</pre></div>
+</div>
+</div>
+<div class="nboutput nblast docutils container">
+<div class="prompt highlight-none notranslate"><div class="highlight"><pre><span></span>[22]:
+</pre></div>
+</div>
+<div class="output_area docutils container">
+<div class="highlight"><pre>
+&#39;0.3.0-dev0&#39;
+</pre></div></div>
+</div>
+</section>
+<section id="Prepare-seqspec-and-read">
+<h1>Prepare seqspec and read<a class="headerlink" href="#Prepare-seqspec-and-read" title="Link to this heading">#</a></h1>
+<p>We made seqspec template base on <a class="reference external" href="https://teichlab.github.io/scg_lib_structs/methods_html/scifi-ATAC-seq.html">https://teichlab.github.io/scg_lib_structs/methods_html/scifi-ATAC-seq.html</a></p>
+<div class="nbinput docutils container">
+<div class="prompt highlight-none notranslate"><div class="highlight"><pre><span></span>[8]:
+</pre></div>
+</div>
+<div class="input_area highlight-ipython3 notranslate"><div class="highlight"><pre><span></span>assay = precellar.Assay(&quot;seqspec_template/scifi_atac.yaml&quot;)
+</pre></div>
+</div>
+</div>
+<div class="nboutput nblast docutils container">
+<div class="prompt empty docutils container">
+</div>
+<div class="output_area docutils container">
+<div class="highlight"><pre>
+Modality ATAC has nesting depth: 1
+</pre></div></div>
+</div>
+<div class="nbinput docutils container">
+<div class="prompt highlight-none notranslate"><div class="highlight"><pre><span></span>[9]:
+</pre></div>
+</div>
+<div class="input_area highlight-ipython3 notranslate"><div class="highlight"><pre><span></span>assay
+</pre></div>
+</div>
+</div>
+<div class="nboutput nblast docutils container">
+<div class="prompt highlight-none notranslate"><div class="highlight"><pre><span></span>[9]:
+</pre></div>
+</div>
+<div class="output_area docutils container">
+<div class="highlight"><pre>
+scifi_atac
+└── atac(200-2000)
+    ├── illumina_p5(29) [↓I2(16)✗]
+    ├── gem_barcode(16)
+    ├── custom_read1(32) [↓R1(74-100)✗]
+    ├── tn5_index_A(5)
+    ├── mosaic_end_1(19)
+    ├── gdna(1-1800)
+    ├── mosaic_end_2(19)
+    ├── tn5_index_B(5)
+    ├── custom_read2(34) [↑R2(74-100)✗]
+    ├── sample_index(8)
+    └── illumina_p7(24) [↑I1(8)✗]
+</pre></div></div>
+</div>
+<p>The data is downloaded from <a class="reference external" href="https://www.ncbi.nlm.nih.gov/sra/?term=SRR25320539">https://www.ncbi.nlm.nih.gov/sra/?term=SRR25320539</a>.</p>
+<div class="nbinput docutils container">
+<div class="prompt highlight-none notranslate"><div class="highlight"><pre><span></span>[18]:
+</pre></div>
+</div>
+<div class="input_area highlight-ipython3 notranslate"><div class="highlight"><pre><span></span>!zstdcat /data2/litian/precellar_temp/scifi-ATAC/SRR25320539/SRR25320539_2.fastq.zst | head -n 4
+</pre></div>
+</div>
+</div>
+<div class="nboutput nblast docutils container">
+<div class="prompt empty docutils container">
+</div>
+<div class="output_area docutils container">
+<div class="highlight"><pre>
+@SRR25320539.1 A00201R:718:HYKV2DSX3:3:1101:2437:1016 length=151
+CGCGAAGATGTGTATAAGAGACAGATAAAACAAAAAACGCCCACATCAAAATGAGTTATTCAAAGCAACATTCCAAGTCATCTAGTTGACAAACTCTATCACTCACAACAAACTATATTAAAATATCCATCCTATACACAAGACTTAGACA
++SRR25320539.1 A00201R:718:HYKV2DSX3:3:1101:2437:1016 length=151
+FFFFFFFFFFFFFFFFFFFFFFFFF,,,,F,,,,FF,:F,FFF,,,:F:FF,,,F:,F,::,:::F:F:F,,,F::,FFFF:F:FF,F:::,F:F:,:FF,F::,FFF,,:,,,::F,F,F,:FFFFFF,FFFFFF:F:F:,F,FFF,,FF
+zstd: error 70 : Write error : cannot write block : Broken pipe
+</pre></div></div>
+</div>
+<div class="nbinput docutils container">
+<div class="prompt highlight-none notranslate"><div class="highlight"><pre><span></span>[19]:
+</pre></div>
+</div>
+<div class="input_area highlight-ipython3 notranslate"><div class="highlight"><pre><span></span>!zstdcat /data2/litian/precellar_temp/scifi-ATAC/SRR25320539/SRR25320539_4.fastq.zst | head -n 4
+</pre></div>
+</div>
+</div>
+<div class="nboutput nblast docutils container">
+<div class="prompt empty docutils container">
+</div>
+<div class="output_area docutils container">
+<div class="highlight"><pre>
+@SRR25320539.1 A00201R:718:HYKV2DSX3:3:1101:2437:1016 length=151
+CTATCAGATGTGTATAAGAGACAGGCTATAAATAGATTTCTCTAGCTTTTTATGCACTTTTTTCTGTTGTAGTGTACTACGCCTAGTGTATATGAGGTATCAATGATGATATGTGGATTGGATGTCTCGCGTATGTCAACTAGAGGGAATT
++SRR25320539.1 A00201R:718:HYKV2DSX3:3:1101:2437:1016 length=151
+FFF:,:::FFFFFFFFFFFFFFF:,,,,:,FFF,,,,:,::,F,,F,,FF:,,,FF,FF,,,F,,F,,F:F:,,,F,F,,,,,,,,F,FF,,,FF:,,F:F:,,F:,,,FFF,,,F,,,:,F,,,F:F,,,FF,,,:FF,,F,,:,,,,F,
+zstd: error 70 : Write error : cannot write block : Broken pipe
+</pre></div></div>
+</div>
+<div class="nbinput docutils container">
+<div class="prompt highlight-none notranslate"><div class="highlight"><pre><span></span>[20]:
+</pre></div>
+</div>
+<div class="input_area highlight-ipython3 notranslate"><div class="highlight"><pre><span></span>!zstdcat /data2/litian/precellar_temp/scifi-ATAC/SRR25320539/SRR25320539_1.fastq.zst | head -n 4
+</pre></div>
+</div>
+</div>
+<div class="nboutput nblast docutils container">
+<div class="prompt empty docutils container">
+</div>
+<div class="output_area docutils container">
+<div class="highlight"><pre>
+@SRR25320539.1 A00201R:718:HYKV2DSX3:3:1101:2437:1016 length=8
+CTCGTACT
++SRR25320539.1 A00201R:718:HYKV2DSX3:3:1101:2437:1016 length=8
+,:F,FFFF
+zstd: error 70 : Write error : cannot write block : Broken pipe
+</pre></div></div>
+</div>
+<div class="nbinput docutils container">
+<div class="prompt highlight-none notranslate"><div class="highlight"><pre><span></span>[21]:
+</pre></div>
+</div>
+<div class="input_area highlight-ipython3 notranslate"><div class="highlight"><pre><span></span>!zstdcat /data2/litian/precellar_temp/scifi-ATAC/SRR25320539/SRR25320539_3.fastq.zst | head -n 4
+</pre></div>
+</div>
+</div>
+<div class="nboutput nblast docutils container">
+<div class="prompt empty docutils container">
+</div>
+<div class="output_area docutils container">
+<div class="highlight"><pre>
+@SRR25320539.1 A00201R:718:HYKV2DSX3:3:1101:2437:1016 length=16
+GGTCTTCACGATCCTC
++SRR25320539.1 A00201R:718:HYKV2DSX3:3:1101:2437:1016 length=16
+:F:,,,,,,,FFF,,,
+zstd: error 70 : Write error : cannot write block : Broken pipe
+</pre></div></div>
+</div>
+<div class="nbinput nblast docutils container">
+<div class="prompt highlight-none notranslate"><div class="highlight"><pre><span></span>[10]:
+</pre></div>
+</div>
+<div class="input_area highlight-ipython3 notranslate"><div class="highlight"><pre><span></span>assay.update_read(&quot;R1&quot;, fastq=&quot;/data2/litian/precellar_temp/scifi-ATAC/SRR25320539/SRR25320539_2.fastq.zst&quot;)
+assay.update_read(&quot;R2&quot;, fastq=&quot;/data2/litian/precellar_temp/scifi-ATAC/SRR25320539/SRR25320539_4.fastq.zst&quot;)
+assay.update_read(&quot;I1&quot;, fastq=&quot;/data2/litian/precellar_temp/scifi-ATAC/SRR25320539/SRR25320539_1.fastq.zst&quot;)
+assay.update_read(&quot;I2&quot;, fastq=&quot;/data2/litian/precellar_temp/scifi-ATAC/SRR25320539/SRR25320539_3.fastq.zst&quot;)
+</pre></div>
+</div>
+</div>
+<div class="nbinput docutils container">
+<div class="prompt highlight-none notranslate"><div class="highlight"><pre><span></span>[11]:
+</pre></div>
+</div>
+<div class="input_area highlight-ipython3 notranslate"><div class="highlight"><pre><span></span>!wget https://ftp.ensemblgenomes.ebi.ac.uk/pub/plants/release-60/fasta/zea_mays/dna/Zea_mays.Zm-B73-REFERENCE-NAM-5.0.dna.toplevel.fa.gz
+</pre></div>
+</div>
+</div>
+<div class="nboutput nblast docutils container">
+<div class="prompt empty docutils container">
+</div>
+<div class="output_area docutils container">
+<div class="highlight"><pre>
+--2025-03-07 17:32:43--  https://ftp.ensemblgenomes.ebi.ac.uk/pub/plants/release-60/fasta/zea_mays/dna/Zea_mays.Zm-B73-REFERENCE-NAM-5.0.dna.toplevel.fa.gz
+193.62.193.161ensemblgenomes.ebi.ac.uk (ftp.ensemblgenomes.ebi.ac.uk)...
+connected. to ftp.ensemblgenomes.ebi.ac.uk (ftp.ensemblgenomes.ebi.ac.uk)|193.62.193.161|:443...
+HTTP request sent, awaiting response... 200 OK
+Length: 645391865 (615M) [application/x-gzip]
+Saving to: &#39;Zea_mays.Zm-B73-REFERENCE-NAM-5.0.dna.toplevel.fa.gz&#39;
+
+Zea_mays.Zm-B73-REF 100%[===================&gt;] 615.49M  4.35MB/s    in 1m 47s
+
+2025-03-07 17:34:31 (5.75 MB/s) - &#39;Zea_mays.Zm-B73-REFERENCE-NAM-5.0.dna.toplevel.fa.gz&#39; saved [645391865/645391865]
+
+</pre></div></div>
+</div>
+<div class="nbinput docutils container">
+<div class="prompt highlight-none notranslate"><div class="highlight"><pre><span></span>[12]:
+</pre></div>
+</div>
+<div class="input_area highlight-ipython3 notranslate"><div class="highlight"><pre><span></span>precellar.make_bwa_index(fasta=&quot;/data2/litian/database/genome/Zea_mays.Zm-B73-REFERENCE-NAM-5.0.dna.toplevel.fa.gz&quot;,
+                         genome_prefix=&quot;/data2/litian/database/bwa/zm/zm&quot;)
+</pre></div>
+</div>
+</div>
+<div class="nboutput docutils container">
+<div class="prompt empty docutils container">
+</div>
+<div class="output_area docutils container">
+<div class="highlight"><pre>
+ref_seq_len = 4364151988
+</pre></div></div>
+</div>
+<div class="nboutput docutils container">
+<div class="prompt empty docutils container">
+</div>
+<div class="output_area stderr docutils container">
+<div class="highlight"><pre>
+[bwa_index] Pack FASTA... 15.04 sec
+* Entering FMI_search
+init ticks = 126244973136
+ref seq len = 4364151988
+binary seq ticks = 81294602774
+build suffix-array ticks = 1536448616796
+pos: 545518999, ref_seq_len__: 545518998
+build fm-index ticks = 1348375543496
+</pre></div></div>
+</div>
+<div class="nboutput nblast docutils container">
+<div class="prompt empty docutils container">
+</div>
+<div class="output_area docutils container">
+<div class="highlight"><pre>
+count = 0, 1161389254, 2182075994, 3202762734, 4364151988
+BWT[3512089108] = 4
+CP_SHIFT = 6, CP_MASK = 63
+sizeof CP_OCC = 64
+max_occ_ind = 68189874
+</pre></div></div>
+</div>
+</section>
+<section id="Alignment">
+<h1>Alignment<a class="headerlink" href="#Alignment" title="Link to this heading">#</a></h1>
+<div class="nbinput nblast docutils container">
+<div class="prompt highlight-none notranslate"><div class="highlight"><pre><span></span>[13]:
+</pre></div>
+</div>
+<div class="input_area highlight-ipython3 notranslate"><div class="highlight"><pre><span></span>bwa = precellar.aligners.BWAMEM2(&quot;/data2/litian/database/bwa/zm/zm&quot;)
+</pre></div>
+</div>
+</div>
+<div class="nbinput docutils container">
+<div class="prompt highlight-none notranslate"><div class="highlight"><pre><span></span>[15]:
+</pre></div>
+</div>
+<div class="input_area highlight-ipython3 notranslate"><div class="highlight"><pre><br/><span></span>precellar.align(
+    assay,
+    modality=&#39;atac&#39;,
+    aligner=bwa,
+    output=&#39;/data2/litian/precellar_data//processed_file/20250307_scifi_out.fragment.tsv.zst&#39;,
+    output_type=&#39;fragment&#39;,
+    num_threads=32,
+)
+</pre></div>
+</div>
+</div>
+<div class="nboutput docutils container">
+<div class="prompt empty docutils container">
+</div>
+<div class="output_area stderr docutils container">
+<div class="highlight"><pre>
+[2025-03-07T10:13:37Z <span class="ansi-green-fg">INFO</span>] Starting alignment process
+[2025-03-07T10:13:37Z <span class="ansi-green-fg">INFO</span>] Using provided Assay object
+[2025-03-07T10:13:37Z <span class="ansi-green-fg">INFO</span>] Using modality: ATAC
+[2025-03-07T10:13:37Z <span class="ansi-green-fg">INFO</span>] Initialized aligner: BWA-MEM2
+[2025-03-07T10:13:37Z <span class="ansi-green-fg">INFO</span>] Initializing FastqProcessor with 32 threads and chunk size 10000000
+[2025-03-07T10:13:37Z <span class="ansi-green-fg">INFO</span>] Adding mitochondrial DNA references: [&#34;chrM&#34;, &#34;M&#34;]
+[2025-03-07T10:13:37Z <span class="ansi-green-fg">INFO</span>] Generating alignments
+[2025-03-07T10:13:37Z <span class="ansi-green-fg">INFO</span>] Using BWA-MEM2 aligner
+[2025-03-07T10:13:37Z <span class="ansi-green-fg">INFO</span>] Starting gen_barcoded_alignments with chunk_size=320000000
+[2025-03-07T10:13:37Z <span class="ansi-green-fg">INFO</span>] Starting gen_barcoded_fastq for modality: ATAC
+[2025-03-07T10:13:37Z <span class="ansi-green-fg">INFO</span>] Counting barcodes...
+[2025-03-07T10:16:22Z <span class="ansi-green-fg">INFO</span>] Processing read R1 with 3 segments, is_reverse: false
+[2025-03-07T10:16:22Z <span class="ansi-green-fg">INFO</span>] Segment in read R1: type=Barcode, range=0..5, id=tn5_index_A
+[2025-03-07T10:16:22Z <span class="ansi-green-fg">INFO</span>] Segment in read R1: type=CustomPrimer, range=5..24, id=mosaic_end_1
+[2025-03-07T10:16:22Z <span class="ansi-green-fg">INFO</span>] Segment in read R1: type=Gdna, range=24..151, id=gdna
+[2025-03-07T10:16:22Z <span class="ansi-green-fg">INFO</span>] Created annotator for read R1 with 2 subregions
+[2025-03-07T10:16:23Z <span class="ansi-green-fg">INFO</span>] Processing read R2 with 3 segments, is_reverse: true
+[2025-03-07T10:16:23Z <span class="ansi-green-fg">INFO</span>] Segment in read R2: type=Barcode, range=0..5, id=tn5_index_B
+[2025-03-07T10:16:23Z <span class="ansi-green-fg">INFO</span>] Segment in read R2: type=CustomPrimer, range=5..24, id=mosaic_end_2
+[2025-03-07T10:16:23Z <span class="ansi-green-fg">INFO</span>] Segment in read R2: type=Gdna, range=24..151, id=gdna
+[2025-03-07T10:16:23Z <span class="ansi-green-fg">INFO</span>] Created annotator for read R2 with 2 subregions
+[2025-03-07T10:16:23Z <span class="ansi-green-fg">INFO</span>] Processing read I1 with 1 segments, is_reverse: true
+[2025-03-07T10:16:23Z <span class="ansi-green-fg">INFO</span>] Segment in read I1: type=Barcode, range=0..8, id=sample_index
+[2025-03-07T10:16:23Z <span class="ansi-green-fg">INFO</span>] Created annotator for read I1 with 1 subregions
+[2025-03-07T10:16:23Z <span class="ansi-green-fg">INFO</span>] Processing read I2 with 1 segments, is_reverse: false
+[2025-03-07T10:16:23Z <span class="ansi-green-fg">INFO</span>] Segment in read I2: type=Barcode, range=0..16, id=gem_barcode
+[2025-03-07T10:16:23Z <span class="ansi-green-fg">INFO</span>] Created annotator for read I2 with 1 subregions
+[2025-03-07T10:16:23Z <span class="ansi-green-fg">INFO</span>] FastqReader created. Is paired-end: true
+[2025-03-07T10:16:23Z <span class="ansi-green-fg">INFO</span>] Number of annotators: 4
+[2025-03-07T10:16:23Z <span class="ansi-green-fg">INFO</span>] Number of readers: 4
+[2025-03-07T10:16:23Z <span class="ansi-green-fg">INFO</span>] Barcodes found: [(&#34;tn5_index_A&#34;, 5), (&#34;tn5_index_B&#34;, 5), (&#34;sample_index&#34;, 8), (&#34;gem_barcode&#34;, 16)]
+[2025-03-07T10:16:23Z <span class="ansi-green-fg">INFO</span>] UMIs found: []
+[2025-03-07T10:16:23Z <span class="ansi-green-fg">INFO</span>] Total reads reported: 65937541
+[2025-03-07T10:16:23Z <span class="ansi-green-fg">INFO</span>] Aligning 65937541 reads...
+[2025-03-07T10:16:23Z <span class="ansi-green-fg">INFO</span>] Processing output type: fragment
+[2025-03-07T10:16:23Z <span class="ansi-green-fg">INFO</span>] Generating fragments
+[2025-03-07T10:16:23Z <span class="ansi-green-fg">INFO</span>] Using compression: Some(Zstd) with level: None
+[2025-03-07T10:16:24Z <span class="ansi-green-fg">INFO</span>] Created output file: &#34;/data2/litian/precellar_data//processed_file/20250307_scifi_out.fragment.tsv.zst&#34;
+[2025-03-07T10:16:27Z <span class="ansi-green-fg">INFO</span>] Processing chunk with 981596 records
+[2025-03-07T10:16:27Z <span class="ansi-green-fg">INFO</span>] Sample record - Barcode present: true, UMI present: false, Read1 present: true, Read2 present: true
+  1%|▍         |   981596/65937541 [00:53&lt;59:14, 18273.95it/s][2025-03-07T10:17:21Z <span class="ansi-green-fg">INFO</span>] Processing chunk with 981596 records
+[2025-03-07T10:17:21Z <span class="ansi-green-fg">INFO</span>] Sample record - Barcode present: true, UMI present: false, Read1 present: true, Read2 present: true
+  3%|▌         |  1963192/65937541 [01:44&lt;56:52, 18745.66it/s][2025-03-07T10:18:12Z <span class="ansi-green-fg">INFO</span>] Processing chunk with 981596 records
+[2025-03-07T10:18:12Z <span class="ansi-green-fg">INFO</span>] Sample record - Barcode present: true, UMI present: false, Read1 present: true, Read2 present: true
+  4%|▋         |  2944788/65937541 [02:35&lt;55:18, 18983.43it/s][2025-03-07T10:19:02Z <span class="ansi-green-fg">INFO</span>] Processing chunk with 981596 records
+[2025-03-07T10:19:02Z <span class="ansi-green-fg">INFO</span>] Sample record - Barcode present: true, UMI present: false, Read1 present: true, Read2 present: true
+  6%|▊         |  3926384/65937541 [03:26&lt;54:22, 19007.44it/s][2025-03-07T10:19:55Z <span class="ansi-green-fg">INFO</span>] Processing chunk with 981596 records
+[2025-03-07T10:19:55Z <span class="ansi-green-fg">INFO</span>] Sample record - Barcode present: true, UMI present: false, Read1 present: true, Read2 present: true
+  7%|▉         |  4907980/65937541 [04:18&lt;53:29, 19018.15it/s][2025-03-07T10:20:45Z <span class="ansi-green-fg">INFO</span>] Processing chunk with 981596 records
+[2025-03-07T10:20:45Z <span class="ansi-green-fg">INFO</span>] Sample record - Barcode present: true, UMI present: false, Read1 present: true, Read2 present: true
+  9%|█         |  5889576/65937541 [05:08&lt;52:23, 19103.71it/s][2025-03-07T10:21:35Z <span class="ansi-green-fg">INFO</span>] Processing chunk with 981596 records
+[2025-03-07T10:21:35Z <span class="ansi-green-fg">INFO</span>] Sample record - Barcode present: true, UMI present: false, Read1 present: true, Read2 present: true
+ 10%|█▎        |  6871172/65937541 [05:58&lt;51:23, 19154.03it/s][2025-03-07T10:22:26Z <span class="ansi-green-fg">INFO</span>] Processing chunk with 981596 records
+[2025-03-07T10:22:26Z <span class="ansi-green-fg">INFO</span>] Sample record - Barcode present: true, UMI present: false, Read1 present: true, Read2 present: true
+ 12%|█▍        |  7852768/65937541 [06:49&lt;50:27, 19187.38it/s][2025-03-07T10:23:17Z <span class="ansi-green-fg">INFO</span>] Processing chunk with 981596 records
+[2025-03-07T10:23:17Z <span class="ansi-green-fg">INFO</span>] Sample record - Barcode present: true, UMI present: false, Read1 present: true, Read2 present: true
+ 13%|█▌        |  8834364/65937541 [07:40&lt;49:37, 19179.20it/s][2025-03-07T10:24:07Z <span class="ansi-green-fg">INFO</span>] Processing chunk with 981596 records
+[2025-03-07T10:24:07Z <span class="ansi-green-fg">INFO</span>] Sample record - Barcode present: true, UMI present: false, Read1 present: true, Read2 present: true
+ 15%|█▋        |  9815960/65937541 [08:31&lt;48:43, 19196.59it/s][2025-03-07T10:24:58Z <span class="ansi-green-fg">INFO</span>] Processing chunk with 981596 records
+[2025-03-07T10:24:58Z <span class="ansi-green-fg">INFO</span>] Sample record - Barcode present: true, UMI present: false, Read1 present: true, Read2 present: true
+ 16%|█▊        | 10797556/65937541 [09:21&lt;47:49, 19214.29it/s][2025-03-07T10:25:49Z <span class="ansi-green-fg">INFO</span>] Processing chunk with 981596 records
+[2025-03-07T10:25:49Z <span class="ansi-green-fg">INFO</span>] Sample record - Barcode present: true, UMI present: false, Read1 present: true, Read2 present: true
+ 18%|█▉        | 11779152/65937541 [10:12&lt;46:55, 19236.79it/s][2025-03-07T10:26:40Z <span class="ansi-green-fg">INFO</span>] Processing chunk with 981596 records
+[2025-03-07T10:26:40Z <span class="ansi-green-fg">INFO</span>] Sample record - Barcode present: true, UMI present: false, Read1 present: true, Read2 present: true
+ 19%|██        | 12760748/65937541 [11:03&lt;46:04, 19234.89it/s][2025-03-07T10:27:30Z <span class="ansi-green-fg">INFO</span>] Processing chunk with 981596 records
+[2025-03-07T10:27:30Z <span class="ansi-green-fg">INFO</span>] Sample record - Barcode present: true, UMI present: false, Read1 present: true, Read2 present: true
+ 21%|██▎       | 13742344/65937541 [11:54&lt;45:11, 19246.32it/s][2025-03-07T10:28:21Z <span class="ansi-green-fg">INFO</span>] Processing chunk with 981596 records
+[2025-03-07T10:28:21Z <span class="ansi-green-fg">INFO</span>] Sample record - Barcode present: true, UMI present: false, Read1 present: true, Read2 present: true
+ 22%|██▍       | 14723940/65937541 [12:44&lt;44:20, 19249.38it/s][2025-03-07T10:29:12Z <span class="ansi-green-fg">INFO</span>] Processing chunk with 981596 records
+[2025-03-07T10:29:12Z <span class="ansi-green-fg">INFO</span>] Sample record - Barcode present: true, UMI present: false, Read1 present: true, Read2 present: true
+ 24%|██▌       | 15705536/65937541 [13:35&lt;43:29, 19249.42it/s][2025-03-07T10:30:03Z <span class="ansi-green-fg">INFO</span>] Processing chunk with 981596 records
+[2025-03-07T10:30:03Z <span class="ansi-green-fg">INFO</span>] Sample record - Barcode present: true, UMI present: false, Read1 present: true, Read2 present: true
+ 25%|██▋       | 16687132/65937541 [14:26&lt;42:36, 19264.75it/s][2025-03-07T10:30:53Z <span class="ansi-green-fg">INFO</span>] Processing chunk with 981596 records
+[2025-03-07T10:30:53Z <span class="ansi-green-fg">INFO</span>] Sample record - Barcode present: true, UMI present: false, Read1 present: true, Read2 present: true
+ 27%|██▊       | 17668728/65937541 [15:16&lt;41:44, 19274.94it/s][2025-03-07T10:31:44Z <span class="ansi-green-fg">INFO</span>] Processing chunk with 981596 records
+[2025-03-07T10:31:44Z <span class="ansi-green-fg">INFO</span>] Sample record - Barcode present: true, UMI present: false, Read1 present: true, Read2 present: true
+ 28%|██▉       | 18650324/65937541 [16:08&lt;40:54, 19266.63it/s][2025-03-07T10:32:35Z <span class="ansi-green-fg">INFO</span>] Processing chunk with 981596 records
+[2025-03-07T10:32:35Z <span class="ansi-green-fg">INFO</span>] Sample record - Barcode present: true, UMI present: false, Read1 present: true, Read2 present: true
+ 30%|███       | 19631920/65937541 [16:58&lt;40:02, 19270.59it/s][2025-03-07T10:33:26Z <span class="ansi-green-fg">INFO</span>] Processing chunk with 981596 records
+[2025-03-07T10:33:26Z <span class="ansi-green-fg">INFO</span>] Sample record - Barcode present: true, UMI present: false, Read1 present: true, Read2 present: true
+ 31%|███▎      | 20613516/65937541 [17:50&lt;39:12, 19264.94it/s][2025-03-07T10:34:17Z <span class="ansi-green-fg">INFO</span>] Processing chunk with 981596 records
+[2025-03-07T10:34:17Z <span class="ansi-green-fg">INFO</span>] Sample record - Barcode present: true, UMI present: false, Read1 present: true, Read2 present: true
+ 33%|███▍      | 21595112/65937541 [18:40&lt;38:21, 19267.97it/s][2025-03-07T10:35:08Z <span class="ansi-green-fg">INFO</span>] Processing chunk with 981596 records
+[2025-03-07T10:35:08Z <span class="ansi-green-fg">INFO</span>] Sample record - Barcode present: true, UMI present: false, Read1 present: true, Read2 present: true
+ 34%|███▌      | 22576708/65937541 [19:31&lt;37:29, 19273.92it/s][2025-03-07T10:35:58Z <span class="ansi-green-fg">INFO</span>] Processing chunk with 981596 records
+[2025-03-07T10:35:58Z <span class="ansi-green-fg">INFO</span>] Sample record - Barcode present: true, UMI present: false, Read1 present: true, Read2 present: true
+ 36%|███▊      | 23558304/65937541 [20:21&lt;36:37, 19289.00it/s][2025-03-07T10:36:49Z <span class="ansi-green-fg">INFO</span>] Processing chunk with 981596 records
+[2025-03-07T10:36:49Z <span class="ansi-green-fg">INFO</span>] Sample record - Barcode present: true, UMI present: false, Read1 present: true, Read2 present: true
+ 37%|███▉      | 24539900/65937541 [21:11&lt;35:45, 19292.42it/s][2025-03-07T10:37:39Z <span class="ansi-green-fg">INFO</span>] Processing chunk with 981596 records
+[2025-03-07T10:37:39Z <span class="ansi-green-fg">INFO</span>] Sample record - Barcode present: true, UMI present: false, Read1 present: true, Read2 present: true
+ 39%|████      | 25521496/65937541 [22:02&lt;34:54, 19298.49it/s][2025-03-07T10:38:30Z <span class="ansi-green-fg">INFO</span>] Processing chunk with 981596 records
+[2025-03-07T10:38:30Z <span class="ansi-green-fg">INFO</span>] Sample record - Barcode present: true, UMI present: false, Read1 present: true, Read2 present: true
+ 40%|████▎     | 26503092/65937541 [22:53&lt;34:03, 19297.96it/s][2025-03-07T10:39:20Z <span class="ansi-green-fg">INFO</span>] Processing chunk with 981596 records
+[2025-03-07T10:39:20Z <span class="ansi-green-fg">INFO</span>] Sample record - Barcode present: true, UMI present: false, Read1 present: true, Read2 present: true
+ 42%|████▍     | 27484688/65937541 [23:44&lt;33:12, 19296.86it/s][2025-03-07T10:40:12Z <span class="ansi-green-fg">INFO</span>] Processing chunk with 981596 records
+[2025-03-07T10:40:12Z <span class="ansi-green-fg">INFO</span>] Sample record - Barcode present: true, UMI present: false, Read1 present: true, Read2 present: true
+ 43%|████▌     | 28466284/65937541 [24:36&lt;32:23, 19284.86it/s][2025-03-07T10:41:03Z <span class="ansi-green-fg">INFO</span>] Processing chunk with 981596 records
+[2025-03-07T10:41:03Z <span class="ansi-green-fg">INFO</span>] Sample record - Barcode present: true, UMI present: false, Read1 present: true, Read2 present: true
+ 45%|████▋     | 29447880/65937541 [25:27&lt;31:32, 19280.36it/s][2025-03-07T10:41:55Z <span class="ansi-green-fg">INFO</span>] Processing chunk with 981596 records
+[2025-03-07T10:41:55Z <span class="ansi-green-fg">INFO</span>] Sample record - Barcode present: true, UMI present: false, Read1 present: true, Read2 present: true
+ 46%|████▊     | 30429476/65937541 [26:19&lt;30:42, 19269.23it/s][2025-03-07T10:42:46Z <span class="ansi-green-fg">INFO</span>] Processing chunk with 981596 records
+[2025-03-07T10:42:46Z <span class="ansi-green-fg">INFO</span>] Sample record - Barcode present: true, UMI present: false, Read1 present: true, Read2 present: true
+ 48%|███���▉     | 31411072/65937541 [27:09&lt;29:51, 19274.96it/s][2025-03-07T10:43:37Z <span class="ansi-green-fg">INFO</span>] Processing chunk with 981596 records
+[2025-03-07T10:43:37Z <span class="ansi-green-fg">INFO</span>] Sample record - Barcode present: true, UMI present: false, Read1 present: true, Read2 present: true
+ 49%|█████     | 32392668/65937541 [28:00&lt;29:00, 19276.10it/s][2025-03-07T10:44:27Z <span class="ansi-green-fg">INFO</span>] Processing chunk with 981596 records
+[2025-03-07T10:44:27Z <span class="ansi-green-fg">INFO</span>] Sample record - Barcode present: true, UMI present: false, Read1 present: true, Read2 present: true
+ 51%|█████▎    | 33374264/65937541 [28:51&lt;28:09, 19272.90it/s][2025-03-07T10:45:19Z <span class="ansi-green-fg">INFO</span>] Processing chunk with 981596 records
+[2025-03-07T10:45:19Z <span class="ansi-green-fg">INFO</span>] Sample record - Barcode present: true, UMI present: false, Read1 present: true, Read2 present: true
+ 52%|█████▍    | 34355860/65937541 [29:42&lt;27:18, 19276.19it/s][2025-03-07T10:46:09Z <span class="ansi-green-fg">INFO</span>] Processing chunk with 981596 records
+[2025-03-07T10:46:09Z <span class="ansi-green-fg">INFO</span>] Sample record - Barcode present: true, UMI present: false, Read1 present: true, Read2 present: true
+ 54%|█████▌    | 35337456/65937541 [30:33&lt;26:27, 19277.22it/s][2025-03-07T10:47:02Z <span class="ansi-green-fg">INFO</span>] Processing chunk with 981596 records
+[2025-03-07T10:47:02Z <span class="ansi-green-fg">INFO</span>] Sample record - Barcode present: true, UMI present: false, Read1 present: true, Read2 present: true
+ 55%|█████▋    | 36319052/65937541 [31:25&lt;25:37, 19260.43it/s][2025-03-07T10:47:53Z <span class="ansi-green-fg">INFO</span>] Processing chunk with 981596 records
+[2025-03-07T10:47:53Z <span class="ansi-green-fg">INFO</span>] Sample record - Barcode present: true, UMI present: false, Read1 present: true, Read2 present: true
+ 57%|█████▊    | 37300648/65937541 [32:15&lt;24:46, 19267.85it/s][2025-03-07T10:48:43Z <span class="ansi-green-fg">INFO</span>] Processing chunk with 981596 records
+[2025-03-07T10:48:43Z <span class="ansi-green-fg">INFO</span>] Sample record - Barcode present: true, UMI present: false, Read1 present: true, Read2 present: true
+ 58%|█████▉    | 38282244/65937541 [33:06&lt;23:55, 19271.10it/s][2025-03-07T10:49:33Z <span class="ansi-green-fg">INFO</span>] Processing chunk with 981596 records
+[2025-03-07T10:49:33Z <span class="ansi-green-fg">INFO</span>] Sample record - Barcode present: true, UMI present: false, Read1 present: true, Read2 present: true
+ 60%|██████    | 39263840/65937541 [33:57&lt;23:04, 19271.89it/s][2025-03-07T10:50:25Z <span class="ansi-green-fg">INFO</span>] Processing chunk with 981596 records
+[2025-03-07T10:50:25Z <span class="ansi-green-fg">INFO</span>] Sample record - Barcode present: true, UMI present: false, Read1 present: true, Read2 present: true
+ 61%|██████▎   | 40245436/65937541 [34:48&lt;22:12, 19274.19it/s][2025-03-07T10:51:15Z <span class="ansi-green-fg">INFO</span>] Processing chunk with 981596 records
+[2025-03-07T10:51:15Z <span class="ansi-green-fg">INFO</span>] Sample record - Barcode present: true, UMI present: false, Read1 present: true, Read2 present: true
+ 63%|██████▍   | 41227032/65937541 [35:38&lt;21:21, 19280.67it/s][2025-03-07T10:52:06Z <span class="ansi-green-fg">INFO</span>] Processing chunk with 981596 records
+[2025-03-07T10:52:06Z <span class="ansi-green-fg">INFO</span>] Sample record - Barcode present: true, UMI present: false, Read1 present: true, Read2 present: true
+ 64%|██████▌   | 42208628/65937541 [36:28&lt;20:30, 19284.96it/s][2025-03-07T10:52:56Z <span class="ansi-green-fg">INFO</span>] Processing chunk with 981596 records
+[2025-03-07T10:52:56Z <span class="ansi-green-fg">INFO</span>] Sample record - Barcode present: true, UMI present: false, Read1 present: true, Read2 present: true
+ 66%|██████▋   | 43190224/65937541 [37:18&lt;19:39, 19293.53it/s][2025-03-07T10:53:45Z <span class="ansi-green-fg">INFO</span>] Processing chunk with 981596 records
+[2025-03-07T10:53:45Z <span class="ansi-green-fg">INFO</span>] Sample record - Barcode present: true, UMI present: false, Read1 present: true, Read2 present: true
+ 67%|██████▊   | 44171820/65937541 [38:08&lt;18:47, 19298.24it/s][2025-03-07T10:54:36Z <span class="ansi-green-fg">INFO</span>] Processing chunk with 981596 records
+[2025-03-07T10:54:36Z <span class="ansi-green-fg">INFO</span>] Sample record - Barcode present: true, UMI present: false, Read1 present: true, Read2 present: true
+ 68%|██████▉   | 45153416/65937541 [38:59&lt;17:56, 19299.42it/s][2025-03-07T10:55:27Z <span class="ansi-green-fg">INFO</span>] Processing chunk with 981596 records
+[2025-03-07T10:55:27Z <span class="ansi-green-fg">INFO</span>] Sample record - Barcode present: true, UMI present: false, Read1 present: true, Read2 present: true
+ 70%|███████   | 46135012/65937541 [39:51&lt;17:06, 19294.05it/s][2025-03-07T10:56:18Z <span class="ansi-green-fg">INFO</span>] Processing chunk with 981596 records
+[2025-03-07T10:56:18Z <span class="ansi-green-fg">INFO</span>] Sample record - Barcode present: true, UMI present: false, Read1 present: true, Read2 present: true
+ 71%|███████▍  | 47116608/65937541 [40:41&lt;16:15, 19299.81it/s][2025-03-07T10:57:09Z <span class="ansi-green-fg">INFO</span>] Processing chunk with 981596 records
+[2025-03-07T10:57:09Z <span class="ansi-green-fg">INFO</span>] Sample record - Barcode present: true, UMI present: false, Read1 present: true, Read2 present: true
+ 73%|███████▌  | 48098204/65937541 [41:32&lt;15:24, 19299.72it/s][2025-03-07T10:57:59Z <span class="ansi-green-fg">INFO</span>] Processing chunk with 981596 records
+[2025-03-07T10:57:59Z <span class="ansi-green-fg">INFO</span>] Sample record - Barcode present: true, UMI present: false, Read1 present: true, Read2 present: true
+ 74%|███████▋  | 49079800/65937541 [42:22&lt;14:33, 19304.06it/s][2025-03-07T10:58:50Z <span class="ansi-green-fg">INFO</span>] Processing chunk with 981596 records
+[2025-03-07T10:58:50Z <span class="ansi-green-fg">INFO</span>] Sample record - Barcode present: true, UMI present: false, Read1 present: true, Read2 present: true
+ 76%|███████▊  | 50061396/65937541 [43:14&lt;13:42, 19298.42it/s][2025-03-07T10:59:41Z <span class="ansi-green-fg">INFO</span>] Processing chunk with 981596 records
+[2025-03-07T10:59:41Z <span class="ansi-green-fg">INFO</span>] Sample record - Barcode present: true, UMI present: false, Read1 present: true, Read2 present: true
+ 77%|███████▉  | 51042992/65937541 [44:04&lt;12:51, 19303.82it/s][2025-03-07T11:00:32Z <span class="ansi-green-fg">INFO</span>] Processing chunk with 981596 records
+[2025-03-07T11:00:32Z <span class="ansi-green-fg">INFO</span>] Sample record - Barcode present: true, UMI present: false, Read1 present: true, Read2 present: true
+ 79%|████████  | 52024588/65937541 [44:55&lt;12:00, 19300.44it/s][2025-03-07T11:01:22Z <span class="ansi-green-fg">INFO</span>] Processing chunk with 981596 records
+[2025-03-07T11:01:22Z <span class="ansi-green-fg">INFO</span>] Sample record - Barcode present: true, UMI present: false, Read1 present: true, Read2 present: true
+ 80%|████████▎ | 53006184/65937541 [45:45&lt;11:09, 19306.14it/s][2025-03-07T11:02:13Z <span class="ansi-green-fg">INFO</span>] Processing chunk with 981596 records
+[2025-03-07T11:02:13Z <span class="ansi-green-fg">INFO</span>] Sample record - Barcode present: true, UMI present: false, Read1 present: true, Read2 present: true
+ 82%|████████▍ | 53987780/65937541 [46:35&lt;10:18, 19314.14it/s][2025-03-07T11:03:02Z <span class="ansi-green-fg">INFO</span>] Processing chunk with 981596 records
+[2025-03-07T11:03:02Z <span class="ansi-green-fg">INFO</span>] Sample record - Barcode present: true, UMI present: false, Read1 present: true, Read2 present: true
+ 83%|████████▌ | 54969376/65937541 [47:25&lt;09:27, 19317.45it/s][2025-03-07T11:03:53Z <span class="ansi-green-fg">INFO</span>] Processing chunk with 981596 records
+[2025-03-07T11:03:53Z <span class="ansi-green-fg">INFO</span>] Sample record - Barcode present: true, UMI present: false, Read1 present: true, Read2 present: true
+ 85%|████████▋ | 55950972/65937541 [48:16&lt;08:36, 19317.56it/s][2025-03-07T11:04:43Z <span class="ansi-green-fg">INFO</span>] Processing chunk with 981596 records
+[2025-03-07T11:04:43Z <span class="ansi-green-fg">INFO</span>] Sample record - Barcode present: true, UMI present: false, Read1 present: true, Read2 present: true
+ 86%|████████▊ | 56932568/65937541 [49:06&lt;07:46, 19323.17it/s][2025-03-07T11:05:33Z <span class="ansi-green-fg">INFO</span>] Processing chunk with 981596 records
+[2025-03-07T11:05:33Z <span class="ansi-green-fg">INFO</span>] Sample record - Barcode present: true, UMI present: false, Read1 present: true, Read2 present: true
+ 88%|████████▉ | 57914164/65937541 [49:56&lt;06:55, 19326.31it/s][2025-03-07T11:06:24Z <span class="ansi-green-fg">INFO</span>] Processing chunk with 981596 records
+[2025-03-07T11:06:24Z <span class="ansi-green-fg">INFO</span>] Sample record - Barcode present: true, UMI present: false, Read1 present: true, Read2 present: true
+ 89%|█████████ | 58895760/65937541 [50:46&lt;06:04, 19331.85it/s][2025-03-07T11:07:14Z <span class="ansi-green-fg">INFO</span>] Processing chunk with 981596 records
+[2025-03-07T11:07:14Z <span class="ansi-green-fg">INFO</span>] Sample record - Barcode present: true, UMI present: false, Read1 present: true, Read2 present: true
+ 91%|█████████▎| 59877356/65937541 [51:37&lt;05:13, 19330.14it/s][2025-03-07T11:08:05Z <span class="ansi-green-fg">INFO</span>] Processing chunk with 981596 records
+[2025-03-07T11:08:05Z <span class="ansi-green-fg">INFO</span>] Sample record - Barcode present: true, UMI present: false, Read1 present: true, Read2 present: true
+ 92%|█████████▍| 60858952/65937541 [52:28&lt;04:22, 19329.95it/s][2025-03-07T11:08:56Z <span class="ansi-green-fg">INFO</span>] Processing chunk with 981596 records
+[2025-03-07T11:08:56Z <span class="ansi-green-fg">INFO</span>] Sample record - Barcode present: true, UMI present: false, Read1 present: true, Read2 present: true
+ 94%|█████████▌| 61840548/65937541 [53:19&lt;03:31, 19330.54it/s][2025-03-07T11:09:46Z <span class="ansi-green-fg">INFO</span>] Processing chunk with 981596 records
+[2025-03-07T11:09:46Z <span class="ansi-green-fg">INFO</span>] Sample record - Barcode present: true, UMI present: false, Read1 present: true, Read2 present: true
+ 95%|█████████▋| 62822144/65937541 [54:09&lt;02:41, 19332.68it/s][2025-03-07T11:10:37Z <span class="ansi-green-fg">INFO</span>] Processing chunk with 981596 records
+[2025-03-07T11:10:37Z <span class="ansi-green-fg">INFO</span>] Sample record - Barcode present: true, UMI present: false, Read1 present: true, Read2 present: true
+ 97%|█████████▊| 63803740/65937541 [55:00&lt;01:50, 19328.71it/s][2025-03-07T11:11:28Z <span class="ansi-green-fg">INFO</span>] Processing chunk with 981596 records
+[2025-03-07T11:11:28Z <span class="ansi-green-fg">INFO</span>] Sample record - Barcode present: true, UMI present: false, Read1 present: true, Read2 present: true
+ 98%|█████████▉| 64785336/65937541 [55:50&lt;00:59, 19334.21it/s][2025-03-07T11:12:18Z <span class="ansi-green-fg">INFO</span>] Processing chunk with 981596 records
+[2025-03-07T11:12:18Z <span class="ansi-green-fg">INFO</span>] Sample record - Barcode present: true, UMI present: false, Read1 present: true, Read2 present: true
+100%|██████████| 65766932/65937541 [56:41&lt;00:08, 19333.12it/s][2025-03-07T11:13:06Z <span class="ansi-green-fg">INFO</span>] Processing chunk with 170609 records
+[2025-03-07T11:13:06Z <span class="ansi-green-fg">INFO</span>] Sample record - Barcode present: true, UMI present: false, Read1 present: true, Read2 present: true
+100%|██████████| 65937541/65937541 [56:53&lt;00:00, 19317.63it/s][2025-03-07T11:13:17Z <span class="ansi-green-fg">INFO</span>] Alignment process completed in 3580.02s
+</pre></div></div>
+</div>
+<div class="nboutput nblast docutils container">
+<div class="prompt highlight-none notranslate"><div class="highlight"><pre><span></span>[15]:
+</pre></div>
+</div>
+<div class="output_area docutils container">
+<div class="highlight"><pre>
+{&#39;sequenced_reads&#39;: 131875082.0,
+ &#39;frac_properly_paired&#39;: 0.8498182393547251,
+ &#39;frac_mitochondrial&#39;: nan,
+ &#39;num_unique_fragments&#39;: 0.0,
+ &#39;frac_duplicates&#39;: nan,
+ &#39;frac_fragment_in_nucleosome_free_region&#39;: nan,
+ &#39;frac_confidently_mapped&#39;: nan,
+ &#39;frac_unmapped&#39;: nan,
+ &#39;frac_q30_bases_read1&#39;: 0.8275834390742883,
+ &#39;frac_q30_bases_read2&#39;: 0.8165559236264723,
+ &#39;frac_valid_barcode&#39;: 0.0,
+ &#39;frac_fragment_flanking_single_nucleosome&#39;: nan,
+ &#39;sequenced_read_pairs&#39;: 65937541.0,
+ &#39;frac_q30_bases_barcode&#39;: 0.8074974962385236}
+</pre></div></div>
+</div>
+<div class="nbinput nblast docutils container">
+<div class="prompt highlight-none notranslate"><div class="highlight"><pre><span></span>[ ]:
+</pre></div>
+</div>
+<div class="input_area highlight-ipython3 notranslate"><div class="highlight"><pre><span></span>
+</pre></div>
+</div>
+</div>
+</section>
+
+
+                </article>
+              
+              
+              
+              
+              
+                <footer class="prev-next-footer d-print-none">
+                  
+<div class="prev-next-area">
+    <a class="left-prev"
+       href="20250221_celseq2.html"
+       title="previous page">
+      <i class="fa-solid fa-angle-left"></i>
+      <div class="prev-next-info">
+        <p class="prev-next-subtitle">previous</p>
+        <p class="prev-next-title">Cel-Seq2</p>
+      </div>
+    </a>
+    <a class="right-next"
+       href="make_seqspec.html"
+       title="next page">
+      <div class="prev-next-info">
+        <p class="prev-next-subtitle">next</p>
+        <p class="prev-next-title">Write a seqspec file for your custom datasets</p>
+      </div>
+      <i class="fa-solid fa-angle-right"></i>
+    </a>
+</div>
+                </footer>
+              
+            </div>
+            
+            
+              
+                <div class="bd-sidebar-secondary bd-toc"><div class="sidebar-secondary-items sidebar-secondary__inner">
+
+
+  <div class="sidebar-secondary-item">
+<div
+    id="pst-page-navigation-heading-2"
+    class="page-toc tocsection onthispage">
+    <i class="fa-solid fa-list"></i> On this page
+  </div>
+  <nav class="bd-toc-nav page-toc" aria-labelledby="pst-page-navigation-heading-2">
+    <ul class="visible nav section-nav flex-column">
+<li class="toc-h1 nav-item toc-entry"><a class="reference internal nav-link" href="#">Set up</a></li>
+<li class="toc-h1 nav-item toc-entry"><a class="reference internal nav-link" href="#Prepare-seqspec-and-read">Prepare seqspec and read</a></li>
+<li class="toc-h1 nav-item toc-entry"><a class="reference internal nav-link" href="#Alignment">Alignment</a></li>
+</ul>
+
+  </nav></div>
+
+</div></div>
+              
+            
+          </div>
+          <footer class="bd-footer-content">
+            
+          </footer>
+        
+      </main>
+    </div>
+  </div>
+  
+  <!-- Scripts loaded after <body> so the DOM is not blocked -->
+  <script src="../_static/scripts/bootstrap.js?digest=dfe6caa3a7d634c4db9b"></script>
+<script src="../_static/scripts/pydata-sphinx-theme.js?digest=dfe6caa3a7d634c4db9b"></script>
+
+  <footer class="bd-footer">
+<div class="bd-footer__inner bd-page-width">
+  
+    <div class="footer-items__start">
+      
+        <div class="footer-item">
+
+  <p class="copyright">
+    
+      © Copyright 2024-2024, Regulatory Genomics Lab, Westlake University.
+      <br/>
+    
+  </p>
+</div>
+      
+    </div>
+  
+  
+  
+    <div class="footer-items__end">
+      
+        <div class="footer-item">
+<p class="theme-version">
+  Built with the <a href="https://pydata-sphinx-theme.readthedocs.io/en/stable/index.html">PyData Sphinx Theme</a> 0.15.4.
+</p></div>
+      
+    </div>
+  
+</div>
+
+  </footer>
+  </body>
+</html>

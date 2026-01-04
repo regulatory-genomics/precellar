@@ -1,0 +1,868 @@
+
+<!DOCTYPE html>
+
+
+<html lang="en" data-content_root="../" >
+
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>Cel-Seq2 &#8212; precellar 0.5.2 documentation</title>
+  
+  
+  
+  <script data-cfasync="false">
+    document.documentElement.dataset.mode = localStorage.getItem("mode") || "";
+    document.documentElement.dataset.theme = localStorage.getItem("theme") || "";
+  </script>
+  
+  <!-- Loaded before other Sphinx assets -->
+  <link href="../_static/styles/theme.css?digest=dfe6caa3a7d634c4db9b" rel="stylesheet" />
+<link href="../_static/styles/bootstrap.css?digest=dfe6caa3a7d634c4db9b" rel="stylesheet" />
+<link href="../_static/styles/pydata-sphinx-theme.css?digest=dfe6caa3a7d634c4db9b" rel="stylesheet" />
+
+  
+  <link href="../_static/vendor/fontawesome/6.5.2/css/all.min.css?digest=dfe6caa3a7d634c4db9b" rel="stylesheet" />
+  <link rel="preload" as="font" type="font/woff2" crossorigin href="../_static/vendor/fontawesome/6.5.2/webfonts/fa-solid-900.woff2" />
+<link rel="preload" as="font" type="font/woff2" crossorigin href="../_static/vendor/fontawesome/6.5.2/webfonts/fa-brands-400.woff2" />
+<link rel="preload" as="font" type="font/woff2" crossorigin href="../_static/vendor/fontawesome/6.5.2/webfonts/fa-regular-400.woff2" />
+
+    <link rel="stylesheet" type="text/css" href="../_static/pygments.css?v=a746c00c" />
+    <link rel="stylesheet" type="text/css" href="../_static/nbsphinx-code-cells.css?v=2aa19091" />
+    <link rel="stylesheet" type="text/css" href="../_static/css/custom.css?v=3c7e44a1" />
+  
+  <!-- Pre-loaded scripts that we'll load fully later -->
+  <link rel="preload" as="script" href="../_static/scripts/bootstrap.js?digest=dfe6caa3a7d634c4db9b" />
+<link rel="preload" as="script" href="../_static/scripts/pydata-sphinx-theme.js?digest=dfe6caa3a7d634c4db9b" />
+  <script src="../_static/vendor/fontawesome/6.5.2/js/all.min.js?digest=dfe6caa3a7d634c4db9b"></script>
+
+    <script src="../_static/documentation_options.js?v=8e576371"></script>
+    <script src="../_static/doctools.js?v=9a2dae69"></script>
+    <script src="../_static/sphinx_highlight.js?v=dc90522c"></script>
+    <script crossorigin="anonymous" integrity="sha256-Ae2Vz/4ePdIu6ZyI/5ZGsYnb+m0JlOmKPjt6XZ9JJkA=" src="https://cdnjs.cloudflare.com/ajax/libs/require.js/2.3.4/require.min.js"></script>
+    <script>window.MathJax = {"tex": {"inlineMath": [["$", "$"], ["\\(", "\\)"]], "processEscapes": true}, "options": {"ignoreHtmlClass": "tex2jax_ignore|mathjax_ignore|document", "processHtmlClass": "tex2jax_process|mathjax_process|math|output_area"}}</script>
+    <script defer="defer" src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"></script>
+    <script>DOCUMENTATION_OPTIONS.pagename = 'tutorials/20250221_celseq2';</script>
+    <script>
+        DOCUMENTATION_OPTIONS.theme_version = '0.15.4';
+        DOCUMENTATION_OPTIONS.theme_switcher_json_url = 'https://raw.githubusercontent.com/regulatory-genomics/precellar/refs/heads/main/docs/_static/versions.json';
+        DOCUMENTATION_OPTIONS.theme_switcher_version_match = '0.5';
+        DOCUMENTATION_OPTIONS.show_version_warning_banner = false;
+        </script>
+    <link rel="index" title="Index" href="../genindex.html" />
+    <link rel="search" title="Search" href="../search.html" />
+    <link rel="next" title="Set up" href="20250307_scifi.html" />
+    <link rel="prev" title="Smart-seq2" href="20250219_smartseq_final_run.html" />
+
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <meta name="docsearch:language" content="en"/>
+<!-- Google tag (gtag.js) -->
+<script async src="https://www.googletagmanager.com/gtag/js?id=G-YM9RKG56ZV"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
+
+  gtag('config', 'G-YM9RKG56ZV');
+</script>
+
+  </head>
+  
+  
+  <body data-bs-spy="scroll" data-bs-target=".bd-toc-nav" data-offset="180" data-bs-root-margin="0px 0px -60%" data-default-mode="">
+
+  
+  
+  <div id="pst-skip-link" class="skip-link d-print-none"><a href="#main-content">Skip to main content</a></div>
+  
+  <div id="pst-scroll-pixel-helper"></div>
+  
+  <button type="button" class="btn rounded-pill" id="pst-back-to-top">
+    <i class="fa-solid fa-arrow-up"></i>Back to top</button>
+
+  
+  <input type="checkbox"
+          class="sidebar-toggle"
+          id="pst-primary-sidebar-checkbox"/>
+  <label class="overlay overlay-primary" for="pst-primary-sidebar-checkbox"></label>
+  
+  <input type="checkbox"
+          class="sidebar-toggle"
+          id="pst-secondary-sidebar-checkbox"/>
+  <label class="overlay overlay-secondary" for="pst-secondary-sidebar-checkbox"></label>
+  
+  <div class="search-button__wrapper">
+    <div class="search-button__overlay"></div>
+    <div class="search-button__search-container">
+<form class="bd-search d-flex align-items-center"
+      action="../search.html"
+      method="get">
+  <i class="fa-solid fa-magnifying-glass"></i>
+  <input type="search"
+         class="form-control"
+         name="q"
+         id="search-input"
+         placeholder="Search the docs ..."
+         aria-label="Search the docs ..."
+         autocomplete="off"
+         autocorrect="off"
+         autocapitalize="off"
+         spellcheck="false"/>
+  <span class="search-button__kbd-shortcut"><kbd class="kbd-shortcut__modifier">Ctrl</kbd>+<kbd>K</kbd></span>
+</form></div>
+  </div>
+
+  <div class="pst-async-banner-revealer d-none">
+  <aside id="bd-header-version-warning" class="d-none d-print-none" aria-label="Version warning"></aside>
+</div>
+
+  
+    <header class="bd-header navbar navbar-expand-lg bd-navbar d-print-none">
+<div class="bd-header__inner bd-page-width">
+  <button class="pst-navbar-icon sidebar-toggle primary-toggle" aria-label="Site navigation">
+    <span class="fa-solid fa-bars"></span>
+  </button>
+  
+  
+  <div class=" navbar-header-items__start">
+    
+      <div class="navbar-item">
+
+  
+    
+  
+
+<a class="navbar-brand logo" href="../index.html">
+  
+  
+  
+  
+  
+  
+    <p class="title logo__title">precellar</p>
+  
+</a></div>
+    
+  </div>
+  
+  <div class=" navbar-header-items">
+    
+    <div class="me-auto navbar-header-items__center">
+      
+        <div class="navbar-item">
+<script>
+document.write(`
+  <div class="version-switcher__container dropdown">
+    <button id="pst-version-switcher-button-2"
+      type="button"
+      class="version-switcher__button btn btn-sm dropdown-toggle"
+      data-bs-toggle="dropdown"
+      aria-haspopup="listbox"
+      aria-controls="pst-version-switcher-list-2"
+      aria-label="Version switcher list"
+    >
+      Choose version  <!-- this text may get changed later by javascript -->
+      <span class="caret"></span>
+    </button>
+    <div id="pst-version-switcher-list-2"
+      class="version-switcher__menu dropdown-menu list-group-flush py-0"
+      role="listbox" aria-labelledby="pst-version-switcher-button-2">
+      <!-- dropdown will be populated by javascript on page load -->
+    </div>
+  </div>
+`);
+</script></div>
+      
+        <div class="navbar-item">
+<nav>
+  <ul class="bd-navbar-elements navbar-nav">
+    
+<li class="nav-item ">
+  <a class="nav-link nav-internal" href="../install.html">
+    Installation
+  </a>
+</li>
+
+
+<li class="nav-item current active">
+  <a class="nav-link nav-internal" href="index.html">
+    Tutorials
+  </a>
+</li>
+
+
+<li class="nav-item ">
+  <a class="nav-link nav-internal" href="../api.html">
+    API reference
+  </a>
+</li>
+
+  </ul>
+</nav></div>
+      
+    </div>
+    
+    
+    <div class="navbar-header-items__end">
+      
+        <div class="navbar-item navbar-persistent--container">
+          
+
+ <script>
+ document.write(`
+   <button class="btn search-button-field search-button__button" title="Search" aria-label="Search" data-bs-placement="bottom" data-bs-toggle="tooltip">
+    <i class="fa-solid fa-magnifying-glass"></i>
+    <span class="search-button__default-text">Search</span>
+    <span class="search-button__kbd-shortcut"><kbd class="kbd-shortcut__modifier">Ctrl</kbd>+<kbd class="kbd-shortcut__modifier">K</kbd></span>
+   </button>
+ `);
+ </script>
+        </div>
+      
+      
+        <div class="navbar-item">
+
+<script>
+document.write(`
+  <button class="btn btn-sm nav-link pst-navbar-icon theme-switch-button" title="light/dark" aria-label="light/dark" data-bs-placement="bottom" data-bs-toggle="tooltip">
+    <i class="theme-switch fa-solid fa-sun fa-lg" data-mode="light"></i>
+    <i class="theme-switch fa-solid fa-moon fa-lg" data-mode="dark"></i>
+    <i class="theme-switch fa-solid fa-circle-half-stroke fa-lg" data-mode="auto"></i>
+  </button>
+`);
+</script></div>
+      
+        <div class="navbar-item"><ul class="navbar-icon-links"
+    aria-label="Icon Links">
+        <li class="nav-item">
+          
+          
+          
+          
+          
+          
+          
+          
+          <a href="https://github.com/regulatory-genomics/precellar" title="GitHub" class="nav-link pst-navbar-icon" rel="noopener" target="_blank" data-bs-toggle="tooltip" data-bs-placement="bottom"><i class="fa-brands fa-square-github fa-lg" aria-hidden="true"></i>
+            <span class="sr-only">GitHub</span></a>
+        </li>
+</ul></div>
+      
+    </div>
+    
+  </div>
+  
+  
+    <div class="navbar-persistent--mobile">
+
+ <script>
+ document.write(`
+   <button class="btn search-button-field search-button__button" title="Search" aria-label="Search" data-bs-placement="bottom" data-bs-toggle="tooltip">
+    <i class="fa-solid fa-magnifying-glass"></i>
+    <span class="search-button__default-text">Search</span>
+    <span class="search-button__kbd-shortcut"><kbd class="kbd-shortcut__modifier">Ctrl</kbd>+<kbd class="kbd-shortcut__modifier">K</kbd></span>
+   </button>
+ `);
+ </script>
+    </div>
+  
+
+  
+    <button class="pst-navbar-icon sidebar-toggle secondary-toggle" aria-label="On this page">
+      <span class="fa-solid fa-outdent"></span>
+    </button>
+  
+</div>
+
+    </header>
+  
+
+  <div class="bd-container">
+    <div class="bd-container__inner bd-page-width">
+      
+      
+      
+      <div class="bd-sidebar-primary bd-sidebar">
+        
+
+  
+  <div class="sidebar-header-items sidebar-primary__section">
+    
+    
+      <div class="sidebar-header-items__center">
+        
+          
+          
+            <div class="navbar-item">
+<script>
+document.write(`
+  <div class="version-switcher__container dropdown">
+    <button id="pst-version-switcher-button-3"
+      type="button"
+      class="version-switcher__button btn btn-sm dropdown-toggle"
+      data-bs-toggle="dropdown"
+      aria-haspopup="listbox"
+      aria-controls="pst-version-switcher-list-3"
+      aria-label="Version switcher list"
+    >
+      Choose version  <!-- this text may get changed later by javascript -->
+      <span class="caret"></span>
+    </button>
+    <div id="pst-version-switcher-list-3"
+      class="version-switcher__menu dropdown-menu list-group-flush py-0"
+      role="listbox" aria-labelledby="pst-version-switcher-button-3">
+      <!-- dropdown will be populated by javascript on page load -->
+    </div>
+  </div>
+`);
+</script></div>
+          
+        
+          
+          
+            <div class="navbar-item">
+<nav>
+  <ul class="bd-navbar-elements navbar-nav">
+    
+<li class="nav-item ">
+  <a class="nav-link nav-internal" href="../install.html">
+    Installation
+  </a>
+</li>
+
+
+<li class="nav-item current active">
+  <a class="nav-link nav-internal" href="index.html">
+    Tutorials
+  </a>
+</li>
+
+
+<li class="nav-item ">
+  <a class="nav-link nav-internal" href="../api.html">
+    API reference
+  </a>
+</li>
+
+  </ul>
+</nav></div>
+          
+        
+      </div>
+    
+    
+    
+      <div class="sidebar-header-items__end">
+        
+          <div class="navbar-item">
+
+<script>
+document.write(`
+  <button class="btn btn-sm nav-link pst-navbar-icon theme-switch-button" title="light/dark" aria-label="light/dark" data-bs-placement="bottom" data-bs-toggle="tooltip">
+    <i class="theme-switch fa-solid fa-sun fa-lg" data-mode="light"></i>
+    <i class="theme-switch fa-solid fa-moon fa-lg" data-mode="dark"></i>
+    <i class="theme-switch fa-solid fa-circle-half-stroke fa-lg" data-mode="auto"></i>
+  </button>
+`);
+</script></div>
+        
+          <div class="navbar-item"><ul class="navbar-icon-links"
+    aria-label="Icon Links">
+        <li class="nav-item">
+          
+          
+          
+          
+          
+          
+          
+          
+          <a href="https://github.com/regulatory-genomics/precellar" title="GitHub" class="nav-link pst-navbar-icon" rel="noopener" target="_blank" data-bs-toggle="tooltip" data-bs-placement="bottom"><i class="fa-brands fa-square-github fa-lg" aria-hidden="true"></i>
+            <span class="sr-only">GitHub</span></a>
+        </li>
+</ul></div>
+        
+      </div>
+    
+  </div>
+  
+    <div class="sidebar-primary-items__start sidebar-primary__section">
+        <div class="sidebar-primary-item">
+<nav class="bd-docs-nav bd-links"
+     aria-label="Section Navigation">
+  <p class="bd-links__title" role="heading" aria-level="1">Section Navigation</p>
+  <div class="bd-toc-item navbar-nav"><ul class="current nav bd-sidenav">
+<li class="toctree-l1"><a class="reference internal" href="txg_rna.html">Analyzing 10x Genomics scRNA-seq Data</a></li>
+<li class="toctree-l1"><a class="reference internal" href="txg_atac.html">10X ATAC-seq pipeline</a></li>
+<li class="toctree-l1"><a class="reference internal" href="txg_multiome.html">Preprocess 10X Genomics Gene Expression + ATAC Data</a></li>
+
+<li class="toctree-l1"><a class="reference internal" href="generic.html">Processing barcoded Fastq files</a></li>
+<li class="toctree-l1"><a class="reference internal" href="20250219_smartseq_final_run.html">Smart-seq2</a></li>
+<li class="toctree-l1 current active"><a class="current reference internal" href="#">Cel-Seq2</a></li>
+<li class="toctree-l1"><a class="reference internal" href="20250307_scifi.html">Set up</a></li>
+
+
+<li class="toctree-l1"><a class="reference internal" href="make_seqspec.html">Write a seqspec file for your custom datasets</a></li>
+</ul>
+</div>
+</nav></div>
+    </div>
+  
+  
+  <div class="sidebar-primary-items__end sidebar-primary__section">
+  </div>
+  
+  <div id="rtd-footer-container"></div>
+
+
+      </div>
+      
+      <main id="main-content" class="bd-main" role="main">
+        
+        
+          <div class="bd-content">
+            <div class="bd-article-container">
+              
+              <div class="bd-header-article d-print-none">
+<div class="header-article-items header-article__inner">
+  
+    <div class="header-article-items__start">
+      
+        <div class="header-article-item">
+
+
+
+<nav aria-label="Breadcrumb" class="d-print-none">
+  <ul class="bd-breadcrumbs">
+    
+    <li class="breadcrumb-item breadcrumb-home">
+      <a href="../index.html" class="nav-link" aria-label="Home">
+        <i class="fa-solid fa-home"></i>
+      </a>
+    </li>
+    
+    <li class="breadcrumb-item"><a href="index.html" class="nav-link">Tutorials</a></li>
+    
+    <li class="breadcrumb-item active" aria-current="page">Cel-Seq2</li>
+  </ul>
+</nav>
+</div>
+      
+    </div>
+  
+  
+</div>
+</div>
+              
+              
+              
+                
+<div id="searchbox"></div>
+                <article class="bd-article">
+                  
+  <section id="Cel-Seq2">
+<h1>Cel-Seq2<a class="headerlink" href="#Cel-Seq2" title="Link to this heading">#</a></h1>
+<p>CEL-Seq2 is an enhanced version of the CEL-Seq (Cell Expression by Linear amplification and Sequencing) protocol for single-cell RNA sequencing, as described in this <a class="reference external" href="https://genomebiology.biomedcentral.com/articles/10.1186/s13059-016-0938-8">paper</a>.</p>
+<p>The example datasets we used are from <a class="reference external" href="https://trace.ncbi.nlm.nih.gov/Traces/?view=run_browser&amp;acc=SRR7588583&amp;display=metadata">SRR7588583</a>, a widely used datasets in <a class="reference external" href="https://pubmed.ncbi.nlm.nih.gov/31133762/">benchmarking</a>.</p>
+<section id="SeqSpec">
+<h2>SeqSpec<a class="headerlink" href="#SeqSpec" title="Link to this heading">#</a></h2>
+<img alt="celseq2" src="../_images/celseq2.png" />
+<p>Based on this library structure, we designate RA5 as the primer for read1 and RA3 as the primer for read2. It’s important to note that both RA5 and RA3 should have their region_type set to custom_primer since they are non-standard primers rather than typical sequencing primers. This custom designation ensures proper handling of these unique primer sequences in the analysis pipeline.</p>
+<div class="highlight-yaml notranslate"><div class="highlight"><pre><span></span><span class="nt">sequence_spec</span><span class="p">:</span>
+<span class="p p-Indicator">-</span><span class="w"> </span><span class="kt">!Read</span>
+<span class="w">  </span><span class="nt">read_id</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">R1</span>
+<span class="w">  </span><span class="nt">name</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">Read 1</span>
+<span class="w">  </span><span class="nt">modality</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">rna</span>
+<span class="w">  </span><span class="nt">primer_id</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">RA5</span>
+<span class="w">  </span><span class="nt">min_len</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">1</span>
+<span class="w">  </span><span class="nt">max_len</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">250</span>
+<span class="w">  </span><span class="nt">strand</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">pos</span>
+<span class="w">  </span><span class="nt">files</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[]</span>
+<span class="p p-Indicator">-</span><span class="w"> </span><span class="kt">!Read</span>
+<span class="w">  </span><span class="nt">read_id</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">R2</span>
+<span class="w">  </span><span class="nt">name</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">Read 2</span>
+<span class="w">  </span><span class="nt">modality</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">rna</span>
+<span class="w">  </span><span class="nt">primer_id</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">RA3</span>
+<span class="w">  </span><span class="nt">min_len</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">1</span>
+<span class="w">  </span><span class="nt">max_len</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">250</span>
+<span class="w">  </span><span class="nt">strand</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">neg</span>
+<span class="w">  </span><span class="nt">files</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[]</span>
+</pre></div>
+</div>
+<p>Another thing we should note is that the cell barcode whitelist of CelSeq2 study is various. In this experiment, we used barcodes downloaded <a class="reference external" href="https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE118767">here</a>.</p>
+</section>
+<section id="Precellar-pipeline">
+<h2>Precellar pipeline<a class="headerlink" href="#Precellar-pipeline" title="Link to this heading">#</a></h2>
+<div class="nbinput docutils container">
+<div class="prompt highlight-none notranslate"><div class="highlight"><pre><span></span>[1]:
+</pre></div>
+</div>
+<div class="input_area highlight-ipython3 notranslate"><div class="highlight"><pre><span></span>import precellar
+precellar.__version__
+</pre></div>
+</div>
+</div>
+<div class="nboutput nblast docutils container">
+<div class="prompt highlight-none notranslate"><div class="highlight"><pre><span></span>[1]:
+</pre></div>
+</div>
+<div class="output_area docutils container">
+<div class="highlight"><pre>
+&#39;0.3.0-dev0&#39;
+</pre></div></div>
+</div>
+<div class="nbinput nblast docutils container">
+<div class="prompt highlight-none notranslate"><div class="highlight"><pre><span></span>[5]:
+</pre></div>
+</div>
+<div class="input_area highlight-ipython3 notranslate"><div class="highlight"><pre><span></span>assay = precellar.Assay(&quot;seqspec_template/cel_seq2.yaml&quot;)
+</pre></div>
+</div>
+</div>
+<div class="nbinput docutils container">
+<div class="prompt highlight-none notranslate"><div class="highlight"><pre><span></span>[6]:
+</pre></div>
+</div>
+<div class="input_area highlight-ipython3 notranslate"><div class="highlight"><pre><span></span>assay
+</pre></div>
+</div>
+</div>
+<div class="nboutput nblast docutils container">
+<div class="prompt highlight-none notranslate"><div class="highlight"><pre><span></span>[6]:
+</pre></div>
+</div>
+<div class="output_area docutils container">
+<div class="highlight"><pre>
+CEL-Seq2
+└── rna(132-326)
+    ├── illumina_p5(29)
+    ├── RA5(26) [↓R1(1-250)✗]
+    ├── umi(6)
+    ├── cell_bc(8)
+    ├── poly_T(30-98)
+    ├── cDNA(1-98)
+    ├── RA3(21) [↑R2(1-250)✗]
+    ├── link_1(12)
+    ├── sample_bc(6)
+    └── illumina_p7(24)
+</pre></div></div>
+</div>
+<p>Let look at our fastq dataset to check whether it satisfy this seqspec.</p>
+<div class="nbinput nblast docutils container">
+<div class="prompt highlight-none notranslate"><div class="highlight"><pre><span></span>[ ]:
+</pre></div>
+</div>
+<div class="input_area highlight-ipython3 notranslate"><div class="highlight"><pre><span></span>! zcat /data2/litian/precellar_data/PalateCEL/SRR7588583_1.fastq.gz | head
+</pre></div>
+</div>
+</div>
+<div class="highlight-none notranslate"><div class="highlight"><pre><span></span>@SRR7588583.1 1 length=32
+AGAACNGCTCTGAANNNNNNNNNNNNNNNNNN
++SRR7588583.1 1 length=32
+AAAAA#EEEEEEEE##################
+@SRR7588583.2 2 length=32
+GAGCGNAGTATCNNNNNNNNNNNNNNNNNNNN
++SRR7588583.2 2 length=32
+AAAAA#EEEEAE####################
+@SRR7588583.3 3 length=32
+CGCCTNCCTTCTTNNNNNNNNNNNNNNNNNNN
+</pre></div>
+</div>
+<div class="nbinput nblast docutils container">
+<div class="prompt highlight-none notranslate"><div class="highlight"><pre><span></span>[ ]:
+</pre></div>
+</div>
+<div class="input_area highlight-ipython3 notranslate"><div class="highlight"><pre><span></span>! zcat  /data2/litian/precellar_data/PalateCEL/SRR7588583_2.fastq.gz | head
+</pre></div>
+</div>
+</div>
+<div class="highlight-none notranslate"><div class="highlight"><pre><span></span>@SRR7588583.1 1 length=71
+NGGGGGGGGGGNGGGGGGGGGGGGGGGNGGGGGGNGGGGGGNGNNGGGGGGGGGGGGGGGGGNGGGGGGGG
++SRR7588583.1 1 length=71
+#AAAAAEEEEE#EEEEE&lt;EEEEEEEEE#AEEEEE#EEEEEE#E##&lt;EEE&lt;EEEE/EAEEE/&lt;#EEEEEAEE
+@SRR7588583.2 2 length=71
+NTGGGTAGTGGNGAAGGACCGATATCAGAAAAATNCCTTCANGNNTACTAATTTATTAATAANCATTAGGT
++SRR7588583.2 2 length=71
+#AAA/EEAEAE#EEEEEEEEE6EEEA&lt;AEEE/EE#EEEEEA#/##EEEEEEEEE&lt;EEAEEAE#A&lt;EEA&lt;AA
+@SRR7588583.3 3 length=72
+NACCCCTTCTGNCCCCTAGTAAGCCCAGTTGCTGNATCTGANCNNTTTGAGCTCTTTTTGTANTATACTCTA
+</pre></div>
+</div>
+<p>In read1, we observe a 14bp ‘N’ region following the 6bp UMI and 8bp barcode sequences. This is a specific characteristic of this dataset. To handle this, we set both min_len and max_len parameters of read1 to 14 to trim off the ‘N’ region.</p>
+<div class="nbinput docutils container">
+<div class="prompt highlight-none notranslate"><div class="highlight"><pre><span></span>[8]:
+</pre></div>
+</div>
+<div class="input_area highlight-ipython3 notranslate"><div class="highlight"><pre><span></span>assay.update_read(&#39;R1&#39;, fastq=&#39;/data2/litian/precellar_data/PalateCEL/SRR7588583_1.fastq.gz&#39;,max_len=14,min_len = 14)
+assay.update_read(&#39;R2&#39;, fastq=&#39;/data2/litian/precellar_data/PalateCEL/SRR7588583_2.fastq.gz&#39;,min_len=20,max_len=70)
+</pre></div>
+</div>
+</div>
+<div class="nboutput nblast docutils container">
+<div class="prompt empty docutils container">
+</div>
+<div class="output_area stderr docutils container">
+<div class="highlight"><pre>
+[2025-02-20T14:05:45Z <span class="ansi-green-fg">INFO</span>] Treating /data/litian/202502_precellar/data/barcode/CelSeq2_GSE117617_barcode.txt as local file
+[2025-02-20T14:05:45Z <span class="ansi-yellow-fg">WARN</span>] Read &#39;R1&#39; has low percentage of matched records for region &#39;cell_bc&#39;. Percentage of matched records: 46.50%
+Warning: Range end 70 exceeds sequence length 69
+Warning: Range end 70 exceeds sequence length 69
+Warning: Range end 70 exceeds sequence length 32
+Warning: Range end 70 exceeds sequence length 69
+Warning: Range end 70 exceeds sequence length 69
+Warning: Range end 70 exceeds sequence length 69
+Warning: Range end 70 exceeds sequence length 69
+Warning: Range end 70 exceeds sequence length 69
+Warning: Range end 70 exceeds sequence length 69
+Warning: Range end 70 exceeds sequence length 68
+</pre></div></div>
+</div>
+<div class="nbinput nblast docutils container">
+<div class="prompt highlight-none notranslate"><div class="highlight"><pre><span></span>[9]:
+</pre></div>
+</div>
+<div class="input_area highlight-ipython3 notranslate"><div class="highlight"><pre><span></span>star = precellar.aligners.STAR(&quot;/data/Public/STAR_reference/refdata-gex-GRCh38-2024-A/star/&quot;)
+</pre></div>
+</div>
+</div>
+<div class="nbinput docutils container">
+<div class="prompt highlight-none notranslate"><div class="highlight"><pre><span></span>[10]:
+</pre></div>
+</div>
+<div class="input_area highlight-ipython3 notranslate"><div class="highlight"><pre><span></span>precellar.align(
+    assay,
+    modality=&#39;rna&#39;,
+    aligner=star,
+    output=&#39;20250220_celseq2_gene_matrix.h5ad&#39;,
+    output_type=&#39;gene_quantification&#39;,
+    num_threads=32,
+)
+</pre></div>
+</div>
+</div>
+<div class="nboutput docutils container">
+<div class="prompt empty docutils container">
+</div>
+<div class="output_area stderr docutils container">
+<div class="highlight"><pre>
+[2025-02-20T14:06:01Z <span class="ansi-green-fg">INFO</span>] Starting alignment process
+[2025-02-20T14:06:01Z <span class="ansi-green-fg">INFO</span>] Using provided Assay object
+[2025-02-20T14:06:01Z <span class="ansi-green-fg">INFO</span>] Using modality: RNA
+[2025-02-20T14:06:01Z <span class="ansi-green-fg">INFO</span>] Initialized aligner: STAR
+[2025-02-20T14:06:02Z <span class="ansi-green-fg">INFO</span>] Initializing FastqProcessor with 32 threads and chunk size 10000000
+[2025-02-20T14:06:02Z <span class="ansi-green-fg">INFO</span>] Adding mitochondrial DNA references: [&#34;chrM&#34;, &#34;M&#34;]
+[2025-02-20T14:06:02Z <span class="ansi-green-fg">INFO</span>] Generating alignments
+[2025-02-20T14:06:02Z <span class="ansi-green-fg">INFO</span>] Using STAR aligner
+[2025-02-20T14:06:02Z <span class="ansi-green-fg">INFO</span>] Counting barcodes...
+[2025-02-20T14:06:02Z <span class="ansi-green-fg">INFO</span>] Treating /data/litian/202502_precellar/data/barcode/CelSeq2_GSE117617_barcode.txt as local file
+[2025-02-20T14:06:33Z <span class="ansi-green-fg">INFO</span>] Aligning 68987831 reads...
+[2025-02-20T14:06:33Z <span class="ansi-green-fg">INFO</span>] Processing output type: gene_quantification
+[2025-02-20T14:06:33Z <span class="ansi-green-fg">INFO</span>] Starting gene quantification
+100%|██████████| 68987831/68987831 [04:51&lt;00:00, 237060.47it/s][2025-02-20T14:11:56Z <span class="ansi-green-fg">INFO</span>] Completed gene quantification, writing to: &#34;20250220_celseq2_gene_matrix.h5ad&#34;
+[2025-02-20T14:11:56Z <span class="ansi-green-fg">INFO</span>] Alignment process completed in 354.95s
+</pre></div></div>
+</div>
+<div class="nboutput nblast docutils container">
+<div class="prompt highlight-none notranslate"><div class="highlight"><pre><span></span>[10]:
+</pre></div>
+</div>
+<div class="output_area docutils container">
+<div class="highlight"><pre>
+{&#39;frac_transcriptome&#39;: 0.5676187442391109,
+ &#39;sequenced_reads&#39;: 68987831.0,
+ &#39;frac_q30_bases_read2&#39;: 0.7711844695732999,
+ &#39;frac_mitochondrial&#39;: 0.23238289177544943,
+ &#39;frac_duplicates&#39;: 0.6476864987591802,
+ &#39;frac_confidently_mapped&#39;: 0.7187557321625929,
+ &#39;frac_q30_bases_barcode&#39;: 0.896682909193072,
+ &#39;frac_unmapped&#39;: 0.14783096050353617,
+ &#39;frac_valid_barcode&#39;: 0.8366271292106574,
+ &#39;sequenced_read_pairs&#39;: 0.0}
+</pre></div></div>
+</div>
+</section>
+<section id="Downstream-analysis">
+<h2>Downstream analysis<a class="headerlink" href="#Downstream-analysis" title="Link to this heading">#</a></h2>
+<div class="nbinput nblast docutils container">
+<div class="prompt highlight-none notranslate"><div class="highlight"><pre><span></span>[12]:
+</pre></div>
+</div>
+<div class="input_area highlight-ipython3 notranslate"><div class="highlight"><pre><span></span>import scanpy as sc
+import hdf5plugin # we have to import this package to read h5ad file
+</pre></div>
+</div>
+</div>
+<div class="nbinput nblast docutils container">
+<div class="prompt highlight-none notranslate"><div class="highlight"><pre><span></span>[24]:
+</pre></div>
+</div>
+<div class="input_area highlight-ipython3 notranslate"><div class="highlight"><pre><span></span>anndata = sc.read_h5ad(&quot;20250220_celseq2_gene_matrix.h5ad&quot;)
+</pre></div>
+</div>
+</div>
+<div class="nbinput docutils container">
+<div class="prompt highlight-none notranslate"><div class="highlight"><pre><span></span>[25]:
+</pre></div>
+</div>
+<div class="input_area highlight-ipython3 notranslate"><div class="highlight"><pre><span></span>anndata
+</pre></div>
+</div>
+</div>
+<div class="nboutput nblast docutils container">
+<div class="prompt highlight-none notranslate"><div class="highlight"><pre><span></span>[25]:
+</pre></div>
+</div>
+<div class="output_area docutils container">
+<div class="highlight"><pre>
+AnnData object with n_obs × n_vars = 383 × 38606
+    obs: &#39;exon_count&#39;, &#39;intron_count&#39;, &#39;mitochondrial_count&#39;
+    var: &#39;gene_name&#39;
+</pre></div></div>
+</div>
+<div class="nbinput nblast docutils container">
+<div class="prompt highlight-none notranslate"><div class="highlight"><pre><span></span>[26]:
+</pre></div>
+</div>
+<div class="input_area highlight-ipython3 notranslate"><div class="highlight"><pre><span></span>sc.pp.recipe_zheng17(anndata)
+</pre></div>
+</div>
+</div>
+<div class="nbinput docutils container">
+<div class="prompt highlight-none notranslate"><div class="highlight"><pre><span></span>[27]:
+</pre></div>
+</div>
+<div class="input_area highlight-ipython3 notranslate"><div class="highlight"><pre><span></span>sc.pp.neighbors(anndata)
+sc.tl.umap(anndata)
+</pre></div>
+</div>
+</div>
+<div class="nboutput nblast docutils container">
+<div class="prompt empty docutils container">
+</div>
+<div class="output_area stderr docutils container">
+<div class="highlight"><pre>
+/data/litian/micromamba/envs/py311/lib/python3.11/site-packages/scanpy/tools/_utils.py:41: UserWarning: You’re trying to run this on 999 dimensions of `.X`, if you really want this, set `use_rep=&#39;X&#39;`.
+         Falling back to preprocessing with `sc.pp.pca` and default params.
+  warnings.warn(
+</pre></div></div>
+</div>
+<div class="nbinput docutils container">
+<div class="prompt highlight-none notranslate"><div class="highlight"><pre><span></span>[28]:
+</pre></div>
+</div>
+<div class="input_area highlight-ipython3 notranslate"><div class="highlight"><pre><span></span>sc.pl.umap(anndata)
+</pre></div>
+</div>
+</div>
+<div class="nboutput nblast docutils container">
+<div class="prompt empty docutils container">
+</div>
+<div class="output_area docutils container">
+<img alt="../_images/tutorials_20250221_celseq2_26_0.png" src="../_images/tutorials_20250221_celseq2_26_0.png" />
+</div>
+</div>
+</section>
+</section>
+
+
+                </article>
+              
+              
+              
+              
+              
+                <footer class="prev-next-footer d-print-none">
+                  
+<div class="prev-next-area">
+    <a class="left-prev"
+       href="20250219_smartseq_final_run.html"
+       title="previous page">
+      <i class="fa-solid fa-angle-left"></i>
+      <div class="prev-next-info">
+        <p class="prev-next-subtitle">previous</p>
+        <p class="prev-next-title">Smart-seq2</p>
+      </div>
+    </a>
+    <a class="right-next"
+       href="20250307_scifi.html"
+       title="next page">
+      <div class="prev-next-info">
+        <p class="prev-next-subtitle">next</p>
+        <p class="prev-next-title">Set up</p>
+      </div>
+      <i class="fa-solid fa-angle-right"></i>
+    </a>
+</div>
+                </footer>
+              
+            </div>
+            
+            
+              
+                <div class="bd-sidebar-secondary bd-toc"><div class="sidebar-secondary-items sidebar-secondary__inner">
+
+
+  <div class="sidebar-secondary-item">
+<div
+    id="pst-page-navigation-heading-2"
+    class="page-toc tocsection onthispage">
+    <i class="fa-solid fa-list"></i> On this page
+  </div>
+  <nav class="bd-toc-nav page-toc" aria-labelledby="pst-page-navigation-heading-2">
+    <ul class="visible nav section-nav flex-column">
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#SeqSpec">SeqSpec</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#Precellar-pipeline">Precellar pipeline</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#Downstream-analysis">Downstream analysis</a></li>
+</ul>
+  </nav></div>
+
+</div></div>
+              
+            
+          </div>
+          <footer class="bd-footer-content">
+            
+          </footer>
+        
+      </main>
+    </div>
+  </div>
+  
+  <!-- Scripts loaded after <body> so the DOM is not blocked -->
+  <script src="../_static/scripts/bootstrap.js?digest=dfe6caa3a7d634c4db9b"></script>
+<script src="../_static/scripts/pydata-sphinx-theme.js?digest=dfe6caa3a7d634c4db9b"></script>
+
+  <footer class="bd-footer">
+<div class="bd-footer__inner bd-page-width">
+  
+    <div class="footer-items__start">
+      
+        <div class="footer-item">
+
+  <p class="copyright">
+    
+      © Copyright 2024-2024, Regulatory Genomics Lab, Westlake University.
+      <br/>
+    
+  </p>
+</div>
+      
+    </div>
+  
+  
+  
+    <div class="footer-items__end">
+      
+        <div class="footer-item">
+<p class="theme-version">
+  Built with the <a href="https://pydata-sphinx-theme.readthedocs.io/en/stable/index.html">PyData Sphinx Theme</a> 0.15.4.
+</p></div>
+      
+    </div>
+  
+</div>
+
+  </footer>
+  </body>
+</html>

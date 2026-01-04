@@ -1,0 +1,777 @@
+
+<!DOCTYPE html>
+
+
+<html lang="en" data-content_root="../" >
+
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>Smart-seq2 &#8212; precellar 0.5.2 documentation</title>
+  
+  
+  
+  <script data-cfasync="false">
+    document.documentElement.dataset.mode = localStorage.getItem("mode") || "";
+    document.documentElement.dataset.theme = localStorage.getItem("theme") || "";
+  </script>
+  
+  <!-- Loaded before other Sphinx assets -->
+  <link href="../_static/styles/theme.css?digest=dfe6caa3a7d634c4db9b" rel="stylesheet" />
+<link href="../_static/styles/bootstrap.css?digest=dfe6caa3a7d634c4db9b" rel="stylesheet" />
+<link href="../_static/styles/pydata-sphinx-theme.css?digest=dfe6caa3a7d634c4db9b" rel="stylesheet" />
+
+  
+  <link href="../_static/vendor/fontawesome/6.5.2/css/all.min.css?digest=dfe6caa3a7d634c4db9b" rel="stylesheet" />
+  <link rel="preload" as="font" type="font/woff2" crossorigin href="../_static/vendor/fontawesome/6.5.2/webfonts/fa-solid-900.woff2" />
+<link rel="preload" as="font" type="font/woff2" crossorigin href="../_static/vendor/fontawesome/6.5.2/webfonts/fa-brands-400.woff2" />
+<link rel="preload" as="font" type="font/woff2" crossorigin href="../_static/vendor/fontawesome/6.5.2/webfonts/fa-regular-400.woff2" />
+
+    <link rel="stylesheet" type="text/css" href="../_static/pygments.css?v=a746c00c" />
+    <link rel="stylesheet" type="text/css" href="../_static/nbsphinx-code-cells.css?v=2aa19091" />
+    <link rel="stylesheet" type="text/css" href="../_static/css/custom.css?v=3c7e44a1" />
+  
+  <!-- Pre-loaded scripts that we'll load fully later -->
+  <link rel="preload" as="script" href="../_static/scripts/bootstrap.js?digest=dfe6caa3a7d634c4db9b" />
+<link rel="preload" as="script" href="../_static/scripts/pydata-sphinx-theme.js?digest=dfe6caa3a7d634c4db9b" />
+  <script src="../_static/vendor/fontawesome/6.5.2/js/all.min.js?digest=dfe6caa3a7d634c4db9b"></script>
+
+    <script src="../_static/documentation_options.js?v=8e576371"></script>
+    <script src="../_static/doctools.js?v=9a2dae69"></script>
+    <script src="../_static/sphinx_highlight.js?v=dc90522c"></script>
+    <script crossorigin="anonymous" integrity="sha256-Ae2Vz/4ePdIu6ZyI/5ZGsYnb+m0JlOmKPjt6XZ9JJkA=" src="https://cdnjs.cloudflare.com/ajax/libs/require.js/2.3.4/require.min.js"></script>
+    <script>window.MathJax = {"tex": {"inlineMath": [["$", "$"], ["\\(", "\\)"]], "processEscapes": true}, "options": {"ignoreHtmlClass": "tex2jax_ignore|mathjax_ignore|document", "processHtmlClass": "tex2jax_process|mathjax_process|math|output_area"}}</script>
+    <script defer="defer" src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"></script>
+    <script>DOCUMENTATION_OPTIONS.pagename = 'tutorials/20250219_smartseq_final_run';</script>
+    <script>
+        DOCUMENTATION_OPTIONS.theme_version = '0.15.4';
+        DOCUMENTATION_OPTIONS.theme_switcher_json_url = 'https://raw.githubusercontent.com/regulatory-genomics/precellar/refs/heads/main/docs/_static/versions.json';
+        DOCUMENTATION_OPTIONS.theme_switcher_version_match = '0.5';
+        DOCUMENTATION_OPTIONS.show_version_warning_banner = false;
+        </script>
+    <link rel="index" title="Index" href="../genindex.html" />
+    <link rel="search" title="Search" href="../search.html" />
+    <link rel="next" title="Cel-Seq2" href="20250221_celseq2.html" />
+    <link rel="prev" title="Processing barcoded Fastq files" href="generic.html" />
+
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <meta name="docsearch:language" content="en"/>
+<!-- Google tag (gtag.js) -->
+<script async src="https://www.googletagmanager.com/gtag/js?id=G-YM9RKG56ZV"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
+
+  gtag('config', 'G-YM9RKG56ZV');
+</script>
+
+  </head>
+  
+  
+  <body data-bs-spy="scroll" data-bs-target=".bd-toc-nav" data-offset="180" data-bs-root-margin="0px 0px -60%" data-default-mode="">
+
+  
+  
+  <div id="pst-skip-link" class="skip-link d-print-none"><a href="#main-content">Skip to main content</a></div>
+  
+  <div id="pst-scroll-pixel-helper"></div>
+  
+  <button type="button" class="btn rounded-pill" id="pst-back-to-top">
+    <i class="fa-solid fa-arrow-up"></i>Back to top</button>
+
+  
+  <input type="checkbox"
+          class="sidebar-toggle"
+          id="pst-primary-sidebar-checkbox"/>
+  <label class="overlay overlay-primary" for="pst-primary-sidebar-checkbox"></label>
+  
+  <input type="checkbox"
+          class="sidebar-toggle"
+          id="pst-secondary-sidebar-checkbox"/>
+  <label class="overlay overlay-secondary" for="pst-secondary-sidebar-checkbox"></label>
+  
+  <div class="search-button__wrapper">
+    <div class="search-button__overlay"></div>
+    <div class="search-button__search-container">
+<form class="bd-search d-flex align-items-center"
+      action="../search.html"
+      method="get">
+  <i class="fa-solid fa-magnifying-glass"></i>
+  <input type="search"
+         class="form-control"
+         name="q"
+         id="search-input"
+         placeholder="Search the docs ..."
+         aria-label="Search the docs ..."
+         autocomplete="off"
+         autocorrect="off"
+         autocapitalize="off"
+         spellcheck="false"/>
+  <span class="search-button__kbd-shortcut"><kbd class="kbd-shortcut__modifier">Ctrl</kbd>+<kbd>K</kbd></span>
+</form></div>
+  </div>
+
+  <div class="pst-async-banner-revealer d-none">
+  <aside id="bd-header-version-warning" class="d-none d-print-none" aria-label="Version warning"></aside>
+</div>
+
+  
+    <header class="bd-header navbar navbar-expand-lg bd-navbar d-print-none">
+<div class="bd-header__inner bd-page-width">
+  <button class="pst-navbar-icon sidebar-toggle primary-toggle" aria-label="Site navigation">
+    <span class="fa-solid fa-bars"></span>
+  </button>
+  
+  
+  <div class=" navbar-header-items__start">
+    
+      <div class="navbar-item">
+
+  
+    
+  
+
+<a class="navbar-brand logo" href="../index.html">
+  
+  
+  
+  
+  
+  
+    <p class="title logo__title">precellar</p>
+  
+</a></div>
+    
+  </div>
+  
+  <div class=" navbar-header-items">
+    
+    <div class="me-auto navbar-header-items__center">
+      
+        <div class="navbar-item">
+<script>
+document.write(`
+  <div class="version-switcher__container dropdown">
+    <button id="pst-version-switcher-button-2"
+      type="button"
+      class="version-switcher__button btn btn-sm dropdown-toggle"
+      data-bs-toggle="dropdown"
+      aria-haspopup="listbox"
+      aria-controls="pst-version-switcher-list-2"
+      aria-label="Version switcher list"
+    >
+      Choose version  <!-- this text may get changed later by javascript -->
+      <span class="caret"></span>
+    </button>
+    <div id="pst-version-switcher-list-2"
+      class="version-switcher__menu dropdown-menu list-group-flush py-0"
+      role="listbox" aria-labelledby="pst-version-switcher-button-2">
+      <!-- dropdown will be populated by javascript on page load -->
+    </div>
+  </div>
+`);
+</script></div>
+      
+        <div class="navbar-item">
+<nav>
+  <ul class="bd-navbar-elements navbar-nav">
+    
+<li class="nav-item ">
+  <a class="nav-link nav-internal" href="../install.html">
+    Installation
+  </a>
+</li>
+
+
+<li class="nav-item current active">
+  <a class="nav-link nav-internal" href="index.html">
+    Tutorials
+  </a>
+</li>
+
+
+<li class="nav-item ">
+  <a class="nav-link nav-internal" href="../api.html">
+    API reference
+  </a>
+</li>
+
+  </ul>
+</nav></div>
+      
+    </div>
+    
+    
+    <div class="navbar-header-items__end">
+      
+        <div class="navbar-item navbar-persistent--container">
+          
+
+ <script>
+ document.write(`
+   <button class="btn search-button-field search-button__button" title="Search" aria-label="Search" data-bs-placement="bottom" data-bs-toggle="tooltip">
+    <i class="fa-solid fa-magnifying-glass"></i>
+    <span class="search-button__default-text">Search</span>
+    <span class="search-button__kbd-shortcut"><kbd class="kbd-shortcut__modifier">Ctrl</kbd>+<kbd class="kbd-shortcut__modifier">K</kbd></span>
+   </button>
+ `);
+ </script>
+        </div>
+      
+      
+        <div class="navbar-item">
+
+<script>
+document.write(`
+  <button class="btn btn-sm nav-link pst-navbar-icon theme-switch-button" title="light/dark" aria-label="light/dark" data-bs-placement="bottom" data-bs-toggle="tooltip">
+    <i class="theme-switch fa-solid fa-sun fa-lg" data-mode="light"></i>
+    <i class="theme-switch fa-solid fa-moon fa-lg" data-mode="dark"></i>
+    <i class="theme-switch fa-solid fa-circle-half-stroke fa-lg" data-mode="auto"></i>
+  </button>
+`);
+</script></div>
+      
+        <div class="navbar-item"><ul class="navbar-icon-links"
+    aria-label="Icon Links">
+        <li class="nav-item">
+          
+          
+          
+          
+          
+          
+          
+          
+          <a href="https://github.com/regulatory-genomics/precellar" title="GitHub" class="nav-link pst-navbar-icon" rel="noopener" target="_blank" data-bs-toggle="tooltip" data-bs-placement="bottom"><i class="fa-brands fa-square-github fa-lg" aria-hidden="true"></i>
+            <span class="sr-only">GitHub</span></a>
+        </li>
+</ul></div>
+      
+    </div>
+    
+  </div>
+  
+  
+    <div class="navbar-persistent--mobile">
+
+ <script>
+ document.write(`
+   <button class="btn search-button-field search-button__button" title="Search" aria-label="Search" data-bs-placement="bottom" data-bs-toggle="tooltip">
+    <i class="fa-solid fa-magnifying-glass"></i>
+    <span class="search-button__default-text">Search</span>
+    <span class="search-button__kbd-shortcut"><kbd class="kbd-shortcut__modifier">Ctrl</kbd>+<kbd class="kbd-shortcut__modifier">K</kbd></span>
+   </button>
+ `);
+ </script>
+    </div>
+  
+
+  
+</div>
+
+    </header>
+  
+
+  <div class="bd-container">
+    <div class="bd-container__inner bd-page-width">
+      
+      
+      
+      <div class="bd-sidebar-primary bd-sidebar">
+        
+
+  
+  <div class="sidebar-header-items sidebar-primary__section">
+    
+    
+      <div class="sidebar-header-items__center">
+        
+          
+          
+            <div class="navbar-item">
+<script>
+document.write(`
+  <div class="version-switcher__container dropdown">
+    <button id="pst-version-switcher-button-3"
+      type="button"
+      class="version-switcher__button btn btn-sm dropdown-toggle"
+      data-bs-toggle="dropdown"
+      aria-haspopup="listbox"
+      aria-controls="pst-version-switcher-list-3"
+      aria-label="Version switcher list"
+    >
+      Choose version  <!-- this text may get changed later by javascript -->
+      <span class="caret"></span>
+    </button>
+    <div id="pst-version-switcher-list-3"
+      class="version-switcher__menu dropdown-menu list-group-flush py-0"
+      role="listbox" aria-labelledby="pst-version-switcher-button-3">
+      <!-- dropdown will be populated by javascript on page load -->
+    </div>
+  </div>
+`);
+</script></div>
+          
+        
+          
+          
+            <div class="navbar-item">
+<nav>
+  <ul class="bd-navbar-elements navbar-nav">
+    
+<li class="nav-item ">
+  <a class="nav-link nav-internal" href="../install.html">
+    Installation
+  </a>
+</li>
+
+
+<li class="nav-item current active">
+  <a class="nav-link nav-internal" href="index.html">
+    Tutorials
+  </a>
+</li>
+
+
+<li class="nav-item ">
+  <a class="nav-link nav-internal" href="../api.html">
+    API reference
+  </a>
+</li>
+
+  </ul>
+</nav></div>
+          
+        
+      </div>
+    
+    
+    
+      <div class="sidebar-header-items__end">
+        
+          <div class="navbar-item">
+
+<script>
+document.write(`
+  <button class="btn btn-sm nav-link pst-navbar-icon theme-switch-button" title="light/dark" aria-label="light/dark" data-bs-placement="bottom" data-bs-toggle="tooltip">
+    <i class="theme-switch fa-solid fa-sun fa-lg" data-mode="light"></i>
+    <i class="theme-switch fa-solid fa-moon fa-lg" data-mode="dark"></i>
+    <i class="theme-switch fa-solid fa-circle-half-stroke fa-lg" data-mode="auto"></i>
+  </button>
+`);
+</script></div>
+        
+          <div class="navbar-item"><ul class="navbar-icon-links"
+    aria-label="Icon Links">
+        <li class="nav-item">
+          
+          
+          
+          
+          
+          
+          
+          
+          <a href="https://github.com/regulatory-genomics/precellar" title="GitHub" class="nav-link pst-navbar-icon" rel="noopener" target="_blank" data-bs-toggle="tooltip" data-bs-placement="bottom"><i class="fa-brands fa-square-github fa-lg" aria-hidden="true"></i>
+            <span class="sr-only">GitHub</span></a>
+        </li>
+</ul></div>
+        
+      </div>
+    
+  </div>
+  
+    <div class="sidebar-primary-items__start sidebar-primary__section">
+        <div class="sidebar-primary-item">
+<nav class="bd-docs-nav bd-links"
+     aria-label="Section Navigation">
+  <p class="bd-links__title" role="heading" aria-level="1">Section Navigation</p>
+  <div class="bd-toc-item navbar-nav"><ul class="current nav bd-sidenav">
+<li class="toctree-l1"><a class="reference internal" href="txg_rna.html">Analyzing 10x Genomics scRNA-seq Data</a></li>
+<li class="toctree-l1"><a class="reference internal" href="txg_atac.html">10X ATAC-seq pipeline</a></li>
+<li class="toctree-l1"><a class="reference internal" href="txg_multiome.html">Preprocess 10X Genomics Gene Expression + ATAC Data</a></li>
+
+<li class="toctree-l1"><a class="reference internal" href="generic.html">Processing barcoded Fastq files</a></li>
+<li class="toctree-l1 current active"><a class="current reference internal" href="#">Smart-seq2</a></li>
+<li class="toctree-l1"><a class="reference internal" href="20250221_celseq2.html">Cel-Seq2</a></li>
+<li class="toctree-l1"><a class="reference internal" href="20250307_scifi.html">Set up</a></li>
+
+
+<li class="toctree-l1"><a class="reference internal" href="make_seqspec.html">Write a seqspec file for your custom datasets</a></li>
+</ul>
+</div>
+</nav></div>
+    </div>
+  
+  
+  <div class="sidebar-primary-items__end sidebar-primary__section">
+  </div>
+  
+  <div id="rtd-footer-container"></div>
+
+
+      </div>
+      
+      <main id="main-content" class="bd-main" role="main">
+        
+        
+          <div class="bd-content">
+            <div class="bd-article-container">
+              
+              <div class="bd-header-article d-print-none">
+<div class="header-article-items header-article__inner">
+  
+    <div class="header-article-items__start">
+      
+        <div class="header-article-item">
+
+
+
+<nav aria-label="Breadcrumb" class="d-print-none">
+  <ul class="bd-breadcrumbs">
+    
+    <li class="breadcrumb-item breadcrumb-home">
+      <a href="../index.html" class="nav-link" aria-label="Home">
+        <i class="fa-solid fa-home"></i>
+      </a>
+    </li>
+    
+    <li class="breadcrumb-item"><a href="index.html" class="nav-link">Tutorials</a></li>
+    
+    <li class="breadcrumb-item active" aria-current="page">Smart-seq2</li>
+  </ul>
+</nav>
+</div>
+      
+    </div>
+  
+  
+</div>
+</div>
+              
+              
+              
+                
+<div id="searchbox"></div>
+                <article class="bd-article">
+                  
+  <section id="Smart-seq2">
+<h1>Smart-seq2<a class="headerlink" href="#Smart-seq2" title="Link to this heading">#</a></h1>
+<p><a class="reference external" href="https://www.nature.com/articles/nprot.2014.006">Smart-seq2</a> is a full-length single-cell RNA sequencing method that requires specific analytical considerations due to its unique characteristics. Here are the key features that distinguish Smart-seq2 from other scRNA-seq methods:</p>
+<ul class="simple">
+<li><p>Demultiplexed format.</p></li>
+<li><p>Higher sequencing depth</p></li>
+<li><p>Can sequence entire transcript length.</p></li>
+<li><p>Does not support UMIs</p></li>
+</ul>
+<p>In this example, the Smart-seq2 datasets are downloaded from <a class="reference external" href="https://www.ncbi.nlm.nih.gov/bioproject/PRJNA213629">PRJNA213629</a></p>
+<div class="nbinput nblast docutils container">
+<div class="prompt highlight-none notranslate"><div class="highlight"><pre><span></span>[18]:
+</pre></div>
+</div>
+<div class="input_area highlight-ipython3 notranslate"><div class="highlight"><pre><span></span>import precellar
+precellar.__version__
+import scanpy as sc
+import hdf5plugin # add this for Anndata process.
+</pre></div>
+</div>
+</div>
+<p>Due to Smart-seq2’s demultiplexed data structure, where each cell is represented by individual FASTQ files, we consolidated all Smart-seq2 datasets into unified FASTQ files (one file for single-end sequencing, or two files for paired-end sequencing). To maintain compatibility with standard processing pipelines, we implemented a pseudo-barcode in the seqspec templates. While these barcodes don’t physically exist in the original sequences, their addition facilitates streamlined data processing and
+analysis workflows.</p>
+<div class="nbinput docutils container">
+<div class="prompt highlight-none notranslate"><div class="highlight"><pre><span></span>[22]:
+</pre></div>
+</div>
+<div class="input_area highlight-ipython3 notranslate"><div class="highlight"><pre><span></span>assay = precellar.Assay(&quot;seqspec_template/smartseq2.yaml&quot;)
+print(assay)
+</pre></div>
+</div>
+</div>
+<div class="nboutput nblast docutils container">
+<div class="prompt empty docutils container">
+</div>
+<div class="output_area docutils container">
+<div class="highlight"><pre>
+rna
+└── RNA(139-236)
+    ├── illumina_p5(29)
+    ├── i5(10)
+    ├── s5(14)
+    ├── ME1(19) [↓R1(1-250)✗]
+    ├── cDNA(1-98)
+    ├── ME2(19) [↑R2(1-250)✗]
+    ├── s7(15)
+    ├── i7(8)
+    ├── umi(4-10)
+    ├── pseudo_barcode(4)
+    └── illumina_p7(24) [↑I1(1-10)✗]
+
+</pre></div></div>
+</div>
+<div class="nbinput docutils container">
+<div class="prompt highlight-none notranslate"><div class="highlight"><pre><span></span>[20]:
+</pre></div>
+</div>
+<div class="input_area highlight-ipython3 notranslate"><div class="highlight"><pre><span></span>!ls /data2/litian/precellar_temp/*.fastq.zst | head
+</pre></div>
+</div>
+</div>
+<div class="nboutput nblast docutils container">
+<div class="prompt empty docutils container">
+</div>
+<div class="output_area docutils container">
+<div class="highlight"><pre>
+/data2/litian/precellar_temp/SRR944282.fastq.zst
+/data2/litian/precellar_temp/SRR944283.fastq.zst
+/data2/litian/precellar_temp/SRR944284.fastq.zst
+/data2/litian/precellar_temp/SRR944285.fastq.zst
+/data2/litian/precellar_temp/SRR944286.fastq.zst
+/data2/litian/precellar_temp/SRR944287.fastq.zst
+/data2/litian/precellar_temp/SRR944288.fastq.zst
+/data2/litian/precellar_temp/SRR944289.fastq.zst
+/data2/litian/precellar_temp/SRR944290.fastq.zst
+/data2/litian/precellar_temp/SRR944291.fastq.zst
+</pre></div></div>
+</div>
+<div class="nbinput nblast docutils container">
+<div class="prompt highlight-none notranslate"><div class="highlight"><pre><span></span>[ ]:
+</pre></div>
+</div>
+<div class="input_area highlight-ipython3 notranslate"><div class="highlight"><pre><span></span>%%time
+precellar.utils.merge_fastq_files(input1_files = &quot;/data2/litian/precellar_temp/*.fastq.zst&quot;,
+                                  output1_file = &quot;/data2/litian/precellar_temp/merged_fastq.fastq.zst&quot;,
+                                  barcode_file=&quot;/data2/litian/precellar_temp/barcode.fastq.zst&quot;,
+                                  num_threads=32)
+</pre></div>
+</div>
+</div>
+<div class="nbinput nblast docutils container">
+<div class="prompt highlight-none notranslate"><div class="highlight"><pre><span></span>[23]:
+</pre></div>
+</div>
+<div class="input_area highlight-ipython3 notranslate"><div class="highlight"><pre><br/><span></span>assay.update_read(&#39;R1&#39;, fastq=&#39;/data2/litian/precellar_temp/merged_fastq.fastq.zst&#39;)
+assay.update_read(&#39;I1&#39;, fastq=&#39;/data2/litian/precellar_temp/barcode.fastq.zst&#39;)
+</pre></div>
+</div>
+</div>
+<div class="nbinput docutils container">
+<div class="prompt highlight-none notranslate"><div class="highlight"><pre><span></span>[24]:
+</pre></div>
+</div>
+<div class="input_area highlight-ipython3 notranslate"><div class="highlight"><pre><span></span>assay
+</pre></div>
+</div>
+</div>
+<div class="nboutput nblast docutils container">
+<div class="prompt highlight-none notranslate"><div class="highlight"><pre><span></span>[24]:
+</pre></div>
+</div>
+<div class="output_area docutils container">
+<div class="highlight"><pre>
+rna
+└── RNA(139-236)
+    ├── illumina_p5(29)
+    ├── i5(10)
+    ├── s5(14)
+    ├── ME1(19) [↓R1(43)✓]
+    ├── cDNA(1-98)
+    ├── ME2(19) [↑R2(1-250)✗]
+    ├── s7(15)
+    ├── i7(8)
+    ├── umi(4-10)
+    ├── pseudo_barcode(4)
+    └── illumina_p7(24) [↑I1(8)✓]
+</pre></div></div>
+</div>
+<div class="nbinput nblast docutils container">
+<div class="prompt highlight-none notranslate"><div class="highlight"><pre><span></span>[25]:
+</pre></div>
+</div>
+<div class="input_area highlight-ipython3 notranslate"><div class="highlight"><pre><span></span>star = precellar.aligners.STAR(&quot;/data/Public/STAR_reference/refdata-gex-GRCh38-2024-A/star/&quot;)
+</pre></div>
+</div>
+</div>
+<div class="nbinput docutils container">
+<div class="prompt highlight-none notranslate"><div class="highlight"><pre><span></span>[4]:
+</pre></div>
+</div>
+<div class="input_area highlight-ipython3 notranslate"><div class="highlight"><pre><span></span>precellar.align(
+    assay,
+    modality=&#39;rna&#39;,
+    aligner=star,
+    output=&#39;20250218_gene_matrix_smartseq.h5ad&#39;,
+    output_type=&#39;gene_quantification&#39;,
+    num_threads=32,
+)
+</pre></div>
+</div>
+</div>
+<div class="nboutput docutils container">
+<div class="prompt empty docutils container">
+</div>
+<div class="output_area stderr docutils container">
+<div class="highlight"><pre>
+[2025-02-19T06:10:48Z <span class="ansi-green-fg">INFO</span>] Starting alignment process
+[2025-02-19T06:10:48Z <span class="ansi-green-fg">INFO</span>] Using provided Assay object
+[2025-02-19T06:10:48Z <span class="ansi-green-fg">INFO</span>] Using modality: RNA
+[2025-02-19T06:10:48Z <span class="ansi-green-fg">INFO</span>] Initialized aligner: STAR
+[2025-02-19T06:10:49Z <span class="ansi-green-fg">INFO</span>] Initializing FastqProcessor with 32 threads and chunk size 10000000
+[2025-02-19T06:10:49Z <span class="ansi-green-fg">INFO</span>] Adding mitochondrial DNA references: [&#34;chrM&#34;, &#34;M&#34;]
+[2025-02-19T06:10:49Z <span class="ansi-green-fg">INFO</span>] Generating alignments
+[2025-02-19T06:10:49Z <span class="ansi-green-fg">INFO</span>] Using STAR aligner
+[2025-02-19T06:10:49Z <span class="ansi-green-fg">INFO</span>] Counting barcodes...
+[2025-02-19T06:15:09Z <span class="ansi-green-fg">INFO</span>] Aligning 866471826 reads...
+[2025-02-19T06:15:09Z <span class="ansi-green-fg">INFO</span>] Processing output type: gene_quantification
+[2025-02-19T06:15:09Z <span class="ansi-green-fg">INFO</span>] Starting gene quantification
+ 70%|�██████   | 602352960/866471826 [44:13&lt;19:23, 226971.17it/s]/s]
+</pre></div></div>
+</div>
+<div class="nboutput docutils container">
+<div class="prompt highlight-none notranslate"><div class="highlight"><pre><span></span>[4]:
+</pre></div>
+</div>
+<div class="output_area docutils container">
+<div class="highlight"><pre>
+{&#39;frac_q30_bases_barcode&#39;: 1.0,
+ &#39;frac_duplicates&#39;: 0.0,
+ &#39;sequenced_read_pairs&#39;: 0.0,
+ &#39;frac_unmapped&#39;: 0.15283863482480964,
+ &#39;sequenced_reads&#39;: 866471826.0,
+ &#39;frac_q30_bases_read1&#39;: 0.9663986458638546,
+ &#39;frac_confidently_mapped&#39;: 0.643611707000846,
+ &#39;frac_mitochondrial&#39;: 0.10567590354961628,
+ &#39;frac_transcriptome&#39;: 0.32021040000901313,
+ &#39;frac_valid_barcode&#39;: 1.0}
+</pre></div></div>
+</div>
+<div class="nboutput nblast docutils container">
+<div class="prompt empty docutils container">
+</div>
+<div class="output_area stderr docutils container">
+<div class="highlight"><pre>
+100%|██████████| 866471826/866471826 [01:03:07&lt;00:00, 228788.02it/s][2025-02-19T07:19:30Z <span class="ansi-yellow-fg">WARN</span>] Encountered alignment(s) without UMI information. Using generated UMIs.
+[2025-02-19T07:19:30Z <span class="ansi-yellow-fg">WARN</span>] Encountered alignment(s) without UMI information. Using generated UMIs.
+[2025-02-19T07:19:30Z <span class="ansi-yellow-fg">WARN</span>] Encountered alignment(s) without UMI information. Using generated UMIs.
+[2025-02-19T07:19:30Z <span class="ansi-yellow-fg">WARN</span>] Encountered alignment(s) without UMI information. Using generated UMIs.
+[2025-02-19T07:19:30Z <span class="ansi-yellow-fg">WARN</span>] Encountered alignment(s) without UMI information. Using generated UMIs.
+[2025-02-19T07:19:30Z <span class="ansi-yellow-fg">WARN</span>] Encountered alignment(s) without UMI information. Using generated UMIs.
+[2025-02-19T07:19:30Z <span class="ansi-yellow-fg">WARN</span>] Encountered alignment(s) without UMI information. Using generated UMIs.
+[2025-02-19T07:19:30Z <span class="ansi-yellow-fg">WARN</span>] Encountered alignment(s) without UMI information. Using generated UMIs.
+[2025-02-19T07:19:30Z <span class="ansi-yellow-fg">WARN</span>] Encountered alignment(s) without UMI information. Using generated UMIs.
+[2025-02-19T07:19:30Z <span class="ansi-yellow-fg">WARN</span>] Encountered alignment(s) without UMI information. Using generated UMIs.
+[2025-02-19T07:19:30Z <span class="ansi-yellow-fg">WARN</span>] Encountered alignment(s) without UMI information. Using generated UMIs.
+[2025-02-19T07:19:30Z <span class="ansi-yellow-fg">WARN</span>] Encountered alignment(s) without UMI information. Using generated UMIs.
+[2025-02-19T07:19:30Z <span class="ansi-yellow-fg">WARN</span>] Encountered alignment(s) without UMI information. Using generated UMIs.
+[2025-02-19T07:19:30Z <span class="ansi-yellow-fg">WARN</span>] Encountered alignment(s) without UMI information. Using generated UMIs.
+[2025-02-19T07:19:30Z <span class="ansi-yellow-fg">WARN</span>] Encountered alignment(s) without UMI information. Using generated UMIs.
+[2025-02-19T07:19:30Z <span class="ansi-yellow-fg">WARN</span>] Encountered alignment(s) without UMI information. Using generated UMIs.
+[2025-02-19T07:19:30Z <span class="ansi-yellow-fg">WARN</span>] Encountered alignment(s) without UMI information. Using generated UMIs.
+[2025-02-19T07:19:30Z <span class="ansi-yellow-fg">WARN</span>] Encountered alignment(s) without UMI information. Using generated UMIs.
+[2025-02-19T07:19:30Z <span class="ansi-yellow-fg">WARN</span>] Encountered alignment(s) without UMI information. Using generated UMIs.
+[2025-02-19T07:19:30Z <span class="ansi-yellow-fg">WARN</span>] Encountered alignment(s) without UMI information. Using generated UMIs.
+[2025-02-19T07:19:30Z <span class="ansi-yellow-fg">WARN</span>] Encountered alignment(s) without UMI information. Using generated UMIs.
+[2025-02-19T07:19:30Z <span class="ansi-yellow-fg">WARN</span>] Encountered alignment(s) without UMI information. Using generated UMIs.
+[2025-02-19T07:19:30Z <span class="ansi-yellow-fg">WARN</span>] Encountered alignment(s) without UMI information. Using generated UMIs.
+[2025-02-19T07:19:30Z <span class="ansi-yellow-fg">WARN</span>] Encountered alignment(s) without UMI information. Using generated UMIs.
+[2025-02-19T07:19:30Z <span class="ansi-yellow-fg">WARN</span>] Encountered alignment(s) without UMI information. Using generated UMIs.
+[2025-02-19T07:19:30Z <span class="ansi-yellow-fg">WARN</span>] Encountered alignment(s) without UMI information. Using generated UMIs.
+[2025-02-19T07:19:30Z <span class="ansi-yellow-fg">WARN</span>] Encountered alignment(s) without UMI information. Using generated UMIs.
+[2025-02-19T07:19:30Z <span class="ansi-yellow-fg">WARN</span>] Encountered alignment(s) without UMI information. Using generated UMIs.
+[2025-02-19T07:23:38Z <span class="ansi-green-fg">INFO</span>] Completed gene quantification, writing to: &#34;20250218_gene_matrix_smartseq.h5ad&#34;
+[2025-02-19T07:23:38Z <span class="ansi-green-fg">INFO</span>] Alignment process completed in 4370.28s
+</pre></div></div>
+</div>
+<div class="nbinput nblast docutils container">
+<div class="prompt highlight-none notranslate"><div class="highlight"><pre><span></span>[ ]:
+</pre></div>
+</div>
+<div class="input_area highlight-ipython3 notranslate"><div class="highlight"><pre><span></span>
+</pre></div>
+</div>
+</div>
+</section>
+
+
+                </article>
+              
+              
+              
+              
+              
+                <footer class="prev-next-footer d-print-none">
+                  
+<div class="prev-next-area">
+    <a class="left-prev"
+       href="generic.html"
+       title="previous page">
+      <i class="fa-solid fa-angle-left"></i>
+      <div class="prev-next-info">
+        <p class="prev-next-subtitle">previous</p>
+        <p class="prev-next-title">Processing barcoded Fastq files</p>
+      </div>
+    </a>
+    <a class="right-next"
+       href="20250221_celseq2.html"
+       title="next page">
+      <div class="prev-next-info">
+        <p class="prev-next-subtitle">next</p>
+        <p class="prev-next-title">Cel-Seq2</p>
+      </div>
+      <i class="fa-solid fa-angle-right"></i>
+    </a>
+</div>
+                </footer>
+              
+            </div>
+            
+            
+              
+            
+          </div>
+          <footer class="bd-footer-content">
+            
+          </footer>
+        
+      </main>
+    </div>
+  </div>
+  
+  <!-- Scripts loaded after <body> so the DOM is not blocked -->
+  <script src="../_static/scripts/bootstrap.js?digest=dfe6caa3a7d634c4db9b"></script>
+<script src="../_static/scripts/pydata-sphinx-theme.js?digest=dfe6caa3a7d634c4db9b"></script>
+
+  <footer class="bd-footer">
+<div class="bd-footer__inner bd-page-width">
+  
+    <div class="footer-items__start">
+      
+        <div class="footer-item">
+
+  <p class="copyright">
+    
+      © Copyright 2024-2024, Regulatory Genomics Lab, Westlake University.
+      <br/>
+    
+  </p>
+</div>
+      
+    </div>
+  
+  
+  
+    <div class="footer-items__end">
+      
+        <div class="footer-item">
+<p class="theme-version">
+  Built with the <a href="https://pydata-sphinx-theme.readthedocs.io/en/stable/index.html">PyData Sphinx Theme</a> 0.15.4.
+</p></div>
+      
+    </div>
+  
+</div>
+
+  </footer>
+  </body>
+</html>
