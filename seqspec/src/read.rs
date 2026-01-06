@@ -61,7 +61,7 @@ pub struct Read {
     pub primer_id: String,
     pub min_len: u32,
     pub max_len: u32,
-    pub strand: Strand,
+    pub strand: Strand, // whether the read orientation is the same as the library
     pub files: Option<Vec<File>>,
 }
 
@@ -172,10 +172,14 @@ impl Read {
     }
 
     /// Check if the read is reverse.
+    ///
+    /// For `Strand::Unstranded` (used in long-read assays), this returns `false` (forward),
+    /// which means the segment layout from the YAML is interpreted in forward orientation.
+    /// The actual per-read orientation is detected dynamically during barcode extraction.
     pub fn is_reverse(&self) -> bool {
         match self.strand {
             Strand::Neg => true,
-            Strand::Pos => false,
+            Strand::Pos | Strand::Unstranded => false,
         }
     }
 
@@ -217,6 +221,7 @@ impl Read {
 pub enum Strand {
     Pos,
     Neg,
+    Unstranded,
 }
 
 #[derive(Deserialize, Serialize, Debug, Clone, PartialEq)]

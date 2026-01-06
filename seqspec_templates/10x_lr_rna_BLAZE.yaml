@@ -10,6 +10,7 @@ modalities:
 lib_struct: Not-Specified
 library_protocol: FLT-seq+10x Single Cell
 library_kit: 10x Genomics Chromium Single-cell 3' gene expression protocol (v3.1)
+chemistry_strandedness: reverse
 sequence_protocol: Oxford Nanopore
 sequence_kit: Custom
 sequence_spec:
@@ -20,7 +21,7 @@ sequence_spec:
   primer_id: illumina_p5
   min_len: 100
   max_len: 2147483647
-  strand: pos
+  strand: unstranded
   files:
   - file_id: LR_sc-RNA-seq_GridION_Q20_pass
     filename: LR_sc-RNA-seq_GridION_Q20_pass

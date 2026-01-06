@@ -554,6 +554,7 @@ impl FastqAnnotator {
         barcode_processor: &BarcodeProcessor,
     ) -> Result<AnnotatedFastq, anyhow::Error> {
         match barcode_processor {
+
             BarcodeProcessor::ShortRead(analyzer) => {
                 let segments = self.segment_info.split(record).map_err(|e| anyhow::anyhow!("Split error: {:?}", e))?;
                 let mut barcode: Option<Barcode> = None;
@@ -564,6 +565,8 @@ impl FastqAnnotator {
                 segments.into_iter().for_each(|segment| {
                     if segment.is_barcode() || segment.is_umi() {
                         let mut fq = segment.into_fq(record.definition());
+
+                        // If the Read is reverse, reverse the sequence and quality of barcode/UMI segments
                         if self.segment_info.is_reverse() {
                             fq = rev_compl_fastq_record(fq);
                         }
@@ -605,7 +608,7 @@ impl FastqAnnotator {
             }
             BarcodeProcessor::LongRead(extractor) => {
                 // For long reads: extract barcode and trim EndRegions from sequence
-                
+
                 // 1. Extract barcode
                 let barcode_result = extractor.extract_barcode(record)?;
                 let barcode = if barcode_result.is_success() {

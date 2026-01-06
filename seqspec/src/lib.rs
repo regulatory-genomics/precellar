@@ -25,6 +25,10 @@ use utils::rev_compl;
 
 #[derive(Deserialize, Serialize, Debug, Copy, Clone, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
+/// Determine the strandedness relationship between the R1 and the original RNA molecule
+/// * Forward: R1's strandedness matches the original RNA molecule
+/// * Reverse: R1's strandedness is the reverse complement of the original RNA molecule
+/// * Unstranded: the assay may capture both strands equally, or strandedness is not applicable
 pub enum ChemistryStrandedness {
     Forward,
     Reverse,
@@ -70,6 +74,7 @@ impl Assay {
         assay.file = Some(path.as_ref().to_path_buf());
         assay.normalize_all_paths();
         assay.validate_structure()?;
+        assay.validate_strands()?;
         Ok(assay)
     }
 
@@ -77,6 +82,7 @@ impl Assay {
         let yaml_str = reqwest::blocking::get(url)?.text()?;
         let assay: Assay = serde_yaml::from_str(&yaml_str).context("Failed to parse YAML")?;
         assay.validate_structure()?;
+        assay.validate_strands()?;
         Ok(assay)
     }
 
@@ -92,6 +98,44 @@ impl Assay {
                         modality,
                         depth
                     );
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Validate that read strand values are appropriate for the assay type.
+    ///
+    /// For each modality:
+    /// - Detects whether it's a long-read or short-read assay
+    /// - Validates all reads in that modality:
+    ///   - Short-read assays: only Pos/Neg allowed
+    ///   - Long-read assays: Pos/Neg/Unstranded allowed
+    pub fn validate_strands(&self) -> Result<()> {
+        for modality in &self.modalities {
+            // Detect assay type for this modality
+            let is_long_read = match self.detect_assay_type(modality) {
+                Ok(AssayType::LongRead) => true,
+                Ok(AssayType::ShortRead) => false,
+                Err(e) => {
+                    // If detection fails, assume short-read
+                    log::warn!("Failed to detect assay type for modality {:?}, assuming short-read for validation: {}", modality, e);
+                    false
+                }
+            };
+
+            // Validate each read for this modality
+            for read in self.sequence_spec.values() {
+                if read.modality == *modality {
+                    // Unstranded is only valid for long-read assays
+                    if !is_long_read && read.strand == Strand::Unstranded {
+                        bail!(
+                            "Strand validation failed for read '{}' in short-read assay (modality: {:?}): \
+                            strand=unstranded is only valid for long-read assays",
+                            read.read_id,
+                            modality
+                        );
+                    }
                 }
             }
         }
