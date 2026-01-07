@@ -1,5 +1,6 @@
 use anyhow::{bail, Result};
 use bwa_mem2::{AlignerOpts, BurrowsWheelerAligner, FMIndex};
+use log::warn;
 use noodles::sam::Header;
 use precellar::align::{Minimap2Aligner, Minimap2Opts};
 use precellar::{
@@ -234,20 +235,22 @@ impl BWAMEM2 {
         - 'sr': Short paired-end reads
 */
 #[pyclass]
-#[repr(transparent)]
-pub struct MINIMAP2(Minimap2Aligner);
+pub struct MINIMAP2 {
+    aligner: Minimap2Aligner,
+    _temp_index: Option<tempfile::TempPath>,  // To hold temporary index if created from FASTA
+}
 
 impl Deref for MINIMAP2 {
     type Target = Minimap2Aligner;
 
     fn deref(&self) -> &Self::Target {
-        &self.0
+        &self.aligner
     }
 }
 
 impl DerefMut for MINIMAP2 {
     fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.0
+        &mut self.aligner
     }
 }
 
@@ -276,8 +279,25 @@ impl MINIMAP2 {
             ),
         };
 
-        let opts = Minimap2Opts::new(index_path).with_preset(preset);
-        Ok(MINIMAP2(Minimap2Aligner::new(opts)?))
+        let _temp_index = if is_fasta_file(&index_path) {
+            let tmp = tempfile::NamedTempFile::new()?.into_temp_path();
+            warn!("Provided index path is a FASTA file. Creating temporary minimap2 index at {:?}.", tmp);
+            warn!("This may take a few minutes. To save time in the future, consider pre-building the minimap2 index."); 
+            minimap2::Aligner::builder()
+                .preset(preset.clone())
+                .with_index(&index_path, Some(tmp.to_path_buf().to_str().unwrap()))
+                .map_err(|e| anyhow::anyhow!("Failed to create minimap2 index: {}", e))?;
+            Some(tmp)
+        } else {
+            None
+        };
+        let index = _temp_index.as_ref().map_or(index_path, |x| x.to_path_buf());
+        let opts = Minimap2Opts::new(index).with_preset(preset);
+        
+        Ok(Self {
+            aligner: Minimap2Aligner::new(opts)?,
+            _temp_index,
+        })
     }
 
     /// Get the currently configured preset name.
@@ -288,10 +308,28 @@ impl MINIMAP2 {
     ///     The preset name, or None if using default (map-ont).
     #[getter]
     pub fn get_preset(&self) -> Option<String> {
-        self.0
+        self.aligner
             .get_opts()
             .preset()
             .map(|p| format!("{:?}", p).to_lowercase())
+    }
+}
+
+fn is_fasta_file(path: impl AsRef<std::path::Path>) -> bool {
+    let mut path = path.as_ref().to_path_buf();
+    if let Some(ext) = path.extension() {
+        if ext.to_str().unwrap().to_lowercase().as_str() == "gz" {
+            path = path.with_extension("");
+        }
+    }
+
+    if let Some(ext) = path.extension() {
+        match ext.to_str().unwrap().to_lowercase().as_str() {
+            "fa" | "fasta" | "fna" | "ffn" | "faa" | "frn" => true,
+            _ => false,
+        }
+    } else {
+        false
     }
 }
 

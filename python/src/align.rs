@@ -115,6 +115,10 @@ pub fn make_minimap2_index(fasta: PathBuf, output_index: PathBuf, preset: &str) 
         ),
     };
 
+    info!(
+        "Creating minimap2 index for fasta: {:?} with preset: {:?}",
+        fasta, preset
+    );
     // Build index from FASTA and save to output
     // with_index(input, Some(output)) reads FASTA from input and saves .mmi to output
     minimap2::Aligner::builder()

@@ -1,4 +1,7 @@
 /// This module provides an abstraction for aligning sequencing reads using different alignment tools like BWA and STAR.
+mod minimap2;
+pub use minimap2::{Minimap2Aligner, Minimap2Opts};
+
 use super::fastq::AnnotatedFastq;
 use crate::barcode::{get_barcode, get_umi};
 
@@ -6,7 +9,6 @@ use anyhow::{bail, ensure, Result};
 pub use bwa_mem2::BurrowsWheelerAligner;
 use noodles::sam::alignment::Record;
 pub use star_aligner::StarAligner;
-pub use super::wrapper::Minimap2Aligner;
 
 use log;
 use noodles::sam;

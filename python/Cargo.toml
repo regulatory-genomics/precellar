@@ -23,6 +23,7 @@ termtree = "0.5"
 precellar = { workspace = true }
 regex = "1.11"
 rayon = "1.10"
+tempfile = "3"
 log = "0.4"
 env_logger = "0.11"
 url = "2.5"
