@@ -1,12 +1,18 @@
-use std::{ops::{Deref, DerefMut}, path::PathBuf};
-use anyhow::Result;
+use anyhow::{bail, Result};
+use bwa_mem2::{AlignerOpts, BurrowsWheelerAligner, FMIndex};
 use noodles::sam::Header;
-use precellar::{align::{Aligner, AnnotatedFastq}, transcriptome::{Transcript, TxAligner}};
+use precellar::align::{Minimap2Aligner, Minimap2Opts};
+use precellar::{
+    align::{Aligner, AnnotatedFastq},
+    transcriptome::{Transcript, TxAligner},
+};
 use pyo3::prelude::*;
 use seqspec::ChemistryStrandedness;
 use star_aligner::{StarAligner, StarOpts};
-use bwa_mem2::{AlignerOpts, BurrowsWheelerAligner, FMIndex};
-use precellar::align::{Minimap2Aligner, Minimap2Opts};
+use std::{
+    ops::{Deref, DerefMut},
+    path::PathBuf,
+};
 
 pub enum AlignerRef<'py> {
     STAR(PyRefMut<'py, STAR>),
@@ -23,11 +29,18 @@ impl AlignerRef<'_> {
         }
     }
 
-    pub fn transcript_annotator(&self, strandness: Option<ChemistryStrandedness>) -> Option<TxAligner> {
+    pub fn transcript_annotator(
+        &self,
+        strandness: Option<ChemistryStrandedness>,
+    ) -> Option<TxAligner> {
         match self {
             AlignerRef::STAR(aligner) => {
-                let transcriptome: Vec<_> = aligner.get_transcriptome().unwrap().iter()
-                    .map(|t| Transcript::try_from(t.clone()).unwrap()).collect();
+                let transcriptome: Vec<_> = aligner
+                    .get_transcriptome()
+                    .unwrap()
+                    .iter()
+                    .map(|t| Transcript::try_from(t.clone()).unwrap())
+                    .collect();
                 Some(TxAligner::new(transcriptome, self.header(), strandness))
             }
             AlignerRef::BWA(_) => None,
@@ -60,18 +73,24 @@ impl Aligner for AlignerRef<'_> {
     }
 
     fn align_reads(
-            &mut self,
-            num_threads: u16,
-            records: Vec<AnnotatedFastq>,
-        ) -> Vec<(Option<precellar::align::MultiMapR>, Option<precellar::align::MultiMapR>)> {
+        &mut self,
+        num_threads: u16,
+        records: Vec<AnnotatedFastq>,
+    ) -> Vec<(
+        Option<precellar::align::MultiMapR>,
+        Option<precellar::align::MultiMapR>,
+    )> {
         match self {
             AlignerRef::STAR(aligner) => aligner.align_reads(num_threads, records),
-            AlignerRef::BWA(aligner) => Aligner::align_reads(aligner.deref_mut().deref_mut(), num_threads, records),
-            AlignerRef::Minimap2(aligner) => Aligner::align_reads(aligner.deref_mut().deref_mut(), num_threads, records),
+            AlignerRef::BWA(aligner) => {
+                Aligner::align_reads(aligner.deref_mut().deref_mut(), num_threads, records)
+            }
+            AlignerRef::Minimap2(aligner) => {
+                Aligner::align_reads(aligner.deref_mut().deref_mut(), num_threads, records)
+            }
         }
     }
 }
-
 
 /** The STAR aligner.
 
@@ -148,10 +167,8 @@ impl BWAMEM2 {
         text_signature = "(index_path)",
     )]
     pub fn new(index_path: PathBuf) -> Result<Self> {
-        let aligner = BurrowsWheelerAligner::new(
-            FMIndex::read(index_path).unwrap(),
-            AlignerOpts::default(),
-        );
+        let aligner =
+            BurrowsWheelerAligner::new(FMIndex::read(index_path).unwrap(), AlignerOpts::default());
         Ok(BWAMEM2(aligner))
     }
 
@@ -169,7 +186,7 @@ impl BWAMEM2 {
 
     /// The minimum seed length of the aligner. The shorter the seed more
     /// sensitive the search will be. The default value is 19.
-    /// 
+    ///
     /// Returns
     /// -------
     /// int
@@ -203,7 +220,7 @@ impl BWAMEM2 {
     ----------
     index_path : str
         The path to the Minimap2 index file (.mmi).
-    preset : str | None
+    preset : str
         The minimap2 preset to use. Available presets:
         - 'map-ont': Oxford Nanopore genomic reads (default)
         - 'map-pb': PacBio CLR genomic reads
@@ -215,7 +232,6 @@ impl BWAMEM2 {
         - 'asm20': Assembly-to-assembly alignment (divergence ~20%)
         - 'short': Short single-end reads
         - 'sr': Short paired-end reads
-        If None, defaults to 'map-ont'.
 */
 #[pyclass]
 #[repr(transparent)]
@@ -239,33 +255,28 @@ impl DerefMut for MINIMAP2 {
 impl MINIMAP2 {
     #[new]
     #[pyo3(
-        signature = (index_path, *, preset=None),
-        text_signature = "(index_path, *, preset=None)",
+        signature = (index_path, *, preset="map-ont"),
+        text_signature = "(index_path, *, preset='map-ont')",
     )]
-    pub fn new(index_path: PathBuf, preset: Option<&str>) -> Result<Self> {
-        let mut opts = Minimap2Opts::new(index_path);
+    pub fn new(index_path: PathBuf, preset: &str) -> Result<Self> {
+        let preset = match preset.to_lowercase().as_str() {
+            "map-ont" => minimap2::Preset::MapOnt,
+            "map-pb" => minimap2::Preset::MapPb,
+            "map-hifi" => minimap2::Preset::MapHifi,
+            "splice" => minimap2::Preset::Splice,
+            "splice:hq" => minimap2::Preset::SpliceHq,
+            "asm5" => minimap2::Preset::Asm5,
+            "asm10" => minimap2::Preset::Asm10,
+            "asm20" => minimap2::Preset::Asm20,
+            "short" => minimap2::Preset::Short,
+            "sr" => minimap2::Preset::Sr,
+            _ => bail!(
+                "Invalid preset '{}'. Valid presets: map-ont, map-pb, map-hifi, splice, splice:hq, asm5, asm10, asm20, short, sr",
+                preset
+            ),
+        };
 
-        // Parse preset string to minimap2::Preset enum
-        if let Some(preset_str) = preset {
-            let preset_enum = match preset_str.to_lowercase().as_str() {
-                "map-ont" => minimap2::Preset::MapOnt,
-                "map-pb" => minimap2::Preset::MapPb,
-                "map-hifi" => minimap2::Preset::MapHifi,
-                "splice" => minimap2::Preset::Splice,
-                "splice:hq" => minimap2::Preset::SpliceHq,
-                "asm5" => minimap2::Preset::Asm5,
-                "asm10" => minimap2::Preset::Asm10,
-                "asm20" => minimap2::Preset::Asm20,
-                "short" => minimap2::Preset::Short,
-                "sr" => minimap2::Preset::Sr,
-                _ => return Err(anyhow::anyhow!(
-                    "Invalid preset '{}'. Valid presets: map-ont, map-pb, map-hifi, splice, splice:hq, asm5, asm10, asm20, short, sr",
-                    preset_str
-                )),
-            };
-            opts = opts.with_preset(preset_enum);
-        }
-
+        let opts = Minimap2Opts::new(index_path).with_preset(preset);
         Ok(MINIMAP2(Minimap2Aligner::new(opts)?))
     }
 
@@ -277,7 +288,10 @@ impl MINIMAP2 {
     ///     The preset name, or None if using default (map-ont).
     #[getter]
     pub fn get_preset(&self) -> Option<String> {
-        self.0.get_opts().preset().map(|p| format!("{:?}", p).to_lowercase())
+        self.0
+            .get_opts()
+            .preset()
+            .map(|p| format!("{:?}", p).to_lowercase())
     }
 }
 

@@ -70,7 +70,7 @@ pub fn make_bwa_index(fasta: PathBuf, genome_prefix: PathBuf) -> Result<()> {
 ///    File path to the FASTA file containing reference sequences.
 /// output_index: Path
 ///   File path for the output minimap2 index (.mmi file).
-/// preset: str | None
+/// preset: str
 ///    Optional preset to optimize index for specific read types:
 ///    - 'map-ont': Oxford Nanopore reads (default)
 ///    - 'map-pb': PacBio CLR reads
@@ -80,7 +80,6 @@ pub fn make_bwa_index(fasta: PathBuf, genome_prefix: PathBuf) -> Result<()> {
 ///    - 'asm5', 'asm10', 'asm20': Assembly alignment
 ///    - 'short': Short single-end reads
 ///    - 'sr': Short paired-end reads
-///    If None, uses 'map-ont' defaults.
 ///
 /// Examples
 /// --------
@@ -95,45 +94,35 @@ pub fn make_bwa_index(fasta: PathBuf, genome_prefix: PathBuf) -> Result<()> {
 /// make_bwa_index : Create BWA-MEM2 index for short reads
 #[pyfunction]
 #[pyo3(
-    signature = (fasta, output_index, *, preset=None),
-    text_signature = "(fasta, output_index, *, preset=None)",
+    signature = (fasta, output_index, *, preset="map-ont"),
+    text_signature = "(fasta, output_index, *, preset='map-ont')",
 )]
-pub fn make_minimap2_index(
-    fasta: PathBuf,
-    output_index: PathBuf,
-    preset: Option<&str>,
-) -> Result<()> {
-    // Start with builder
-    let builder = minimap2::Aligner::builder();
-
-    // Apply preset if provided, or use default map-ont
-    let builder = if let Some(preset_str) = preset {
-        let preset_enum = match preset_str.to_lowercase().as_str() {
-            "map-ont" => minimap2::Preset::MapOnt,
-            "map-pb" => minimap2::Preset::MapPb,
-            "map-hifi" => minimap2::Preset::MapHifi,
-            "splice" => minimap2::Preset::Splice,
-            "splice:hq" => minimap2::Preset::SpliceHq,
-            "asm5" => minimap2::Preset::Asm5,
-            "asm10" => minimap2::Preset::Asm10,
-            "asm20" => minimap2::Preset::Asm20,
-            "short" => minimap2::Preset::Short,
-            "sr" => minimap2::Preset::Sr,
-            _ => return Err(anyhow::anyhow!(
-                "Invalid preset '{}'. Valid presets: map-ont, map-pb, map-hifi, splice, splice:hq, asm5, asm10, asm20, short, sr",
-                preset_str
-            )),
-        };
-        builder.preset(preset_enum)
-    } else {
-        // Default to map-ont if no preset specified
-        builder.map_ont()
+pub fn make_minimap2_index(fasta: PathBuf, output_index: PathBuf, preset: &str) -> Result<()> {
+    let preset = match preset.to_lowercase().as_str() {
+        "map-ont" => minimap2::Preset::MapOnt,
+        "map-pb" => minimap2::Preset::MapPb,
+        "map-hifi" => minimap2::Preset::MapHifi,
+        "splice" => minimap2::Preset::Splice,
+        "splice:hq" => minimap2::Preset::SpliceHq,
+        "asm5" => minimap2::Preset::Asm5,
+        "asm10" => minimap2::Preset::Asm10,
+        "asm20" => minimap2::Preset::Asm20,
+        "short" => minimap2::Preset::Short,
+        "sr" => minimap2::Preset::Sr,
+        _ => bail!(
+            "Invalid preset '{}'. Valid presets: map-ont, map-pb, map-hifi, splice, splice:hq, asm5, asm10, asm20, short, sr",
+            preset,
+        ),
     };
 
     // Build index from FASTA and save to output
     // with_index(input, Some(output)) reads FASTA from input and saves .mmi to output
-    let _aligner = builder
-        .with_index(fasta.to_str().unwrap(), Some(output_index.to_str().unwrap()))
+    minimap2::Aligner::builder()
+        .preset(preset)
+        .with_index(
+            fasta.to_str().unwrap(),
+            Some(output_index.to_str().unwrap()),
+        )
         .map_err(|e| anyhow::anyhow!("Failed to create minimap2 index: {}", e))?;
 
     Ok(())
@@ -404,8 +393,7 @@ impl<A: Aligner> Iterator for AlignProgressBar<'_, A> {
 
     fn next(&mut self) -> Option<Self::Item> {
         let item = self.alignments.next();
-        self.pb
-            .set_position(self.alignments.num_processed() as u64);
+        self.pb.set_position(self.alignments.num_processed() as u64);
         item
     }
 }
