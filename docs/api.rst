@@ -24,7 +24,7 @@ Core functions
     align
     make_fastq
     make_bwa_index
-
+    make_minimap2_index
 
 Aligners
 ~~~~~~~~
