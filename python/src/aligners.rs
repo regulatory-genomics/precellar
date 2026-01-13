@@ -82,7 +82,9 @@ impl Aligner for AlignerRef<'_> {
         Option<precellar::align::MultiMapR>,
     )> {
         match self {
-            AlignerRef::STAR(aligner) => aligner.align_reads(num_threads, records),
+            AlignerRef::STAR(aligner) => {
+                Aligner::align_reads(aligner.deref_mut().deref_mut(), num_threads, records)
+            }
             AlignerRef::BWA(aligner) => {
                 Aligner::align_reads(aligner.deref_mut().deref_mut(), num_threads, records)
             }
