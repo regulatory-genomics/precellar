@@ -225,16 +225,25 @@ impl BWAMEM2 {
         The path to the Minimap2 index file (.mmi).
     preset : str
         The minimap2 preset to use. Available presets:
-        - 'map-ont': Oxford Nanopore genomic reads (default)
-        - 'map-pb': PacBio CLR genomic reads
-        - 'map-hifi': PacBio HiFi/CCS genomic reads
-        - 'splice': Long-read spliced alignment (RNA-seq)
-        - 'splice:hq': High-quality long-read spliced alignment
-        - 'asm5': Assembly-to-assembly alignment (divergence ~5%)
-        - 'asm10': Assembly-to-assembly alignment (divergence ~10%)
-        - 'asm20': Assembly-to-assembly alignment (divergence ~20%)
-        - 'short': Short single-end reads
-        - 'sr': Short paired-end reads
+        - Long Reads DNA Mapping:
+          - 'map-ont': Oxford Nanopore genomic reads (default)
+          - 'map-pb': PacBio CLR genomic reads
+          - 'map-hifi': PacBio HiFi/CCS genomic reads
+          - 'lr:hq': Long reads, high quality
+        - Spliced / RNA-seq Alignment:
+          - 'splice': Long-read spliced alignment (RNA-seq)
+          - 'splice:hq': High-quality long-read spliced alignment
+          - 'splice:sr': Short-read RNA-seq
+        - Long Assembly to Reference Mapping:
+          - 'asm5': Assembly-to-assembly alignment (divergence ~5%)
+          - 'asm10': Assembly-to-assembly alignment (divergence ~10%)
+          - 'asm20': Assembly-to-assembly alignment (divergence ~20%)
+        - Short Reads Mapping:
+          - 'short': Short single-end reads
+          - 'sr': Short paired-end reads
+        - All-vs-All Overlap Mapping:
+          - 'ava-pb': PacBio all-vs-all overlap
+          - 'ava-ont': ONT all-vs-all overlap
 */
 #[pyclass]
 pub struct MINIMAP2 {
@@ -265,18 +274,28 @@ impl MINIMAP2 {
     )]
     pub fn new(index_path: PathBuf, preset: &str) -> Result<Self> {
         let preset = match preset.to_lowercase().as_str() {
+            // Long Reads DNA Mapping
             "map-ont" => minimap2::Preset::MapOnt,
             "map-pb" => minimap2::Preset::MapPb,
             "map-hifi" => minimap2::Preset::MapHifi,
+            // "map-iclr" => minimap2::Preset::MapIclr, // Mentioned in minimap2, but not supported by minimap2-rs
+            "lr:hq" => minimap2::Preset::LrHq, 
+            // Spliced / RNA-seq Alignment
             "splice" => minimap2::Preset::Splice,
             "splice:hq" => minimap2::Preset::SpliceHq,
+            "splice:sr" => minimap2::Preset::SpliceSr,
+            // Long Assembly to Reference Mapping
             "asm5" => minimap2::Preset::Asm5,
             "asm10" => minimap2::Preset::Asm10,
             "asm20" => minimap2::Preset::Asm20,
+            // Short Reads Mapping
             "short" => minimap2::Preset::Short,
             "sr" => minimap2::Preset::Sr,
+            // All-vs-All overlap Mapping
+            "ava-pb" => minimap2::Preset::AvaPb,
+            "ava-ont" => minimap2::Preset::AvaOnt,
             _ => bail!(
-                "Invalid preset '{}'. Valid presets: map-ont, map-pb, map-hifi, splice, splice:hq, asm5, asm10, asm20, short, sr",
+                "Invalid preset '{}'. Valid presets: map-ont, map-pb, map-hifi, lr:hq, splice, splice:hq, splice:sr, asm5, asm10, asm20, short, sr, ava-pb, ava-ont",
                 preset
             ),
         };
