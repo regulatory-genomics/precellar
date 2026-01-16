@@ -140,37 +140,60 @@ impl Minimap2Aligner {
     }
 
     /// Align a read pair and return alignments for both reads.
-    ///
-    /// The pairing process involves:
-    /// 1. Independent mapping: Map R1 and R2 independently to find all potential hits
-    /// 2. Pairing: Find pairs that satisfy proper pair criteria (same contig, distance, orientation)
-    /// 3. Mate info: Add RNEXT, PNEXT, TLEN, and mate flags to paired records
-    ///
-    /// For Illumina FR (Forward-Reverse) libraries:
-    /// - One read maps to + strand, the other to - strand
-    /// - The + read appears upstream (lower coordinate) of the - read
     pub fn align_read_pair(
         &mut self,
         read1: &fastq::Record,
         read2: &fastq::Record,
     ) -> Result<(Vec<RecordBuf>, Vec<RecordBuf>)> {
-        // Step 1: Independent mapping
-        let mut ali1 = self.align_read(read1)?;
-        let mut ali2 = self.align_read(read2)?;
+        let seq1 = read1.sequence();
+        let seq2 = read2.sequence();
+        let name1 = read1.name();
+        let qual1 = read1.quality_scores();
+        let qual2 = read2.quality_scores();
 
-        // Set basic paired-end flags for all alignments
-        for aln in &mut ali1 {
-            let flags = aln.flags_mut();
-            *flags |= Flags::SEGMENTED;
-            *flags |= Flags::FIRST_SEGMENT;
-        }
-        for aln in &mut ali2 {
-            let flags = aln.flags_mut();
-            *flags |= Flags::SEGMENTED;
-            *flags |= Flags::LAST_SEGMENT;
-        }
+        let (mappings1, mappings2) = self.aligner.map_pair(
+            seq1,
+            seq2,
+            false,  // cs - long cs tag
+            false,  // md - MD tag
+            Some(DEFAULT_MAX_INSERT_SIZE as usize),  // max_frag_len
+            None,   // extra_flags
+            Some(name1),
+        ).map_err(|e| anyhow::anyhow!("Minimap2 paired mapping failed: {}", e))?;
 
-        // Handle unmapped cases
+        // Handle unmapped cases - create unmapped records if no mappings found
+        let mut ali1: Vec<RecordBuf> = if mappings1.is_empty() {
+            vec![create_unmapped_record(read1, true, true)]
+        } else {
+            mappings1
+                .into_iter()
+                .map(|mapping| {
+                    let mut record = mapping_to_record_buf(&self.header, &mapping, seq1, name1, qual1);
+                    // Set paired-end flags for R1
+                    let flags = record.flags_mut();
+                    *flags |= Flags::SEGMENTED;
+                    *flags |= Flags::FIRST_SEGMENT;
+                    record
+                })
+                .collect()
+        };
+
+        let mut ali2: Vec<RecordBuf> = if mappings2.is_empty() {
+            vec![create_unmapped_record(read2, true, false)]
+        } else {
+            mappings2
+                .into_iter()
+                .map(|mapping| {
+                    let mut record = mapping_to_record_buf(&self.header, &mapping, seq2, name1, qual2);
+                    // Set paired-end flags for R2
+                    let flags = record.flags_mut();
+                    *flags |= Flags::SEGMENTED;
+                    *flags |= Flags::LAST_SEGMENT;
+                    record
+                })
+                .collect()
+        };
+
         let r1_mapped = ali1.iter().any(|a| !a.flags().is_unmapped());
         let r2_mapped = ali2.iter().any(|a| !a.flags().is_unmapped());
 
@@ -186,13 +209,12 @@ impl Minimap2Aligner {
             }
         }
 
-        // If either read is unmapped, skip "Proper Pair" analysis.
+        // If either read is unmapped, skip proper pair analysis
         if !r1_mapped || !r2_mapped {
             return Ok((ali1, ali2));
         }
 
-        // Step 2: Pairing - find proper pairs
-        // Get primary alignments for pairing
+        // Get primary alignments for pairing info
         let r1_primary_idx = ali1.iter().position(|a| !a.flags().is_secondary() && !a.flags().is_supplementary());
         let r2_primary_idx = ali2.iter().position(|a| !a.flags().is_secondary() && !a.flags().is_supplementary());
 
@@ -206,7 +228,7 @@ impl Minimap2Aligner {
             // Check if they form a proper pair using TLEN
             let is_proper = is_proper_pair(r1_primary, r2_primary, tlen);
 
-            // Step 3: Add mate information to primary alignments
+            // Get mate info from primary alignments
             let r1_ref_id = r1_primary.reference_sequence_id();
             let r2_ref_id = r2_primary.reference_sequence_id();
             let r1_pos = r1_primary.alignment_start();
