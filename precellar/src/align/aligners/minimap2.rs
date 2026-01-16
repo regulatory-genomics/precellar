@@ -118,8 +118,8 @@ impl Minimap2Aligner {
         // Parameters: seq, cs (long cs tag), md (MD tag), max_frag_len, extra_flags, query_name (default values)
         let mappings = self.aligner.map(
             seq,
-            false,  // cs - long cs tag
-            false,  // md - MD tag
+            true,  // cs - long cs tag
+            true,  // md - MD tag
             None,   // max_frag_len
             None,   // extra_flags
             Some(name),
@@ -154,8 +154,8 @@ impl Minimap2Aligner {
         let (mappings1, mappings2) = self.aligner.map_pair(
             seq1,
             seq2,
-            false,  // cs - long cs tag
-            false,  // md - MD tag
+            true,  // cs - long cs tag
+            true,  // md - MD tag
             Some(DEFAULT_MAX_INSERT_SIZE as usize),  // max_frag_len
             None,   // extra_flags
             Some(name1),
@@ -368,6 +368,24 @@ fn mapping_to_record_buf(
             record_buf.data_mut().insert(
                 noodles::sam::alignment::record::data::field::tag::Tag::ALIGNMENT_SCORE,
                 noodles::sam::alignment::record_buf::data::field::value::Value::Int32(score),
+            );
+        }
+
+        // Add MD tag if available
+        if let Some(ref md) = alignment.md {
+            record_buf.data_mut().insert(
+                noodles::sam::alignment::record::data::field::tag::Tag::MISMATCHED_POSITIONS,
+                noodles::sam::alignment::record_buf::data::field::value::Value::String(md.clone().into()),
+            );
+        }
+
+        // Add CS tag if available (minimap2-specific difference string)
+        if let Some(ref cs) = alignment.cs {
+            // CS tag uses lowercase 'cs' - need to create custom tag
+            let cs_tag = noodles::sam::alignment::record::data::field::tag::Tag::new(b'c', b's');
+            record_buf.data_mut().insert(
+                cs_tag,
+                noodles::sam::alignment::record_buf::data::field::value::Value::String(cs.clone().into()),
             );
         }
     }
