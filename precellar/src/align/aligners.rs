@@ -1,4 +1,7 @@
 /// This module provides an abstraction for aligning sequencing reads using different alignment tools like BWA and STAR.
+mod minimap2;
+pub use minimap2::{Minimap2Aligner, Minimap2Opts};
+
 use super::fastq::AnnotatedFastq;
 use crate::barcode::{get_barcode, get_umi};
 
@@ -259,6 +262,77 @@ impl Aligner for StarAligner {
             .collect()
     }
 }
+
+impl Aligner for Minimap2Aligner {
+    fn header(&self) -> sam::Header {
+        self.get_header().clone()
+    }
+
+    fn align_reads(
+        &mut self,
+        num_threads: u16,
+        records: Vec<AnnotatedFastq>,
+    ) -> Vec<(Option<MultiMapR>, Option<MultiMapR>)> {
+        let chunk_size = get_chunk_size(records.len(), num_threads as usize);
+
+        // Use Rayon for parallel processing with chunks
+        records
+            .par_chunks(chunk_size)
+            .flat_map_iter(|chunk| {
+                // Clone aligner for this thread (efficient: only clones Arc pointers to shared index)
+                let mut thread_aligner = self.clone();
+
+                chunk.iter().map(move |rec| {
+                    let bc = rec.barcode.as_ref().unwrap();
+                    let read1 = rec.read1.as_ref();
+                    let read2 = rec.read2.as_ref();
+
+                    if read1.is_some() && read2.is_some() {
+                        let (mut ali1, mut ali2) =
+                            thread_aligner.align_read_pair(&read1.unwrap(), &read2.unwrap()).unwrap();
+                        ali1.iter_mut()
+                            .chain(ali2.iter_mut())
+                            .for_each(|alignment| {
+                                add_cell_barcode(
+                                    alignment,
+                                    bc.raw.sequence(),
+                                    bc.raw.quality_scores(),
+                                    bc.corrected.as_deref(),
+                                );
+                                if let Some(umi) = &rec.umi {
+                                    add_umi(alignment, umi.sequence(), umi.quality_scores());
+                                };
+                            });
+                        (Some(ali1.try_into().unwrap()), Some(ali2.try_into().unwrap()))
+                    } else if let Some(read) = read1.or(read2) {
+                        let mut ali = thread_aligner.align_read(read).unwrap();
+                        ali.iter_mut().for_each(|alignment| {
+                            add_cell_barcode(
+                                alignment,
+                                bc.raw.sequence(),
+                                bc.raw.quality_scores(),
+                                bc.corrected.as_deref(),
+                            );
+                            if let Some(umi) = &rec.umi {
+                                add_umi(alignment, umi.sequence(), umi.quality_scores());
+                            };
+                        });
+                        if read1.is_some() {
+                            (Some(ali.try_into().unwrap()), None)
+                        } else {
+                            (None, Some(ali.try_into().unwrap()))
+                        }
+                    } else {
+                        log::warn!("Found record with no reads (read1 and read2 are both None). Barcode: {:?}",
+                                  String::from_utf8_lossy(bc.raw.sequence()));
+                        (None, None)
+                    }
+                })
+            })
+            .collect()
+    }
+}
+
 
 fn get_chunk_size(total_length: usize, num_threads: usize) -> usize {
     let chunk_size = total_length / num_threads;

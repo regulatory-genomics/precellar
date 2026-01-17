@@ -11,8 +11,9 @@ crate-type = ["cdylib"]
 [dependencies]
 anyhow = "1.0"
 bstr = "1.12"
-bwa-mem2 = { git = "https://github.com/regulatory-genomics/bwa-mem2-rust.git", rev = "e3b64904adcb379b3814f6408796fd371d56e5cf" }
+bwa-mem2 = { git = "https://github.com/regulatory-genomics/bwa-mem2-rust.git", rev = "27a375ec2239c79e8b3dafc504c1e197832a27bf" }
 star-aligner = { git = "https://github.com/regulatory-genomics/star-aligner", rev = "ff62b1d7d6ccbade4396398960ffcb1eb3d629e7" }
+minimap2 = { git = "https://github.com/PPSherry/minimap2-rs.git", branch = "feature/paired-end-support" }
 glob = "0.3"
 itertools = "0.14"
 noodles = { version = "0.101", features = ["core", "fastq", "bam", "sam", "bgzf"] }
@@ -22,6 +23,7 @@ termtree = "0.5"
 precellar = { workspace = true }
 regex = "1.11"
 rayon = "1.10"
+tempfile = "3"
 log = "0.4"
 env_logger = "0.11"
 url = "2.5"

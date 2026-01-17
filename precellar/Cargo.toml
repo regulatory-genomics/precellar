@@ -9,8 +9,9 @@ anndata = "0.6.2"
 anndata-hdf5 = "0.5.2"
 #bed-utils = "0.9.5"
 bed-utils = { git = "https://github.com/kaizhang/bed-utils.git", rev = "c2b90997086622d9e07de96aa59aedd8ff88fe30" }
-bwa-mem2 = { git = "https://github.com/regulatory-genomics/bwa-mem2-rust.git", rev = "e3b64904adcb379b3814f6408796fd371d56e5cf" }
+bwa-mem2 = { git = "https://github.com/regulatory-genomics/bwa-mem2-rust.git", rev = "27a375ec2239c79e8b3dafc504c1e197832a27bf" }
 star-aligner = { git = "https://github.com/regulatory-genomics/star-aligner", rev = "ff62b1d7d6ccbade4396398960ffcb1eb3d629e7" }
+minimap2 = { git = "https://github.com/PPSherry/minimap2-rs.git", branch = "feature/paired-end-support" }
 smallvec = "1.15"
 bstr = "1.12"
 itertools = "0.14"
@@ -29,6 +30,12 @@ env_logger = "0.11"
 rand = "0.9.0"
 indicatif = "0.18"
 tempfile = "3"
+bio = "2.0"
+tikv-jemallocator = { version = "0.6", optional = true }
 
 [dev-dependencies]
 flate2 = "1.1"
+
+[features]
+default = []
+jemalloc = ["tikv-jemallocator"]
