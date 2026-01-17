@@ -147,7 +147,7 @@ impl Minimap2Aligner {
     ) -> Result<(Vec<RecordBuf>, Vec<RecordBuf>)> {
         let seq1 = read1.sequence();
         let seq2 = read2.sequence();
-        let name1 = read1.name();
+        let name = read1.name();
         let qual1 = read1.quality_scores();
         let qual2 = read2.quality_scores();
 
@@ -158,118 +158,22 @@ impl Minimap2Aligner {
             true,  // md - MD tag
             Some(DEFAULT_MAX_INSERT_SIZE as usize),  // max_frag_len
             None,   // extra_flags
-            Some(name1),
+            Some(name),
         ).map_err(|e| anyhow::anyhow!("Minimap2 paired mapping failed: {}", e))?;
 
-        // Handle unmapped cases - create unmapped records if no mappings found
-        let mut ali1: Vec<RecordBuf> = if mappings1.is_empty() {
-            vec![create_unmapped_record(read1, true, true)]
-        } else {
-            mappings1
-                .into_iter()
-                .map(|mapping| {
-                    let mut record = mapping_to_record_buf(&self.header, &mapping, seq1, name1, qual1);
-                    // Set paired-end flags for R1
-                    let flags = record.flags_mut();
-                    *flags |= Flags::SEGMENTED;
-                    *flags |= Flags::FIRST_SEGMENT;
-                    record
-                })
-                .collect()
-        };
+        // Extract primary mapping info for mate fields
+        let r1_info = extract_mapping_info(&mappings1, &self.header);
+        let r2_info = extract_mapping_info(&mappings2, &self.header);
 
-        let mut ali2: Vec<RecordBuf> = if mappings2.is_empty() {
-            vec![create_unmapped_record(read2, true, false)]
-        } else {
-            mappings2
-                .into_iter()
-                .map(|mapping| {
-                    let mut record = mapping_to_record_buf(&self.header, &mapping, seq2, name1, qual2);
-                    // Set paired-end flags for R2
-                    let flags = record.flags_mut();
-                    *flags |= Flags::SEGMENTED;
-                    *flags |= Flags::LAST_SEGMENT;
-                    record
-                })
-                .collect()
-        };
-
-        let r1_mapped = ali1.iter().any(|a| !a.flags().is_unmapped());
-        let r2_mapped = ali2.iter().any(|a| !a.flags().is_unmapped());
-
-        if !r2_mapped {
-            for aln in &mut ali1 {
-                *aln.flags_mut() |= Flags::MATE_UNMAPPED;
-            }
-        }
-
-        if !r1_mapped {
-            for aln in &mut ali2 {
-                *aln.flags_mut() |= Flags::MATE_UNMAPPED;
-            }
-        }
-
-        // If either read is unmapped, skip proper pair analysis
-        if !r1_mapped || !r2_mapped {
-            return Ok((ali1, ali2));
-        }
-
-        // Get primary alignments for pairing info
-        let r1_primary_idx = ali1.iter().position(|a| !a.flags().is_secondary() && !a.flags().is_supplementary());
-        let r2_primary_idx = ali2.iter().position(|a| !a.flags().is_secondary() && !a.flags().is_supplementary());
-
-        if let (Some(i1), Some(i2)) = (r1_primary_idx, r2_primary_idx) {
-            let r1_primary = &ali1[i1];
-            let r2_primary = &ali2[i2];
-
-            // Calculate TLEN (template length)
-            let tlen = calculate_tlen(r1_primary, r2_primary);
-
-            // Check if they form a proper pair using TLEN
-            let is_proper = is_proper_pair(r1_primary, r2_primary, tlen);
-
-            // Get mate info from primary alignments
-            let r1_ref_id = r1_primary.reference_sequence_id();
-            let r2_ref_id = r2_primary.reference_sequence_id();
-            let r1_pos = r1_primary.alignment_start();
-            let r2_pos = r2_primary.alignment_start();
-            let r1_is_reverse = r1_primary.flags().is_reverse_complemented();
-            let r2_is_reverse = r2_primary.flags().is_reverse_complemented();
-
-            // Update R1 alignments with R2 mate info
-            for aln in &mut ali1 {
-                if is_proper && !aln.flags().is_secondary() && !aln.flags().is_supplementary() {
-                    *aln.flags_mut() |= Flags::PROPERLY_SEGMENTED;
-                }
-                // Set mate reference
-                *aln.mate_reference_sequence_id_mut() = r2_ref_id;
-                // Set mate position
-                *aln.mate_alignment_start_mut() = r2_pos;
-                // Set TLEN
-                *aln.template_length_mut() = tlen;
-                // Set mate reverse flag
-                if r2_is_reverse {
-                    *aln.flags_mut() |= Flags::MATE_REVERSE_COMPLEMENTED;
-                }
-            }
-
-            // Update R2 alignments with R1 mate info
-            for aln in &mut ali2 {
-                if is_proper && !aln.flags().is_secondary() && !aln.flags().is_supplementary() {
-                    *aln.flags_mut() |= Flags::PROPERLY_SEGMENTED;
-                }
-                // Set mate reference
-                *aln.mate_reference_sequence_id_mut() = r1_ref_id;
-                // Set mate position
-                *aln.mate_alignment_start_mut() = r1_pos;
-                // Set TLEN (negative for R2)
-                *aln.template_length_mut() = -tlen;
-                // Set mate reverse flag
-                if r1_is_reverse {
-                    *aln.flags_mut() |= Flags::MATE_REVERSE_COMPLEMENTED;
-                }
-            }
-        }
+        // Create records for both reads
+        let ali1 = create_paired_records(
+            &self.header, read1, &mappings1, seq1, name, qual1,
+            true, &r1_info, &r2_info,
+        );
+        let ali2 = create_paired_records(
+            &self.header, read2, &mappings2, seq2, name, qual2,
+            false, &r2_info, &r1_info,
+        );
 
         Ok((ali1, ali2))
     }
@@ -304,6 +208,129 @@ fn build_header(aligner: &minimap2::Aligner<minimap2::Built>) -> sam::Header {
     }
 
     header
+}
+
+/// Primary mapping info extracted for mate field
+struct MappingInfo {
+    ref_id: Option<usize>,
+    pos: Option<noodles::core::Position>,
+    end_pos: i64,  // 1-based end position (inclusive)
+    is_reverse: bool,
+    is_mapped: bool,
+}
+
+/// Extract primary mapping info from a list of mappings
+fn extract_mapping_info(mappings: &[minimap2::Mapping], header: &sam::Header) -> MappingInfo {
+    if let Some(primary) = mappings.iter().find(|m| m.is_primary && !m.is_supplementary) {
+        let ref_id = primary.target_name.as_ref().and_then(|name| {
+            header.reference_sequences().get_index_of(name.as_bytes())
+        });
+        let pos = noodles::core::Position::try_from(primary.target_start as usize + 1).ok();
+        // target_end is 0-based exclusive, so it equals 1-based inclusive end position
+        let end_pos = primary.target_end as i64;
+        let is_reverse = primary.strand == minimap2::Strand::Reverse;
+        MappingInfo { ref_id, pos, end_pos, is_reverse, is_mapped: true }
+    } else {
+        MappingInfo { ref_id: None, pos: None, end_pos: 0, is_reverse: false, is_mapped: false }
+    }
+}
+
+/// Create paired-end records from mappings, setting all flags and mate info in one pass
+fn create_paired_records(
+    header: &sam::Header,
+    record: &fastq::Record,
+    mappings: &[minimap2::Mapping],
+    seq: &[u8],
+    name: &[u8],
+    qual: &[u8],
+    is_first: bool,
+    self_info: &MappingInfo,
+    mate_info: &MappingInfo,
+) -> Vec<RecordBuf> {
+    if mappings.is_empty() {
+        // Unmapped read
+        let mut rec = create_unmapped_record(record, true, is_first);
+
+        // Set mate unmapped flag if mate is also unmapped
+        if !mate_info.is_mapped {
+            *rec.flags_mut() |= Flags::MATE_UNMAPPED;
+        } else {
+            // Mate is mapped - set the RNAME/POS and mate info to mate's position
+            *rec.reference_sequence_id_mut() = mate_info.ref_id;
+            *rec.alignment_start_mut() = mate_info.pos;
+            *rec.mate_reference_sequence_id_mut() = mate_info.ref_id;
+            *rec.mate_alignment_start_mut() = mate_info.pos;
+            if mate_info.is_reverse {
+                *rec.flags_mut() |= Flags::MATE_REVERSE_COMPLEMENTED;
+            }
+        }
+        vec![rec]
+    } else {
+        // Mapped read
+        mappings
+            .iter()
+            .map(|mapping| {
+                let mut rec = mapping_to_record_buf(header, mapping, seq, name, qual);
+
+                // Set paired-end segment flags
+                *rec.flags_mut() |= Flags::SEGMENTED;
+                if is_first {
+                    *rec.flags_mut() |= Flags::FIRST_SEGMENT;
+                } else {
+                    *rec.flags_mut() |= Flags::LAST_SEGMENT;
+                }
+
+                // Set mate info
+                if !mate_info.is_mapped {
+                    // Mate unmapped - mate position points to self's primary
+                    *rec.flags_mut() |= Flags::MATE_UNMAPPED;
+                    *rec.mate_reference_sequence_id_mut() = self_info.ref_id;
+                    *rec.mate_alignment_start_mut() = self_info.pos;
+                } else {
+                    // Both mapped - set mate info and check proper pair
+                    *rec.mate_reference_sequence_id_mut() = mate_info.ref_id;
+                    *rec.mate_alignment_start_mut() = mate_info.pos;
+                    if mate_info.is_reverse {
+                        *rec.flags_mut() |= Flags::MATE_REVERSE_COMPLEMENTED;
+                    }
+
+                    // Calculate TLEN and proper pair status for primary alignments
+                    if mapping.is_primary && !mapping.is_supplementary {
+                        if let (Some(self_pos), Some(mate_pos)) = (self_info.pos, mate_info.pos) {
+                            let self_start = usize::from(self_pos) as i64;
+                            let mate_start = usize::from(mate_pos) as i64;
+
+                            // TLEN = rightmost base - leftmost base + 1
+                            let leftmost = self_start.min(mate_start);
+                            let rightmost = self_info.end_pos.max(mate_info.end_pos);
+                            let tlen_abs = (rightmost - leftmost + 1) as i32;
+
+                            // Positive for leftmost read, negative for rightmost
+                            // When positions are equal, first segment gets positive TLEN
+                            let tlen = if self_start < mate_start || (self_start == mate_start && is_first) {
+                                tlen_abs
+                            } else {
+                                -tlen_abs
+                            };
+                            *rec.template_length_mut() = tlen;
+
+                            // Check proper pair: same ref, FR orientation, within insert size
+                            // TODO: if not FR pair, need specific processing
+                            let same_ref = self_info.ref_id == mate_info.ref_id;
+                            let fr_orientation = self_info.is_reverse != mate_info.is_reverse;
+                            let within_insert = (tlen_abs as i64) <= DEFAULT_MAX_INSERT_SIZE;
+
+                            if same_ref && fr_orientation && within_insert {
+                                *rec.flags_mut() |= Flags::PROPERLY_SEGMENTED;
+                            }
+                        }
+                    }
+                }
+
+                rec
+            })
+            .collect()
+    }
 }
 
 /// Convert a minimap2 Mapping to a SAM RecordBuf
@@ -427,101 +454,17 @@ fn set_sequence_and_quality(
     }
 }
 
-/// Check if two alignments form a proper pair (FR orientation, same contig, within insert size)
-fn is_proper_pair(r1: &RecordBuf, r2: &RecordBuf, tlen: i32) -> bool {
-    // Both must be mapped
-    if r1.flags().is_unmapped() || r2.flags().is_unmapped() {
-        return false;
-    }
-
-    // Must be on the same contig
-    let r1_ref = r1.reference_sequence_id();
-    let r2_ref = r2.reference_sequence_id();
-    if r1_ref != r2_ref || r1_ref.is_none() {
-        return false;
-    }
-
-    // Get positions
-    let r1_pos = r1.alignment_start().map(|p| usize::from(p) as i64).unwrap_or(0);
-    let r2_pos = r2.alignment_start().map(|p| usize::from(p) as i64).unwrap_or(0);
-
-    // Get strand info
-    let r1_reverse = r1.flags().is_reverse_complemented();
-    let r2_reverse = r2.flags().is_reverse_complemented();
-
-    // FR orientation: one forward, one reverse
-    if r1_reverse == r2_reverse {
-        return false;
-    }
-
-    // Check orientation: forward read should be upstream of reverse read
-    let (fwd_pos, rev_pos) = if r1_reverse {
-        (r2_pos, r1_pos)
-    } else {
-        (r1_pos, r2_pos)
-    };
-
-    // Forward read should be at lower position
-    if fwd_pos > rev_pos {
-        return false;
-    }
-
-    // Check insert size using TLEN (absolute value)
-    (tlen.abs() as i64) <= DEFAULT_MAX_INSERT_SIZE
-}
-
-/// Calculate template length (TLEN) for a read pair
-fn calculate_tlen(r1: &RecordBuf, r2: &RecordBuf) -> i32 {
-    let r1_pos = r1.alignment_start().map(|p| usize::from(p) as i64).unwrap_or(0);
-    let r2_pos = r2.alignment_start().map(|p| usize::from(p) as i64).unwrap_or(0);
-
-    // Get alignment end positions from CIGAR
-    let r1_end = get_alignment_end(r1);
-    let r2_end = get_alignment_end(r2);
-
-    // TLEN = rightmost position - leftmost position + 1
-    // Positive for leftmost read, negative for rightmost read
-    let leftmost = r1_pos.min(r2_pos);
-    let rightmost = r1_end.max(r2_end);
-
-    let tlen = (rightmost - leftmost + 1) as i32;
-
-    // Return positive for R1 if R1 is leftmost, negative otherwise
-    if r1_pos <= r2_pos {
-        tlen
-    } else {
-        -tlen
-    }
-}
-
-/// Get the alignment end position from a record using CIGAR
-fn get_alignment_end(record: &RecordBuf) -> i64 {
-    use noodles::sam::alignment::record::Cigar;
-
-    let start = record.alignment_start().map(|p| usize::from(p) as i64).unwrap_or(0);
-
-    // Calculate reference length from CIGAR
-    let ref_len: i64 = record.cigar().iter()
-        .filter_map(|op_result| {
-            op_result.ok().and_then(|op| {
-                match op.kind() {
-                    Kind::Match | Kind::Deletion | Kind::Skip |
-                    Kind::SequenceMatch | Kind::SequenceMismatch => Some(op.len() as i64),
-                    _ => None,
-                }
-            })
-        })
-        .sum();
-
-    start + ref_len - 1 // SAM positions are 1-based, and end is inclusive
-}
-
 /// Create an unmapped record to store FASTQ info.
 fn create_unmapped_record(record: &fastq::Record, is_paired: bool, is_first: bool) -> RecordBuf {
     let mut unmapped = RecordBuf::default();
 
     *unmapped.name_mut() = Some(record.name().to_vec().into());
     *unmapped.sequence_mut() = record.sequence().to_vec().into();
+
+    // Set MAPQ=0 for unmapped reads (SAM convention)
+    if let Ok(mq) = noodles::sam::alignment::record::MappingQuality::try_from(0u8) {
+        *unmapped.mapping_quality_mut() = Some(mq);
+    }
 
     // Decode FASTQ ASCII (Phred+33) to raw Phred score
     let qual = record.quality_scores();
