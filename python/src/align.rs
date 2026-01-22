@@ -59,17 +59,108 @@ pub fn make_bwa_index(fasta: PathBuf, genome_prefix: PathBuf) -> Result<()> {
     Ok(())
 }
 
+/// Create a minimap2 index from a FASTA file.
+///
+/// This function creates a `.mmi` index file that can be used with the MINIMAP2 aligner.
+/// The index is created with k-mer and window sizes optimized for the selected preset.
+///
+/// Parameters
+/// ----------
+/// fasta: Path
+///    File path to the FASTA file containing reference sequences.
+/// output_index: Path
+///   File path for the output minimap2 index (.mmi file).
+/// preset: str
+///    Optional preset to optimize index for specific read types:
+///    - Long Reads DNA Mapping:
+///      - 'map-ont': Oxford Nanopore reads (default)
+///      - 'map-pb': PacBio CLR reads
+///      - 'map-hifi': PacBio HiFi reads
+///      - 'lr:hq': Long reads, high quality
+///    - Spliced / RNA-seq Alignment:
+///      - 'splice': RNA-seq long reads
+///      - 'splice:hq': High-quality RNA-seq long reads
+///      - 'splice:sr': Short-read RNA-seq
+///    - Long Assembly to Reference Mapping:
+///      - 'asm5', 'asm10', 'asm20': Assembly alignment (5%, 10%, 20% divergence)
+///    - Short Reads Mapping:
+///      - 'short': Short single-end reads
+///      - 'sr': Short paired-end reads
+///    - All-vs-All Overlap Mapping:
+///      - 'ava-pb': PacBio all-vs-all overlap
+///      - 'ava-ont': ONT all-vs-all overlap
+///
+/// Examples
+/// --------
+/// >>> from precellar import make_minimap2_index
+/// >>> make_minimap2_index("genome.fa", "genome.mmi", preset="map-ont")
+/// >>> # For RNA-seq
+/// >>> make_minimap2_index("transcriptome.fa", "transcriptome.mmi", preset="splice")
+///
+/// See Also
+/// --------
+/// aligners.MINIMAP2 : The aligner class that uses these indices
+/// make_bwa_index : Create BWA-MEM2 index for short reads
+#[pyfunction]
+#[pyo3(
+    signature = (fasta, output_index, *, preset="map-ont"),
+    text_signature = "(fasta, output_index, *, preset='map-ont')",
+)]
+pub fn make_minimap2_index(fasta: PathBuf, output_index: PathBuf, preset: &str) -> Result<()> {
+    let preset = match preset.to_lowercase().as_str() {
+        // Long Reads DNA Mapping
+        "map-ont" => minimap2::Preset::MapOnt,
+        "map-pb" => minimap2::Preset::MapPb,
+        "map-hifi" => minimap2::Preset::MapHifi,
+        "lr:hq" => minimap2::Preset::LrHq,
+        // Spliced / RNA-seq Alignment
+        "splice" => minimap2::Preset::Splice,
+        "splice:hq" => minimap2::Preset::SpliceHq,
+        "splice:sr" => minimap2::Preset::SpliceSr,
+        // Long Assembly to Reference Mapping
+        "asm5" => minimap2::Preset::Asm5,
+        "asm10" => minimap2::Preset::Asm10,
+        "asm20" => minimap2::Preset::Asm20,
+        // Short Reads Mapping
+        "short" => minimap2::Preset::Short,
+        "sr" => minimap2::Preset::Sr,
+        // All-vs-All overlap Mapping
+        "ava-pb" => minimap2::Preset::AvaPb,
+        "ava-ont" => minimap2::Preset::AvaOnt,
+        _ => bail!(
+            "Invalid preset '{}'. Valid presets: map-ont, map-pb, map-hifi, lr:hq, splice, splice:hq, splice:sr, asm5, asm10, asm20, short, sr, ava-pb, ava-ont",
+            preset,
+        ),
+    };
+
+    info!(
+        "Creating minimap2 index for fasta: {:?} with preset: {:?}",
+        fasta, preset
+    );
+    // Build index from FASTA and save to output
+    // with_index(input, Some(output)) reads FASTA from input and saves .mmi to output
+    minimap2::Aligner::builder()
+        .preset(preset)
+        .with_index(
+            fasta.to_str().unwrap(),
+            Some(output_index.to_str().unwrap()),
+        )
+        .map_err(|e| anyhow::anyhow!("Failed to create minimap2 index: {}", e))?;
+
+    Ok(())
+}
+
 /// Align fastq reads to the reference genome and generate unique fragments.
 ///
 /// Parameters
 /// ----------
 ///
 /// assay: Assay | Path | list[Assay | Path]
-///     A Assay object or file path to the yaml sequencing specification file, see
+///     An Assay object or file path to the yaml sequencing specification file, see
 ///     https://github.com/pachterlab/seqspec. The assay can also be a list of
 ///     Assay objects or file paths. In this case, the results will be
 ///     concatenated into a single output file.
-/// aligner: STAR | BWAMEM2
+/// aligner: STAR | BWAMEM2 | MINIMAP2
 ///     The aligner to use for the alignment. Available aligners can be found at
 ///     `precellar.aligners` submodule.
 /// output: Path
@@ -123,6 +214,7 @@ pub fn make_bwa_index(fasta: PathBuf, genome_prefix: PathBuf) -> Result<()> {
 /// --------
 /// aligners.BWAMEM2
 /// aligners.STAR
+/// aligners.MINIMAP2
 #[pyfunction]
 #[pyo3(
     signature = (
@@ -323,8 +415,7 @@ impl<A: Aligner> Iterator for AlignProgressBar<'_, A> {
 
     fn next(&mut self) -> Option<Self::Item> {
         let item = self.alignments.next();
-        self.pb
-            .set_position(self.alignments.num_processed() as u64);
+        self.pb.set_position(self.alignments.num_processed() as u64);
         item
     }
 }

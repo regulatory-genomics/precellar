@@ -333,7 +333,9 @@ impl Iterator for AnnotatedFastqReader {
     type Item = Vec<AnnotatedFastq>;
 
     fn next(&mut self) -> Option<Self::Item> {
+        // Group reads of the same index from different files into a SmallVec.
         let chunk = self.readers.next()?;
+
         let n = chunk.len();
         let annotators = &self.annotators;
         let result: Vec<_> = chunk
@@ -364,7 +366,7 @@ fn process_chunk<'a, I: IntoIterator<Item = &'a SmallVec<[fastq::Record; 4]>>>(
                     let annotator = &annotators[i];
                     let id = &annotator.read_id;
                     *qc.num_reads.entry(id.clone()).or_insert(0) += 1;
-                    if let Ok(anno) = annotator.annotate(record, barcode_analyzer) {
+                    if let Ok(anno) = annotator.annotate(record, barcode_analyzer) { // annotate the read
                         Some(anno)
                     } else {
                         *qc.num_defect.entry(id.clone()).or_insert(0) += 1;
@@ -388,8 +390,8 @@ fn process_chunk<'a, I: IntoIterator<Item = &'a SmallVec<[fastq::Record; 4]>>>(
 
 /// A batched FASTQ reader that reads multiple FASTQ files in batches.
 struct BatchedFqReader {
-    readers: Vec<FastqReader>,
-    batch_size: usize,
+    readers: Vec<FastqReader>, // a list of open file handles
+    batch_size: usize,         // target size for one chunk of data
 }
 
 impl Iterator for BatchedFqReader {
@@ -398,12 +400,15 @@ impl Iterator for BatchedFqReader {
     fn next(&mut self) -> Option<Self::Item> {
         let mut batch = Vec::new();
         let mut accumulated_length = 0;
+
+        // Read records from all readers until reaching the batch size.
+        // while loop for vertical iteration; readers.iter_mut() for horizontal iteration.
         while accumulated_length < self.batch_size {
             let mut max_read = 0;
             let mut min_read = usize::MAX;
             let records: SmallVec<[_; 4]> = self
                 .readers
-                .iter_mut()
+                .iter_mut() // read one record from each FASTQ file at the same position
                 .flat_map(|reader| {
                     let mut buffer = fastq::Record::default();
                     let n = reader
@@ -430,6 +435,7 @@ impl Iterator for BatchedFqReader {
             } else if min_read == 0 {
                 panic!("Unequal number of reads in the chunk");
             } else {
+                // Check records from all readers at the same position have the same name.
                 assert!(
                     records.iter().map(|r| r.name()).all_equal(),
                     "read names mismatch"
@@ -561,6 +567,7 @@ impl AnnotatedFastq {
 }
 
 impl AnnotatedFastq {
+    /// Join another AnnotatedFastq from the same insert into self.
     pub fn join(&mut self, other: Self) {
         if let Some(bc) = &mut self.barcode {
             if let Some(x) = other.barcode.as_ref() {
