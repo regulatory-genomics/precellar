@@ -178,8 +178,15 @@ impl FastqProcessor {
                             ))
                         }
                         AssayType::LongRead => {
+                            info!("Loading whitelists for long-read processing...");
+
                             let mut whitelists = assay.get_whitelists(modality);
-                            
+
+                            // Log whitelist sizes
+                            for (region_id, whitelist) in &whitelists {
+                                info!("Whitelist for '{}': {} barcodes", region_id, whitelist.len());
+                            }
+
                             // Filter out empty whitelists (long-read requires all barcode regions to have whitelists)
                             whitelists.retain(|region_id, whitelist| {
                                 if whitelist.is_empty() {
@@ -195,7 +202,10 @@ impl FastqProcessor {
                                 &modality,
                                 whitelists,
                             ) {
-                                Ok(extractor) => extractor,
+                                Ok(extractor) => {
+                                    info!("BarcodeExtractor created successfully!");
+                                    extractor
+                                },
                                 Err(e) => {
                                     log::warn!("Failed to create BarcodeExtractor: {}", e);
                                     return None; // Return None if extractor creation fails

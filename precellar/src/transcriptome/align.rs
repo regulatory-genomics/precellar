@@ -701,7 +701,7 @@ impl TxAligner {
                 let region = GenomicRange::new(&aln.chrom, aln.start() as u64, aln.end() as u64);
                 self.transcripts.find(&region).for_each(|(_, transcript)| {
                     match aln.orientation(transcript) {
-                        Some(Orientation::Sense) => is_sense = true,
+                        Some(Orientation::Sense) => is_sense = true, // R1 orientation is identical to original mRNA
                         Some(Orientation::Antisense) => is_antisense = true,
                         None => {}
                     }
@@ -714,11 +714,17 @@ impl TxAligner {
             });
 
         let total = num_sense + num_antisense;
+
+        if total == 0 {
+            warn!("No alignments found for strandedness detection, defaulting to Unstranded");
+            return ChemistryStrandedness::Unstranded;
+        }
+
         let percent_sense = num_sense as f64 / total as f64 * 100.0;
         let percent_antisense = num_antisense as f64 / total as f64 * 100.0;
         info!(
-            "Found {:.3}% sense and {:.3}% antisense alignments",
-            percent_sense, percent_antisense
+            "Found {:.3}% sense and {:.3}% antisense alignments (n={})",
+            percent_sense, percent_antisense, total
         );
         if percent_sense > 67.0 {
             info!("Chemistry strandedness is set to: Forward");
@@ -731,6 +737,7 @@ impl TxAligner {
             ChemistryStrandedness::Unstranded
         }
     }
+
 }
 
 #[cfg(test)]

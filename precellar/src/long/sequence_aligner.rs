@@ -1,5 +1,5 @@
 use anyhow::Result;
-use log::warn;
+use log::debug;
 use std::sync::{Arc, RwLock};
 use bio::alignment::pairwise::{Aligner, Scoring, MIN_SCORE};
 use bio::alignment::AlignmentOperation;
@@ -119,9 +119,9 @@ impl FittingAligner {
                     alignment_length,
                 });
             } else {
-                // Warn about low-quality alignment
+                // Debug log for low-quality alignment (warning will be emitted at higher level if both orientations fail)
                 let region_guard = fixed_region.read().unwrap();
-                warn!(
+                debug!(
                     "Fixed region '{}' (sequence: '{}') alignment score ({:.3}) below threshold ({:.3}), skipping",
                     region_guard.region_id, region_guard.sequence, score, self.min_score
                 );

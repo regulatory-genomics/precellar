@@ -400,6 +400,7 @@ impl<'a, A> AlignProgressBar<'a, A> {
         )
         .unwrap();
         pb.set_style(sty);
+
         AlignProgressBar {
             pb: pb.with_finish(ProgressFinish::Abandon),
             alignments,
@@ -412,8 +413,9 @@ impl<A: Aligner> Iterator for AlignProgressBar<'_, A> {
 
     fn next(&mut self) -> Option<Self::Item> {
         let item = self.alignments.next();
-        self.pb
-            .set_position(self.alignments.num_processed() as u64);
+        let processed = self.alignments.num_processed();
+        self.pb.set_position(processed as u64);
+
         item
     }
 }

@@ -11,13 +11,17 @@ use super::{
     sequence_aligner::{FittingAligner, FixedSequenceAlignment, find_non_overlapping_alignments, fitting_alignment_distance}
 };
 
-/// Long-read barcode extraction result
+/// Final long-read barcode extraction result
 #[derive(Debug, Clone)]
 pub struct LongReadBarcodeResult {
     /// Extracted barcode sequence (standardized from whitelist)
     pub barcode: Option<Vec<u8>>,
     /// Extraction confidence (0.0 if no barcode extracted)
     pub confidence: f64,
+    /// Whether the end segments were reverse-complemented during extraction
+    pub is_reverse_complemented: bool,
+    /// Whether some anchors were not detected in both orientations (for QC tracking)
+    pub has_missing_anchors: bool,
 }
 
 impl LongReadBarcodeResult {
@@ -27,7 +31,7 @@ impl LongReadBarcodeResult {
     }
 }
 
-/// Successfully extracted barcode with metadata
+/// Successfully extracted barcode with metadata (single barcode)
 #[derive(Debug, Clone)]
 pub struct ExtractedBarcode {
     pub region_id: String,
@@ -40,6 +44,79 @@ pub struct ExtractedBarcode {
 pub struct AnchorWithPosition {
     pub position: usize,  // Position in EndRegions (1-based)
     pub alignment: FixedSequenceAlignment,
+}
+
+/// Evidence for read orientation determination, including found anchors for reuse
+#[derive(Debug, Clone)]
+pub struct OrientationEvidence {
+    /// Number of anchors found
+    pub num_anchors: usize,
+    /// Whether anchors are in valid order (outside-to-inside)
+    pub valid_order: bool,
+    /// Average confidence of anchor alignments
+    pub avg_confidence: f64,
+}
+
+impl OrientationEvidence {
+    /// Check if evidence meets conservative thresholds for accepting orientation
+    /// Conservative thresholds: ≥2 anchors, valid order, ≥0.8 confidence
+    pub fn meets_threshold(&self) -> bool {
+        self.num_anchors >= 2 && self.valid_order && self.avg_confidence >= 0.8
+    }
+
+    /// Create from anchor list
+    pub fn from_anchors(anchors: &[AnchorWithPosition], valid_order: bool) -> Self {
+        let num_anchors = anchors.len();
+        let avg_confidence = if num_anchors > 0 {
+            anchors.iter().map(|a| a.alignment.score).sum::<f64>() / num_anchors as f64
+        } else {
+            0.0
+        };
+
+        Self {
+            num_anchors,
+            valid_order,
+            avg_confidence,
+        }
+    }
+}
+
+/// End segment with precomputed anchors for reuse
+#[derive(Debug)]
+struct EndSegmentWithAnchors {
+    /// The cut segment sequence (empty if sequence was too short)
+    sequence: Vec<u8>,
+    /// The cut segment quality scores
+    quality: Vec<u8>,
+    /// Precomputed anchors from orientation detection
+    anchors: Vec<AnchorWithPosition>,
+    /// Whether anchors are in valid order
+    valid_order: bool,
+    /// Number of expected fixed regions (for tracking alignment failures)
+    expected_fixed_count: usize,
+}
+
+impl EndSegmentWithAnchors {
+    /// Create an empty segment (used when source sequence is too short)
+    fn empty() -> Self {
+        Self {
+            sequence: Vec::new(),
+            quality: Vec::new(),
+            anchors: Vec::new(),
+            valid_order: false,
+            expected_fixed_count: 0,
+        }
+    }
+
+    /// Check if this segment is empty (no sequence was extracted)
+    fn is_empty(&self) -> bool {
+        self.sequence.is_empty()
+    }
+
+    /// Check if all expected fixed regions were found
+    fn all_fixed_found(&self) -> bool {
+        self.anchors.len() >= self.expected_fixed_count
+    }
 }
 
 /// Find and validate fixed sequence alignments
@@ -413,7 +490,16 @@ impl BarcodeExtractor {
         })
     }
 
-    /// Extract barcode from a FASTQ record.
+    /// Extract barcode from a FASTQ record with automatic orientation detection.
+    ///
+    /// This method uses an adaptive forward-first strategy with anchor reuse:
+    /// 1. Cut end segments and find anchors for forward orientation
+    /// 2. If forward meets threshold, extract barcodes using cached anchors (fast path)
+    /// 3. Otherwise, cut and RC end segments, find anchors for reverse orientation
+    /// 4. Compare evidence, choose better orientation, extract barcodes using cached anchors
+    ///
+    /// IMPORTANT: Only end segments are processed and RC'd, not the full read.
+    /// Anchors found during orientation detection are reused for barcode extraction.
     pub fn extract_barcode(
         &self,
         record: &noodles::fastq::Record,
@@ -421,29 +507,215 @@ impl BarcodeExtractor {
         let sequence = record.sequence();
         let quality = record.quality_scores();
 
-        // Step 1: Cut segments from both ends
-        let five_prime_segment = self.cut_end_segment(sequence, quality, &self.five_prime_regions, true)?;
-        let three_prime_segment = self.cut_end_segment(sequence, quality, &self.three_prime_regions, false)?;
+        // Step 1: Cut end segments and find anchors for forward orientation
+        let forward_5p = self.cut_and_analyze_segment(sequence, quality, &self.five_prime_regions, true, false)?;
+        let forward_3p = self.cut_and_analyze_segment(sequence, quality, &self.three_prime_regions, false, false)?;
+
+        let forward_evidence = Self::combine_evidence(&forward_5p, &forward_3p);
+
+        // Step 2: If forward meets threshold, use it directly (fast path)
+        if forward_evidence.meets_threshold() {
+            return self.extract_barcodes_from_segments(forward_5p, forward_3p, false);
+        }
+
+        // Step 3: Forward didn't meet threshold, try reverse orientation
+        // Only RC end segments, not full read
+        let reverse_5p = self.cut_and_analyze_segment(sequence, quality, &self.five_prime_regions, true, true)?;
+        let reverse_3p = self.cut_and_analyze_segment(sequence, quality, &self.three_prime_regions, false, true)?;
+
+        let reverse_evidence = Self::combine_evidence(&reverse_5p, &reverse_3p);
+
+        // Step 4: Compare and choose better orientation
+        let should_rc = self.compare_evidence(&forward_evidence, &reverse_evidence);
+
+        // Check if both orientations failed to find all fixed regions (for QC tracking)
+        let forward_all_found = forward_5p.all_fixed_found() && forward_3p.all_fixed_found();
+        let reverse_all_found = reverse_5p.all_fixed_found() && reverse_3p.all_fixed_found();
+        let has_missing_anchors = !forward_all_found && !reverse_all_found;
+
+        #[cfg(debug_assertions)]
+        if has_missing_anchors {
+            let read_name = std::str::from_utf8(record.name()).unwrap_or("<invalid>");
+            eprintln!(
+                "[DEBUG] Read '{}': fixed region alignment failed in both orientations \
+                (forward: {}/{} 5', {}/{} 3'; reverse: {}/{} 5', {}/{} 3')",
+                read_name,
+                forward_5p.anchors.len(), forward_5p.expected_fixed_count,
+                forward_3p.anchors.len(), forward_3p.expected_fixed_count,
+                reverse_5p.anchors.len(), reverse_5p.expected_fixed_count,
+                reverse_3p.anchors.len(), reverse_3p.expected_fixed_count,
+            );
+            eprintln!(
+                "[DEBUG] Failed FASTQ record:\n@{}\n{}\n+\n{}",
+                read_name,
+                std::str::from_utf8(sequence).unwrap_or("<invalid seq>"),
+                std::str::from_utf8(quality).unwrap_or("<invalid qual>"),
+            );
+        }
+
+        let mut result = if should_rc {
+            self.extract_barcodes_from_segments(reverse_5p, reverse_3p, true)?
+        } else {
+            self.extract_barcodes_from_segments(forward_5p, forward_3p, false)?
+        };
+        result.has_missing_anchors = has_missing_anchors;
+        Ok(result)
+    }
+
+    /// Cut end segment and find anchors in one pass.
+    /// Returns the segment with precomputed anchors for reuse.
+    /// Returns an empty segment if the FASTQ sequence is too short.
+    fn cut_and_analyze_segment(
+        &self,
+        sequence: &[u8],
+        quality: &[u8],
+        end_regions: &EndRegions,
+        is_five_prime: bool,
+        should_rc: bool,
+    ) -> Result<EndSegmentWithAnchors> {
+        let cut_length = end_regions.calculate_cut_length();
+
+        if sequence.len() < cut_length {
+            return Ok(EndSegmentWithAnchors::empty());
+        }
+
+        // Determine which end to cut from based on orientation
+        let cut_from_beginning = should_rc != is_five_prime;
+
+        let (seq_segment, qual_segment) = if cut_from_beginning {
+            (&sequence[..cut_length], &quality[..cut_length])
+        } else {
+            let start = sequence.len() - cut_length;
+            (&sequence[start..], &quality[start..])
+        };
+
+        // Apply RC to the segment if needed
+        let (final_seq, final_qual) = if should_rc {
+            let rc_seq = seqspec::utils::rev_compl(seq_segment);
+            let rc_qual: Vec<u8> = qual_segment.iter().copied().rev().collect();
+            (rc_seq, rc_qual)
+        } else {
+            (seq_segment.to_vec(), qual_segment.to_vec())
+        };
+
+        // Find anchors
+        let fixed_regions = end_regions.get_fixed_regions();
+        let expected_fixed_count = fixed_regions.len();
+        let mut anchor_finder = AnchorFinder::new()?;
+        let anchors = anchor_finder.find_anchors(&final_seq, &fixed_regions, end_regions)?;
+
+        let valid_order = if !anchors.is_empty() {
+            anchor_finder.validate_order(&anchors)?
+        } else {
+            false
+        };
+
+        Ok(EndSegmentWithAnchors {
+            sequence: final_seq,
+            quality: final_qual,
+            anchors,
+            valid_order,
+            expected_fixed_count,
+        })
+    }
+
+    /// Combine evidence from both ends
+    fn combine_evidence(
+        five_prime: &EndSegmentWithAnchors,
+        three_prime: &EndSegmentWithAnchors,
+    ) -> OrientationEvidence {
+        let total_anchors = five_prime.anchors.len() + three_prime.anchors.len();
+
+        let avg_confidence = if total_anchors > 0 {
+            let five_conf: f64 = five_prime.anchors.iter().map(|a| a.alignment.score).sum();
+            let three_conf: f64 = three_prime.anchors.iter().map(|a| a.alignment.score).sum();
+            (five_conf + three_conf) / total_anchors as f64
+        } else {
+            0.0
+        };
+
+        OrientationEvidence {
+            num_anchors: total_anchors,
+            valid_order: five_prime.valid_order && three_prime.valid_order,
+            avg_confidence,
+        }
+    }
+
+    /// Extract barcodes from precomputed segments with cached anchors
+    fn extract_barcodes_from_segments(
+        &self,
+        five_prime: EndSegmentWithAnchors,
+        three_prime: EndSegmentWithAnchors,
+        is_reverse_complemented: bool,
+    ) -> Result<LongReadBarcodeResult> {
+        let mut extracted_barcodes = Vec::new();
+
+        // Process 5' end using cached anchors
+        if !five_prime.is_empty() {
+            let barcode_results = self.extract_barcodes_with_cached_anchors(
+                &five_prime,
+                &self.five_prime_regions,
+            )?;
+            extracted_barcodes.extend(barcode_results);
+        }
+
+        // Process 3' end using cached anchors
+        if !three_prime.is_empty() {
+            let barcode_results = self.extract_barcodes_with_cached_anchors(
+                &three_prime,
+                &self.three_prime_regions,
+            )?;
+            extracted_barcodes.extend(barcode_results);
+        }
+
+        let mut result = self.combine_barcodes(extracted_barcodes)?;
+        result.is_reverse_complemented = is_reverse_complemented;
+        Ok(result)
+    }
+
+    /// Extract barcodes using precomputed anchors
+    fn extract_barcodes_with_cached_anchors(
+        &self,
+        segment: &EndSegmentWithAnchors,
+        end_regions: &EndRegions,
+    ) -> Result<Vec<ExtractedBarcode>> {
+        if !end_regions.has_barcode {
+            return Ok(Vec::new());
+        }
+
+        // Skip if anchor order is invalid
+        if !segment.anchors.is_empty() && !segment.valid_order {
+            warn!("Fixed region alignment order is incorrect, skipping this end");
+            return Ok(Vec::new());
+        }
+
+        let barcode_regions = end_regions.get_barcode_regions();
+        if barcode_regions.is_empty() {
+            return Ok(Vec::new());
+        }
 
         let mut extracted_barcodes = Vec::new();
 
-        // Step 2 & 3: Process 5' end
-        if let Some((seq, _qual)) = five_prime_segment {
-            let barcode_results = self
-                .process_end_for_barcode(&seq, &self.five_prime_regions, &self.whitelists)?;
-            extracted_barcodes.extend(barcode_results);
+        for barcode_region in barcode_regions {
+            if let Some(extraction_range) = self.barcode_locator.locate(
+                &barcode_region,
+                &segment.anchors,
+                end_regions,
+                segment.sequence.len(),
+            ) {
+                let candidate_seq = &segment.sequence[extraction_range.0..extraction_range.1];
+
+                if let Some(matched) = find_best_barcode_match(
+                    candidate_seq,
+                    &barcode_region,
+                    &self.whitelists,
+                ) {
+                    extracted_barcodes.push(matched);
+                }
+            }
         }
 
-        // Step 2 & 3: Process 3' end  
-        if let Some((seq, _qual)) = three_prime_segment {
-            let barcode_results = self
-                .process_end_for_barcode(&seq, &self.three_prime_regions, &self.whitelists)?;
-            extracted_barcodes.extend(barcode_results);
-        }
-
-        // Step 4: Combine multiple barcodes if present
-        let final_result = self.combine_barcodes(extracted_barcodes)?;
-        Ok(final_result)
+        Ok(extracted_barcodes)
     }
 
     /// Get whitelists reference for external access
@@ -461,104 +733,25 @@ impl BarcodeExtractor {
         &self.three_prime_regions
     }
 
-    /// Process one end to extract all valid barcodes.
-    /// Returns a vector of all successfully extracted barcodes from this end.
-    fn process_end_for_barcode(
-        &self,
-        segment_seq: &[u8],
-        end_regions: &EndRegions,
-        whitelists: &IndexMap<String, IndexSet<Vec<u8>>>,
-    ) -> Result<Vec<ExtractedBarcode>> {
-        // Return early if no barcode region is present on this end
-        if !end_regions.has_barcode {
-            return Ok(Vec::new());
-        }
-
-        let fixed_regions = end_regions.get_fixed_regions();
-        let barcode_regions = end_regions.get_barcode_regions();
-
-        if barcode_regions.is_empty() {
-            return Ok(Vec::new());
-        }
-
-        // Step 1: Find anchor points using the AnchorFinder
-        let mut anchor_finder = AnchorFinder::new()?;
-        let anchor_positions = anchor_finder.find_anchors(segment_seq, &fixed_regions, end_regions)?;
-        
-        // Step 2: Validate alignment order
-        if !anchor_positions.is_empty() {
-            if !anchor_finder.validate_order(&anchor_positions)? {
-                warn!("Fixed region alignment order is incorrect, skipping this read");
-                return Ok(Vec::new());
+    /// Compare evidence and choose which orientation is better
+    /// Returns true if reverse-complement should be used
+    fn compare_evidence(&self, forward: &OrientationEvidence, reverse: &OrientationEvidence) -> bool {
+        // Choose reverse if: more anchors, OR same anchors but better quality
+        if reverse.num_anchors > forward.num_anchors {
+            true
+        } else if reverse.num_anchors == forward.num_anchors {
+            // Same number of anchors, use tie-breaker logic
+            if reverse.valid_order && !forward.valid_order {
+                true
+            } else if forward.valid_order && !reverse.valid_order {
+                false
+            } else {
+                // Both have same order status, choose higher confidence
+                reverse.avg_confidence > forward.avg_confidence
             }
-        }
-
-        // Step 3: Extract all valid barcodes from all barcode regions
-        let mut extracted_barcodes = Vec::new();
-
-        for barcode_region in barcode_regions {
-            // Step 3a: Locate the potential barcode sequence range
-            if let Some(extraction_range) = self.barcode_locator.locate(
-                &barcode_region,
-                &anchor_positions,
-                end_regions,
-                segment_seq.len(),
-            ) {
-                // BarcodeLocator already validates minimum length requirement via `locate` method
-                let candidate_seq = &segment_seq[extraction_range.0..extraction_range.1];
-
-                // Step 3b: Match the candidate against the whitelist
-                if let Some(matched) = find_best_barcode_match(
-                    candidate_seq,
-                    &barcode_region,
-                    whitelists,
-                ) {
-                    extracted_barcodes.push(matched);
-                }
-            }
-        }
-        
-        Ok(extracted_barcodes)
-    }
-
-    /// Cut end segments from one fastq record.
-    fn cut_end_segment(
-        &self,
-        sequence: &[u8],
-        quality: &[u8],
-        end_regions: &EndRegions,
-        is_five_prime: bool,
-    ) -> Result<Option<(Vec<u8>, Vec<u8>)>> {
-        let cut_length = end_regions.calculate_cut_length();
-
-        if sequence.len() < cut_length {
-            // If sequence is shorter than cut length, report error and skip this fastq record
-            warn!(
-                "Sequence length ({}) is shorter than required cut length ({}), skipping record",
-                sequence.len(), cut_length
-            );
-            return Ok(None);
-        }
-
-        // Check if the cut segment is too long for barcode search
-        if cut_length > 300 {
-            // If the segment to be cut is too long (>300bp), warn but continue
-            warn!(
-                "Cut segment (for barcode extraction) ({}) is longer than 300bp, barcode search may be slow. Consider adjusting seqspec regions.",
-                cut_length
-            );
-        }
-
-        let (seq_segment, qual_segment) = if is_five_prime {
-            // Cut from the beginning (5' end)
-            (&sequence[..cut_length], &quality[..cut_length])
         } else {
-            // Cut from the end (3' end)
-            let start = sequence.len() - cut_length;
-            (&sequence[start..], &quality[start..])
-        };
-
-        Ok(Some((seq_segment.to_vec(), qual_segment.to_vec())))
+            false
+        }
     }
 
     /// Combine multiple extracted barcodes into final result.
@@ -567,6 +760,8 @@ impl BarcodeExtractor {
             return Ok(LongReadBarcodeResult {
                 barcode: None,
                 confidence: 0.0,
+                is_reverse_complemented: false,
+                has_missing_anchors: false,
             });
         }
 
@@ -575,6 +770,8 @@ impl BarcodeExtractor {
             return Ok(LongReadBarcodeResult {
                 barcode: Some(barcode.barcode.clone()),
                 confidence: barcode.confidence,
+                is_reverse_complemented: false,
+                has_missing_anchors: false,
             });
         }
 
@@ -592,6 +789,8 @@ impl BarcodeExtractor {
         Ok(LongReadBarcodeResult {
             barcode: Some(combined_barcode),
             confidence: average_confidence,
+            is_reverse_complemented: false,
+            has_missing_anchors: false,
         })
     }
 }
@@ -602,14 +801,180 @@ mod tests {
     use super::super::sequence_aligner::fitting_alignment_distance;
 
     #[test]
+    fn test_orientation_evidence_thresholds() {
+        // Case 1: Meets all thresholds
+        let evidence = OrientationEvidence {
+            num_anchors: 2,
+            valid_order: true,
+            avg_confidence: 0.90,
+        };
+        assert!(evidence.meets_threshold());
+
+        // Case 2: Below confidence threshold (0.8)
+        let evidence = OrientationEvidence {
+            num_anchors: 2,
+            valid_order: true,
+            avg_confidence: 0.79,
+        };
+        assert!(!evidence.meets_threshold());
+
+        // Case 3: Below anchor count
+        let evidence = OrientationEvidence {
+            num_anchors: 1,
+            valid_order: true,
+            avg_confidence: 0.90,
+        };
+        assert!(!evidence.meets_threshold());
+
+        // Case 4: Invalid order
+        let evidence = OrientationEvidence {
+            num_anchors: 2,
+            valid_order: false,
+            avg_confidence: 0.90,
+        };
+        assert!(!evidence.meets_threshold());
+
+        // Case 5: Edge case - exactly at threshold
+        let evidence = OrientationEvidence {
+            num_anchors: 2,
+            valid_order: true,
+            avg_confidence: 0.80,
+        };
+        assert!(evidence.meets_threshold());
+    }
+
+    #[test]
+    fn test_orientation_evidence_from_anchors_empty() {
+        let anchors: Vec<AnchorWithPosition> = vec![];
+        let evidence = OrientationEvidence::from_anchors(&anchors, false);
+
+        assert_eq!(evidence.num_anchors, 0);
+        assert!(!evidence.valid_order);
+        assert_eq!(evidence.avg_confidence, 0.0);
+    }
+
+    #[test]
+    fn test_orientation_detection_with_alignment_scores() {
+        use seqspec::{Modality, RegionType, SequenceType};
+        use seqspec::region::{LibSpec, Region};
+        use indexmap::{IndexMap, IndexSet};
+
+        // Create regions with one fixed sequence
+        // lib structure: fixed(16bp "AAAAAAAAAAAAAAAA") -> barcode(10bp) -> cdna
+        let fixed_seq = "AAAAAAAAAAAAAAAA"; // 16bp of A's
+
+        let fixed_5p = Arc::new(RwLock::new(Region {
+            region_id: "fixed_5p".to_string(),
+            region_type: RegionType::Linker,
+            name: "fixed_5p".to_string(),
+            sequence_type: SequenceType::Fixed,
+            sequence: fixed_seq.to_string(),
+            min_len: 16,
+            max_len: 16,
+            onlist: None,
+            subregions: vec![],
+        }));
+
+        let barcode = Arc::new(RwLock::new(Region {
+            region_id: "bc1".to_string(),
+            region_type: RegionType::Barcode,
+            name: "bc1".to_string(),
+            sequence_type: SequenceType::Onlist,
+            sequence: "".to_string(),
+            min_len: 10,
+            max_len: 10,
+            onlist: None,
+            subregions: vec![],
+        }));
+
+        let cdna = Arc::new(RwLock::new(Region {
+            region_id: "cdna".to_string(),
+            region_type: RegionType::Cdna,
+            name: "cdna".to_string(),
+            sequence_type: SequenceType::Random,
+            sequence: "".to_string(),
+            min_len: 100,
+            max_len: 1000,
+            onlist: None,
+            subregions: vec![],
+        }));
+
+        let modality_region = Region {
+            region_id: "rna".to_string(),
+            region_type: RegionType::Modality(Modality::RNA),
+            name: "RNA".to_string(),
+            sequence_type: SequenceType::Joined,
+            sequence: "".to_string(),
+            min_len: 0,
+            max_len: 0,
+            onlist: None,
+            subregions: vec![fixed_5p, barcode, cdna],
+        };
+
+        let lib_spec = LibSpec::new(vec![modality_region]).unwrap();
+        let whitelists: IndexMap<String, IndexSet<Vec<u8>>> = IndexMap::new();
+        let extractor = BarcodeExtractor::new(&lib_spec, &Modality::RNA, whitelists).unwrap();
+
+        let cut_length = extractor.five_prime_regions().calculate_cut_length();
+
+        // Create a test sequence that indicates forward orientation:
+        let sequence_with_error = format!(
+            "{}{}{}",
+            "AAAAACAAAAACAAAAA",                                // 17bp: 15 A's + 2 insertion (C)
+            "C".repeat(cut_length + 10),                        // C's in the middle
+            "TTTTCTTTTCTTTTCCC"                                 // 17bp: 12 T's + 5 insertion (C)
+        );
+        let test_sequence = sequence_with_error.as_bytes();
+        let test_quality = "I".repeat(test_sequence.len());
+
+        // Test forward orientation
+        let forward_5p = extractor.cut_and_analyze_segment(
+            test_sequence,
+            test_quality.as_bytes(),
+            extractor.five_prime_regions(),
+            true,  // is_five_prime
+            false, // should_rc = false (forward)
+        ).unwrap();
+
+        // Test reverse orientation - cut from end and RC
+        let reverse_5p = extractor.cut_and_analyze_segment(
+            test_sequence,
+            test_quality.as_bytes(),
+            extractor.five_prime_regions(),
+            true, // is_five_prime
+            true, // should_rc = true (reverse)
+        ).unwrap();
+
+        // Forward should have better anchor match
+        // Reverse would have RC of T's at end = A's
+        println!("Forward anchors: {:?}", forward_5p.anchors.len());
+        println!("Reverse anchors: {:?}", reverse_5p.anchors.len());
+
+        // Combine evidence and compare
+        let forward_evidence = BarcodeExtractor::combine_evidence(&forward_5p, &EndSegmentWithAnchors::empty());
+        let reverse_evidence = BarcodeExtractor::combine_evidence(&reverse_5p, &EndSegmentWithAnchors::empty());
+
+        println!("Forward evidence: anchors={}, valid_order={}, confidence={:.3}",
+            forward_evidence.num_anchors, forward_evidence.valid_order, forward_evidence.avg_confidence);
+        println!("Reverse evidence: anchors={}, valid_order={}, confidence={:.3}",
+            reverse_evidence.num_anchors, reverse_evidence.valid_order, reverse_evidence.avg_confidence);
+
+        let should_rc = extractor.compare_evidence(&forward_evidence, &reverse_evidence);
+
+        if forward_evidence.num_anchors > 0 || reverse_evidence.num_anchors > 0 {
+            println!("should_rc = {}", should_rc);
+        }
+    }
+
+    #[test]
     fn test_fitting_alignment_distance() {
         // Test with exact matches
         assert_eq!(fitting_alignment_distance(b"ATCG", b"ATCG"), 0);
-        
+
         // Test with partial matches (short sequence found in long sequence)
         assert_eq!(fitting_alignment_distance(b"ATC", b"ATCA"), 0);
         assert_eq!(fitting_alignment_distance(b"ATCG", b"GGATCGCC"), 0);
-        
+
         // Test with empty sequences
         assert_eq!(fitting_alignment_distance(b"", b"ATCG"), 0);
         assert_eq!(fitting_alignment_distance(b"ATCG", b""), 4);
