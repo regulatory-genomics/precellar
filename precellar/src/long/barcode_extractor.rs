@@ -39,13 +39,6 @@ pub struct ExtractedBarcode {
     pub confidence: f64,   // confidence = 1.0 - (min_edit_distance / barcode_length)
 }
 
-/// Anchor with position information
-#[derive(Debug, Clone)]
-pub struct AnchorWithPosition {
-    pub position: usize,  // Position in EndRegions (1-based)
-    pub alignment: FixedSequenceAlignment,
-}
-
 /// Evidence for read orientation determination, including found anchors for reuse
 #[derive(Debug, Clone)]
 pub struct OrientationEvidence {
@@ -64,11 +57,11 @@ impl OrientationEvidence {
         self.num_anchors >= 2 && self.valid_order && self.avg_confidence >= 0.8
     }
 
-    /// Create from anchor list
-    pub fn from_anchors(anchors: &[AnchorWithPosition], valid_order: bool) -> Self {
+    /// Create from anchor list (FixedSequenceAlignment with position set)
+    pub fn from_anchors(anchors: &[FixedSequenceAlignment], valid_order: bool) -> Self {
         let num_anchors = anchors.len();
         let avg_confidence = if num_anchors > 0 {
-            anchors.iter().map(|a| a.alignment.score).sum::<f64>() / num_anchors as f64
+            anchors.iter().map(|a| a.score).sum::<f64>() / num_anchors as f64
         } else {
             0.0
         };
@@ -88,8 +81,8 @@ struct EndSegmentWithAnchors {
     sequence: Vec<u8>,
     /// The cut segment quality scores
     quality: Vec<u8>,
-    /// Precomputed anchors from orientation detection
-    anchors: Vec<AnchorWithPosition>,
+    /// Precomputed anchors from orientation detection (FixedSequenceAlignment with position set)
+    anchors: Vec<FixedSequenceAlignment>,
     /// Whether anchors are in valid order
     valid_order: bool,
     /// Number of expected fixed regions (for tracking alignment failures)
@@ -132,13 +125,14 @@ impl AnchorFinder {
         })
     }
 
-    /// Find anchor positions using fixed sequence alignment
+    /// Find anchor positions using fixed sequence alignment.
+    /// Returns FixedSequenceAlignment with position field set.
     pub fn find_anchors(
         &mut self,
         sequence: &[u8],
         fixed_regions: &[Arc<RwLock<Region>>],
         end_regions: &EndRegions,
-    ) -> Result<Vec<AnchorWithPosition>> {
+    ) -> Result<Vec<FixedSequenceAlignment>> {
         if fixed_regions.is_empty() {
             return Ok(Vec::new());
         }
@@ -146,30 +140,28 @@ impl AnchorFinder {
         let alignments = self.aligner.align_fixed_sequences(sequence, fixed_regions)?;
         // Greedy algorithm: save high score fixed alignments and discard lower overlapping ones
         let non_overlapping = find_non_overlapping_alignments(alignments);
-        
+
         // Build position map from EndRegions
         let position_map = end_regions.build_position_map();
-        
-        // Convert alignments to AnchorWithPosition
-        let mut anchors_with_position = Vec::new();
-        for alignment in non_overlapping {
+
+        // Set position on each alignment
+        let mut anchors = Vec::new();
+        for mut alignment in non_overlapping {
             let region_guard = alignment.region.read().unwrap();
             if let Some(&position) = position_map.get(&region_guard.region_id) {
                 drop(region_guard);
-                anchors_with_position.push(AnchorWithPosition {
-                    position,
-                    alignment,
-                });
+                alignment.position = Some(position);
+                anchors.push(alignment);
             }
         }
-        
-        Ok(anchors_with_position)
+
+        Ok(anchors)
     }
 
     /// Validate that fixed region alignments are in correct order (outside to inside)
     pub fn validate_order(
         &self,
-        anchors: &[AnchorWithPosition],
+        anchors: &[FixedSequenceAlignment],
     ) -> Result<bool> {
         if anchors.len() <= 1 {
             return Ok(true); // Single or no alignment is always valid
@@ -181,9 +173,9 @@ impl AnchorFinder {
 
         // Check that alignments are in correct positional order
         for i in 0..sorted_anchors.len() - 1 {
-            let current = &sorted_anchors[i].alignment;
-            let next = &sorted_anchors[i + 1].alignment;
-            
+            let current = &sorted_anchors[i];
+            let next = &sorted_anchors[i + 1];
+
             // For outside-to-inside order, the end position of outer region
             // should be less than or equal to start position of inner region
             if current.query_end > next.query_start {
@@ -202,194 +194,6 @@ impl AnchorFinder {
     }
 }
 
-/// Barcode locator component responsible for determining barcode extraction ranges
-#[derive(Debug)]
-pub struct BarcodeLocator;
-
-impl BarcodeLocator {
-    /// Create a new barcode locator
-    pub fn new() -> Self {
-        Self
-    }
-
-    /// Locate the potential barcode window using position-based logic
-    pub fn locate(
-        &self,
-        barcode_region: &Arc<RwLock<Region>>,
-        anchors: &[AnchorWithPosition],
-        end_regions: &EndRegions,
-        sequence_length: usize,
-    ) -> Option<(usize, usize)> {
-        let region_guard = barcode_region.read().unwrap();
-        let barcode_length = region_guard.max_len as usize; // For barcode regions, the max_len should be equal to the min_len
-        let region_id = region_guard.region_id.clone();
-        drop(region_guard);
-
-        // Get barcode position using position map
-        let position_map = end_regions.build_position_map();
-        let barcode_pos = position_map.get(&region_id).copied()?;
-
-        // Find closest outer and inner anchors in one pass
-        let mut closest_outer: Option<&AnchorWithPosition> = None;
-        let mut closest_inner: Option<&AnchorWithPosition> = None;
-        
-        for anchor in anchors {
-            if anchor.position < barcode_pos {
-                // Outer anchor: find the one with highest position (closest to barcode)
-                if closest_outer.is_none() || anchor.position > closest_outer.unwrap().position {
-                    closest_outer = Some(anchor);
-                }
-            } else if anchor.position > barcode_pos {
-                // Inner anchor: find the one with lowest position (closest to barcode)
-                if closest_inner.is_none() || anchor.position < closest_inner.unwrap().position {
-                    closest_inner = Some(anchor);
-                }
-            }
-        }
-        
-        // Determine extraction range based on adjacency and anchor positions
-        self.determine_extraction_range(
-            barcode_pos,
-            barcode_length,
-            closest_outer,
-            closest_inner,
-            sequence_length,
-        )
-    }
-
-
-    /// Determine extraction range based on adjacency and anchor positions
-    fn determine_extraction_range(
-        &self,
-        barcode_pos: usize,
-        barcode_length: usize,
-        closest_outer: Option<&AnchorWithPosition>,
-        closest_inner: Option<&AnchorWithPosition>,
-        sequence_length: usize,
-    ) -> Option<(usize, usize)> {
-
-        // Check if inner anchor is adjacent (position = barcode_pos + 1)
-        if let Some(inner_anchor) = closest_inner {
-            if inner_anchor.position == barcode_pos + 1 {
-                // Inner anchor is adjacent - extract before it
-                return self.extract_with_adjacent_inner(
-                    closest_outer,
-                    inner_anchor,
-                    barcode_length,
-                    sequence_length,
-                );
-            }
-        }
-
-        // Check if outer anchor is adjacent (position = barcode_pos - 1)
-        if let Some(outer_anchor) = closest_outer {
-            if outer_anchor.position == barcode_pos - 1 {
-                // Outer anchor is adjacent - extract after it
-                return self.extract_with_adjacent_outer(
-                    outer_anchor,
-                    closest_inner,
-                    barcode_length,
-                    sequence_length,
-                );
-            }
-        }
-
-        // Neither is adjacent - extract between nearest anchors
-        self.extract_between_anchors(
-            closest_outer,
-            closest_inner,
-            barcode_length,
-            sequence_length,
-        )
-    }
-
-    /// Extract barcode with adjacent inner anchor
-    fn extract_with_adjacent_inner(
-        &self,
-        closest_outer: Option<&AnchorWithPosition>,
-        inner_anchor: &AnchorWithPosition,
-        barcode_length: usize,
-        sequence_length: usize,
-    ) -> Option<(usize, usize)> {
-        let target_length = (barcode_length as f64 * 1.2).ceil() as usize;
-        let min_length = (barcode_length as f64 * 0.8).floor() as usize;
-        
-        let end = inner_anchor.alignment.query_start;
-        let mut start = if end >= target_length {
-            end - target_length
-        } else {
-            0
-        };
-
-        // Adjust start to avoid overlap with outer anchor
-        if let Some(outer_anchor) = closest_outer {
-            start = start.max(outer_anchor.alignment.query_end);
-        }
-
-        let actual_length = end.saturating_sub(start); // avoid negative length
-        if actual_length >= min_length && end <= sequence_length {
-            Some((start, end))
-        } else {
-            None
-        }
-    }
-
-    /// Extract barcode with adjacent outer anchor  
-    fn extract_with_adjacent_outer(
-        &self,
-        outer_anchor: &AnchorWithPosition,
-        closest_inner: Option<&AnchorWithPosition>,
-        barcode_length: usize,
-        sequence_length: usize,
-    ) -> Option<(usize, usize)> {
-        let target_length = (barcode_length as f64 * 1.2).ceil() as usize;
-        let min_length = (barcode_length as f64 * 0.8).floor() as usize;
-        
-        let start = outer_anchor.alignment.query_end;
-        let mut end = start + target_length;
-
-        // Adjust end to avoid overlap with inner anchor or sequence end
-        if let Some(inner_anchor) = closest_inner {
-            end = end.min(inner_anchor.alignment.query_start);
-        }
-        end = end.min(sequence_length);
-
-        let actual_length = end.saturating_sub(start);
-        if actual_length >= min_length {
-            Some((start, end))
-        } else {
-            None
-        }
-    }
-
-    /// Extract barcode between nearest anchors when neither is adjacent
-    fn extract_between_anchors(
-        &self,
-        closest_outer: Option<&AnchorWithPosition>,
-        closest_inner: Option<&AnchorWithPosition>,
-        barcode_length: usize,
-        sequence_length: usize,
-    ) -> Option<(usize, usize)> {
-        let min_length = (barcode_length as f64 * 0.8).floor() as usize;
-        
-        let start = closest_outer
-            .map(|anchor| anchor.alignment.query_end)
-            .unwrap_or(0);
-        
-        let end = closest_inner
-            .map(|anchor| anchor.alignment.query_start)
-            .unwrap_or(sequence_length);
-
-        let available_length = end.saturating_sub(start);
-        
-        if available_length >= min_length {
-            Some((start, end))
-        } else {
-            None
-        }
-    }
-
-}
 
 /// Find the best barcode match using fitting alignment distance
 fn find_best_barcode_match(
@@ -452,13 +256,183 @@ fn find_best_fitting_match(
     }
 }
 
+/// Locate the potential barcode window using position-based logic
+fn locate_barcode(
+    barcode_region: &Arc<RwLock<Region>>,
+    anchors: &[FixedSequenceAlignment],
+    end_regions: &EndRegions,
+    sequence_length: usize,
+) -> Option<(usize, usize)> {
+    let region_guard = barcode_region.read().unwrap();
+    let barcode_length = region_guard.max_len as usize; // For barcode regions, the max_len should be equal to the min_len
+    let region_id = region_guard.region_id.clone();
+    drop(region_guard);
+
+    // Get barcode position using position map
+    let position_map = end_regions.build_position_map();
+    let barcode_pos = position_map.get(&region_id).copied()?;
+
+    // Find closest outer and inner anchors in one pass
+    let mut closest_outer: Option<&FixedSequenceAlignment> = None;
+    let mut closest_inner: Option<&FixedSequenceAlignment> = None;
+
+    for anchor in anchors {
+        let anchor_pos = anchor.position.unwrap_or(0);
+        if anchor_pos < barcode_pos {
+            // Outer anchor: find the one with highest position (closest to barcode)
+            if closest_outer.is_none() || anchor_pos > closest_outer.unwrap().position.unwrap_or(0) {
+                closest_outer = Some(anchor);
+            }
+        } else if anchor_pos > barcode_pos {
+            // Inner anchor: find the one with lowest position (closest to barcode)
+            if closest_inner.is_none() || anchor_pos < closest_inner.unwrap().position.unwrap_or(usize::MAX) {
+                closest_inner = Some(anchor);
+            }
+        }
+    }
+
+    // Determine extraction range based on adjacency and anchor positions
+    determine_extraction_range(
+        barcode_pos,
+        barcode_length,
+        closest_outer,
+        closest_inner,
+        sequence_length,
+    )
+}
+
+/// Determine extraction range based on adjacency and anchor positions
+fn determine_extraction_range(
+    barcode_pos: usize,
+    barcode_length: usize,
+    closest_outer: Option<&FixedSequenceAlignment>,
+    closest_inner: Option<&FixedSequenceAlignment>,
+    sequence_length: usize,
+) -> Option<(usize, usize)> {
+    // Check if inner anchor is adjacent (position = barcode_pos + 1)
+    if let Some(inner_anchor) = closest_inner {
+        if inner_anchor.position == Some(barcode_pos + 1) {
+            // Inner anchor is adjacent - extract before it
+            return extract_with_adjacent_inner(
+                closest_outer,
+                inner_anchor,
+                barcode_length,
+                sequence_length,
+            );
+        }
+    }
+
+    // Check if outer anchor is adjacent (position = barcode_pos - 1)
+    if let Some(outer_anchor) = closest_outer {
+        if outer_anchor.position == Some(barcode_pos - 1) {
+            // Outer anchor is adjacent - extract after it
+            return extract_with_adjacent_outer(
+                outer_anchor,
+                closest_inner,
+                barcode_length,
+                sequence_length,
+            );
+        }
+    }
+
+    // Neither is adjacent - extract between nearest anchors
+    extract_between_anchors(
+        closest_outer,
+        closest_inner,
+        barcode_length,
+        sequence_length,
+    )
+}
+
+/// Extract barcode with adjacent inner anchor
+fn extract_with_adjacent_inner(
+    closest_outer: Option<&FixedSequenceAlignment>,
+    inner_anchor: &FixedSequenceAlignment,
+    barcode_length: usize,
+    sequence_length: usize,
+) -> Option<(usize, usize)> {
+    let target_length = (barcode_length as f64 * 1.2).ceil() as usize;
+    let min_length = (barcode_length as f64 * 0.8).floor() as usize;
+
+    let end = inner_anchor.query_start;
+    let mut start = if end >= target_length {
+        end - target_length
+    } else {
+        0
+    };
+
+    // Adjust start to avoid overlap with outer anchor
+    if let Some(outer_anchor) = closest_outer {
+        start = start.max(outer_anchor.query_end);
+    }
+
+    let actual_length = end.saturating_sub(start); // avoid negative length
+    if actual_length >= min_length && end <= sequence_length {
+        Some((start, end))
+    } else {
+        None
+    }
+}
+
+/// Extract barcode with adjacent outer anchor
+fn extract_with_adjacent_outer(
+    outer_anchor: &FixedSequenceAlignment,
+    closest_inner: Option<&FixedSequenceAlignment>,
+    barcode_length: usize,
+    sequence_length: usize,
+) -> Option<(usize, usize)> {
+    let target_length = (barcode_length as f64 * 1.2).ceil() as usize;
+    let min_length = (barcode_length as f64 * 0.8).floor() as usize;
+
+    let start = outer_anchor.query_end;
+    let mut end = start + target_length;
+
+    // Adjust end to avoid overlap with inner anchor or sequence end
+    if let Some(inner_anchor) = closest_inner {
+        end = end.min(inner_anchor.query_start);
+    }
+    end = end.min(sequence_length);
+
+    let actual_length = end.saturating_sub(start);
+    if actual_length >= min_length {
+        Some((start, end))
+    } else {
+        None
+    }
+}
+
+/// Extract barcode between nearest anchors when neither is adjacent
+fn extract_between_anchors(
+    closest_outer: Option<&FixedSequenceAlignment>,
+    closest_inner: Option<&FixedSequenceAlignment>,
+    barcode_length: usize,
+    sequence_length: usize,
+) -> Option<(usize, usize)> {
+    let min_length = (barcode_length as f64 * 0.8).floor() as usize;
+
+    let start = closest_outer
+        .map(|anchor| anchor.query_end)
+        .unwrap_or(0);
+
+    let end = closest_inner
+        .map(|anchor| anchor.query_start)
+        .unwrap_or(sequence_length);
+
+    let available_length = end.saturating_sub(start);
+
+    if available_length >= min_length {
+        Some((start, end))
+    } else {
+        None
+    }
+}
+
 /// Main barcode extractor for long reads.
 /// Acts as an orchestrator, delegating tasks to specialized components.
 #[derive(Debug)]
 pub struct BarcodeExtractor {
     five_prime_regions: EndRegions,
     three_prime_regions: EndRegions,
-    barcode_locator: BarcodeLocator,
     /// Barcode whitelists: String for region_id
     whitelists: IndexMap<String, IndexSet<Vec<u8>>>,
 }
@@ -481,11 +455,10 @@ impl BarcodeExtractor {
         }
 
         let (five_prime_regions, three_prime_regions) = find_innermost_regions(lib_spec, modality)?;
-        
+
         Ok(Self {
             five_prime_regions,
             three_prime_regions,
-            barcode_locator: BarcodeLocator::new(),
             whitelists,
         })
     }
@@ -627,8 +600,8 @@ impl BarcodeExtractor {
         let total_anchors = five_prime.anchors.len() + three_prime.anchors.len();
 
         let avg_confidence = if total_anchors > 0 {
-            let five_conf: f64 = five_prime.anchors.iter().map(|a| a.alignment.score).sum();
-            let three_conf: f64 = three_prime.anchors.iter().map(|a| a.alignment.score).sum();
+            let five_conf: f64 = five_prime.anchors.iter().map(|a| a.score).sum();
+            let three_conf: f64 = three_prime.anchors.iter().map(|a| a.score).sum();
             (five_conf + three_conf) / total_anchors as f64
         } else {
             0.0
@@ -697,7 +670,7 @@ impl BarcodeExtractor {
         let mut extracted_barcodes = Vec::new();
 
         for barcode_region in barcode_regions {
-            if let Some(extraction_range) = self.barcode_locator.locate(
+            if let Some(extraction_range) = locate_barcode(
                 &barcode_region,
                 &segment.anchors,
                 end_regions,
@@ -845,7 +818,7 @@ mod tests {
 
     #[test]
     fn test_orientation_evidence_from_anchors_empty() {
-        let anchors: Vec<AnchorWithPosition> = vec![];
+        let anchors: Vec<FixedSequenceAlignment> = vec![];
         let evidence = OrientationEvidence::from_anchors(&anchors, false);
 
         assert_eq!(evidence.num_anchors, 0);
@@ -985,9 +958,7 @@ mod tests {
         use seqspec::{RegionType, SequenceType};
         use seqspec::region::Region;
         use super::super::EndRegions;
-        
-        let locator = BarcodeLocator::new();
-        
+
         // Create test barcode region
         let barcode_region = Arc::new(RwLock::new(Region {
             region_id: "bc1".to_string(),
@@ -1000,8 +971,8 @@ mod tests {
             onlist: None,
             subregions: vec![],
         }));
-        
-        // Create test outer anchor region  
+
+        // Create test outer anchor region
         let outer_region = Arc::new(RwLock::new(Region {
             region_id: "outer".to_string(),
             region_type: RegionType::Linker,
@@ -1013,7 +984,7 @@ mod tests {
             onlist: None,
             subregions: vec![],
         }));
-        
+
         // Create test inner anchor region
         let inner_region = Arc::new(RwLock::new(Region {
             region_id: "inner".to_string(),
@@ -1026,47 +997,39 @@ mod tests {
             onlist: None,
             subregions: vec![],
         }));
-        
+
         // Create EndRegions with proper order: outer -> barcode -> inner
         let mut end_regions = EndRegions::new(super::super::EndType::FivePrime);
         end_regions.add_region(outer_region.clone());
         end_regions.add_region(barcode_region.clone());
         end_regions.add_region(inner_region.clone());
-        
-        // Create alignments of fixed sequences
-        let alignment1 = FixedSequenceAlignment {
+
+        // Create alignments of fixed sequences with position set
+        let anchor1 = FixedSequenceAlignment {
             region: outer_region,
             query_start: 2,
             query_end: 6,
             score: 1.0,
             matches: 4,
             alignment_length: 4,
+            position: Some(1), // outer position
         };
-        
-        let alignment2 = FixedSequenceAlignment {
+
+        let anchor2 = FixedSequenceAlignment {
             region: inner_region,
             query_start: 20,
             query_end: 24,
             score: 1.0,
             matches: 4,
             alignment_length: 4,
+            position: Some(3), // inner position
         };
-        
-        let anchor1 = AnchorWithPosition {
-            position: 1, // outer position
-            alignment: alignment1,
-        };
-        
-        let anchor2 = AnchorWithPosition {
-            position: 3, // inner position
-            alignment: alignment2,
-        };
-        
+
         let anchors = vec![anchor1, anchor2];
-        
-        // Test locate method
-        let result = locator.locate(&barcode_region, &anchors, &end_regions, 100);
-        
+
+        // Test locate_barcode method
+        let result = locate_barcode(&barcode_region, &anchors, &end_regions, 100);
+
         // Should find a range between the outer anchor end (6) and inner anchor start (20)
         assert!(result.is_some());
         let (start, end) = result.unwrap();

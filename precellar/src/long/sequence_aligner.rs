@@ -6,7 +6,7 @@ use bio::alignment::AlignmentOperation;
 
 use seqspec::region::Region;
 
-/// Alignment result for a fixed sequence region
+/// Alignment result for a fixed sequence region with anchor pos
 #[derive(Debug, Clone)]
 pub struct FixedSequenceAlignment {
     /// Region that was aligned
@@ -21,6 +21,8 @@ pub struct FixedSequenceAlignment {
     pub matches: usize,
     /// Total alignment length
     pub alignment_length: usize,
+    /// Position in EndRegions (1-based, outermost is 1). None if not yet assigned.
+    pub position: Option<usize>,
 }
 
 
@@ -117,6 +119,7 @@ impl FittingAligner {
                     score,
                     matches,
                     alignment_length,
+                    position: None,
                 });
             } else {
                 // Debug log for low-quality alignment (warning will be emitted at higher level if both orientations fail)
@@ -270,6 +273,7 @@ mod tests {
                 score: 0.9,
                 matches: 4,
                 alignment_length: 4,
+                position: None,
             },
             FixedSequenceAlignment {
                 region: region2,
@@ -278,6 +282,7 @@ mod tests {
                 score: 0.8,
                 matches: 4,
                 alignment_length: 4,
+                position: None,
             },
             FixedSequenceAlignment {
                 region: region3,
@@ -286,6 +291,7 @@ mod tests {
                 score: 0.7,
                 matches: 4,
                 alignment_length: 4,
+                position: None,
             },
         ];
 
