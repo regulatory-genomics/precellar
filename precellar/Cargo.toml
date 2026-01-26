@@ -7,8 +7,7 @@ edition = "2021"
 anyhow = "1.0"
 anndata = "0.6.2"
 anndata-hdf5 = "0.5.2"
-#bed-utils = "0.9.5"
-bed-utils = { git = "https://github.com/kaizhang/bed-utils.git", rev = "c2b90997086622d9e07de96aa59aedd8ff88fe30" }
+bed-utils = "0.10.1"
 bwa-mem2 = { git = "https://github.com/regulatory-genomics/bwa-mem2-rust.git", rev = "27a375ec2239c79e8b3dafc504c1e197832a27bf" }
 star-aligner = { git = "https://github.com/regulatory-genomics/star-aligner", rev = "ff62b1d7d6ccbade4396398960ffcb1eb3d629e7" }
 minimap2 = { git = "https://github.com/PPSherry/minimap2-rs.git", branch = "feature/paired-end-support" }
@@ -22,7 +21,7 @@ nalgebra-sparse = "0.11"
 noodles = { version = "0.101", features = ["core", "gtf", "fastq", "bam", "sam", "async"] }
 polars = "0.51"
 rayon = "1.11"
-bincode = "2.0"
+bitcode = "0.6"
 serde_json = "1.0"
 seqspec = { workspace = true }
 regex = "1.11"

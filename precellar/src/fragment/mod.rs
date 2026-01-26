@@ -5,7 +5,7 @@ use bed_utils::{
     bed::{BEDLike, ParseError, Strand},
     extsort::ExternalSorterBuilder,
 };
-use bincode::{Decode, Encode};
+use bitcode::{Decode, Encode};
 use dedups::AlignmentInfo;
 use itertools::Itertools;
 use noodles::sam::{

@@ -1,5 +1,5 @@
 use anyhow::{bail, Result};
-use bincode::{Decode, Encode};
+use bitcode::{Decode, Encode};
 use bstr::ByteSlice;
 use lexical::parse_partial;
 use noodles::sam::alignment::{
