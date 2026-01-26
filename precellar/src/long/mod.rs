@@ -3,10 +3,12 @@ use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
 pub mod barcode_extractor;
+pub mod barcode_index;
 pub mod sequence_aligner;
 
 use seqspec::region::{Region, LibSpec};
 pub use barcode_extractor::BarcodeExtractor;
+pub use barcode_index::BarcodeIndex;
 
 
 /// End type information for describing 5' or 3' end of sequence

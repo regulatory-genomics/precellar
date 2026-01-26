@@ -8,7 +8,8 @@ use seqspec::Modality;
 
 use super::{
     find_innermost_regions, EndRegions,
-    sequence_aligner::{FittingAligner, FixedSequenceAlignment, find_non_overlapping_alignments, fitting_alignment_distance}
+    sequence_aligner::{FittingAligner, FixedSequenceAlignment, find_non_overlapping_alignments},
+    barcode_index::BarcodeIndex,
 };
 
 /// Final long-read barcode extraction result
@@ -195,65 +196,27 @@ impl AnchorFinder {
 }
 
 
-/// Find the best barcode match using fitting alignment distance
+/// Find the best barcode match using k-mer indexed search
 fn find_best_barcode_match(
     candidate_seq: &[u8],
     barcode_region: &Arc<RwLock<Region>>,
-    whitelists: &IndexMap<String, IndexSet<Vec<u8>>>,
+    whitelist_indices: &IndexMap<String, BarcodeIndex>,
 ) -> Option<ExtractedBarcode> {
     let region_guard = barcode_region.read().unwrap();
     let region_id = region_guard.region_id.clone();
     drop(region_guard);
 
-    // Get whitelist for this region
-    let whitelist = whitelists.get(&region_id)?;
-    
-    // Find best match using fitting alignment distance
-    let (matched_barcode, score) = find_best_fitting_match(candidate_seq, whitelist)?;
+    // Get whitelist index for this region
+    let index = whitelist_indices.get(&region_id)?;
+
+    // Find best match using k-mer voting + fitting alignment
+    let (matched_barcode, confidence) = index.find_best_match(candidate_seq)?;
 
     Some(ExtractedBarcode {
         region_id,
         barcode: matched_barcode,
-        confidence: score,
+        confidence,
     })
-}
-
-/// Find best barcode match using fitting alignment distance
-fn find_best_fitting_match(
-    candidate_seq: &[u8],
-    whitelist: &IndexSet<Vec<u8>>,
-) -> Option<(Vec<u8>, f64)> {
-    if whitelist.is_empty() {
-        return None;
-    }
-
-    let mut best_barcode = None;
-    let mut min_distance = usize::MAX;
-
-    for barcode in whitelist.iter() {
-        // Use fitting alignment distance: short sequence (barcode) vs long sequence (candidate)
-        let distance = fitting_alignment_distance(barcode, candidate_seq);
-        
-        if distance < min_distance {
-            min_distance = distance;
-            best_barcode = Some(barcode.clone());
-        }
-    }
-
-    if let Some(barcode) = best_barcode {
-        // Convert edit distance to confidence score
-        let barcode_length = barcode.len().max(1);
-        let confidence = 1.0 - (min_distance as f64 / barcode_length as f64);
-        
-        // Only return matches with reasonable confidence
-        if confidence >= 0.7 {
-            Some((barcode, confidence))
-        } else {
-            None
-        }
-    } else {
-        None
-    }
 }
 
 /// Locate the potential barcode window using position-based logic
@@ -433,25 +396,28 @@ fn extract_between_anchors(
 pub struct BarcodeExtractor {
     five_prime_regions: EndRegions,
     three_prime_regions: EndRegions,
-    /// Barcode whitelists: String for region_id
-    whitelists: IndexMap<String, IndexSet<Vec<u8>>>,
+    /// Barcode whitelist indices: region_id -> BarcodeIndex
+    whitelist_indices: IndexMap<String, BarcodeIndex>,
 }
 
 impl BarcodeExtractor {
     /// Create a new barcode extractor for the given library_spec, modality, and whitelists.
     pub fn new(
-        lib_spec: &LibSpec, 
+        lib_spec: &LibSpec,
         modality: &Modality,
         whitelists: IndexMap<String, IndexSet<Vec<u8>>>,
     ) -> Result<Self> {
-        // Check that all barcode regions have non-empty whitelists
+        // Check that all barcode regions have non-empty whitelists and build indices
+        let mut whitelist_indices = IndexMap::new();
         for (region_id, whitelist) in &whitelists {
             if whitelist.is_empty() {
                 anyhow::bail!(
-                    "Barcode region '{}' does not have a whitelist. Long-read processing requires all barcode regions to have whitelists.", 
+                    "Barcode region '{}' does not have a whitelist. Long-read processing requires all barcode regions to have whitelists.",
                     region_id
                 );
             }
+            // Build k-mer index for fast matching
+            whitelist_indices.insert(region_id.clone(), BarcodeIndex::new(whitelist));
         }
 
         let (five_prime_regions, three_prime_regions) = find_innermost_regions(lib_spec, modality)?;
@@ -459,7 +425,7 @@ impl BarcodeExtractor {
         Ok(Self {
             five_prime_regions,
             three_prime_regions,
-            whitelists,
+            whitelist_indices,
         })
     }
 
@@ -681,7 +647,7 @@ impl BarcodeExtractor {
                 if let Some(matched) = find_best_barcode_match(
                     candidate_seq,
                     &barcode_region,
-                    &self.whitelists,
+                    &self.whitelist_indices,
                 ) {
                     extracted_barcodes.push(matched);
                 }
@@ -691,9 +657,9 @@ impl BarcodeExtractor {
         Ok(extracted_barcodes)
     }
 
-    /// Get whitelists reference for external access
-    pub fn whitelists(&self) -> &IndexMap<String, IndexSet<Vec<u8>>> {
-        &self.whitelists
+    /// Get whitelist indices reference for external access
+    pub fn whitelist_indices(&self) -> &IndexMap<String, BarcodeIndex> {
+        &self.whitelist_indices
     }
 
     /// Get 5' end regions for external access
