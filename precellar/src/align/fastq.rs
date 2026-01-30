@@ -246,6 +246,7 @@ pub struct AlignmentResult<'a, A> {
     num_threads: u16,
     num_records: usize,
     num_processed: usize,
+    thread_pool: rayon::ThreadPool,
 }
 
 impl<'a, A: Aligner> AlignmentResult<'a, A> {
@@ -266,6 +267,11 @@ impl<'a, A: Aligner> AlignmentResult<'a, A> {
                 .map(|x| qc.mito_dna.insert(x));
         });
 
+        let thread_pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(num_threads as usize)
+            .build()
+            .unwrap();
+
         Self {
             aligner,
             fastq_reader: PrefetchIterator::new(fastq_reader, 1),
@@ -274,6 +280,7 @@ impl<'a, A: Aligner> AlignmentResult<'a, A> {
             num_threads,
             num_records,
             num_processed: 0,
+            thread_pool,
         }
     }
 }
@@ -288,9 +295,6 @@ impl<'a, A> AlignmentResult<'a, A> {
     }
 }
 
-/// Implement the Iterator trait for AlignmentResult.
-/// The alignment results are yielded as a tuple of two MultiMapR.
-/// If the read is unpaired, the second element is None.
 impl<'a, A: Aligner> Iterator for AlignmentResult<'a, A> {
     type Item = Vec<(Option<MultiMapR>, Option<MultiMapR>)>;
     fn next(&mut self) -> Option<Self::Item> {
@@ -298,7 +302,7 @@ impl<'a, A: Aligner> Iterator for AlignmentResult<'a, A> {
         self.num_processed += data.len();
 
         // Align the reads.
-        let results: Vec<_> = self.aligner.align_reads(self.num_threads, data);
+        let results: Vec<_> = self.aligner.align_reads(self.num_threads, data, &self.thread_pool);
         let mut qc = self.qc.lock().unwrap();
         results.iter().for_each(|ali| match ali {
             (Some(ali1), Some(ali2)) => {
@@ -366,6 +370,7 @@ struct AnnotatedFastqReader {
     readers: PrefetchIterator<Vec<SmallVec<[fastq::Record; 4]>>>,
     barcode_processor: BarcodeProcessor,
     qc: Arc<Mutex<QcFastq>>,
+    thread_pool: rayon::ThreadPool,
 }
 
 impl AnnotatedFastqReader {
@@ -376,6 +381,10 @@ impl AnnotatedFastqReader {
         chunk_size: usize,
     ) -> Self {
         let (annotators, readers): (Vec<_>, Vec<_>) = iter.into_iter().unzip();
+        let thread_pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(20)
+            .build()
+            .unwrap();
         Self {
             annotators,
             readers: PrefetchIterator::new(
@@ -388,6 +397,7 @@ impl AnnotatedFastqReader {
             trim_poly_a: false,
             barcode_processor,
             qc,
+            thread_pool,
         }
     }
 
@@ -428,14 +438,16 @@ impl Iterator for AnnotatedFastqReader {
         let chunk = self.readers.next()?;
         let n = chunk.len();
         let annotators = &self.annotators;
-        let result: Vec<_> = chunk
-            .par_chunks(n / 128)
-            .flat_map_iter(|chunk| {
-                let (fq, qc) = process_chunk(&self.barcode_processor, &annotators, chunk);
-                self.qc.lock().unwrap().extend(std::iter::once(qc));
-                fq
-            })
-            .collect();
+        let result: Vec<_> = self.thread_pool.install(|| {
+            chunk
+                .par_chunks(n / 128)
+                .flat_map_iter(|chunk| {
+                    let (fq, qc) = process_chunk(&self.barcode_processor, &annotators, chunk);
+                    self.qc.lock().unwrap().extend(std::iter::once(qc));
+                    fq
+                })
+                .collect()
+        });
         Some(result)
     }
 }

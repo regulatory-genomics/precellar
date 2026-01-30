@@ -63,11 +63,12 @@ impl Aligner for AlignerRef<'_> {
             &mut self,
             num_threads: u16,
             records: Vec<AnnotatedFastq>,
+            thread_pool: &rayon::ThreadPool,
         ) -> Vec<(Option<precellar::align::MultiMapR>, Option<precellar::align::MultiMapR>)> {
         match self {
-            AlignerRef::STAR(aligner) => aligner.align_reads(num_threads, records),
-            AlignerRef::BWA(aligner) => Aligner::align_reads(aligner.deref_mut().deref_mut(), num_threads, records),
-            AlignerRef::Minimap2(aligner) => Aligner::align_reads(aligner.deref_mut().deref_mut(), num_threads, records),
+            AlignerRef::STAR(aligner) => aligner.align_reads(num_threads, records, thread_pool),
+            AlignerRef::BWA(aligner) => Aligner::align_reads(aligner.deref_mut().deref_mut(), num_threads, records, thread_pool),
+            AlignerRef::Minimap2(aligner) => Aligner::align_reads(aligner.deref_mut().deref_mut(), num_threads, records, thread_pool),
         }
     }
 }
