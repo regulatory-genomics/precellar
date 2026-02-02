@@ -7,7 +7,7 @@ edition = "2021"
 anyhow = "1.0"
 anndata = "0.6.2"
 anndata-hdf5 = "0.5.2"
-bed-utils = "0.10.1"
+bed-utils = { git = "https://github.com/kaizhang/bed-utils.git", rev="c7e7c80c7dcd61afbd6b296ac70552b9f439d9ce" }
 bwa-mem2 = { git = "https://github.com/regulatory-genomics/bwa-mem2-rust.git", rev = "27a375ec2239c79e8b3dafc504c1e197832a27bf" }
 star-aligner = { git = "https://github.com/regulatory-genomics/star-aligner", rev = "ff62b1d7d6ccbade4396398960ffcb1eb3d629e7" }
 minimap2 = { git = "https://github.com/PPSherry/minimap2-rs.git", branch = "feature/paired-end-support" }
