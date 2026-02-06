@@ -24,7 +24,7 @@ Core functions
     align
     make_fastq
     make_bwa_index
-
+    make_minimap2_index
 
 Aligners
 ~~~~~~~~
@@ -41,6 +41,7 @@ Utilities
 .. autosummary::
     :toctree: _autosummary
 
+    utils.extract_barcode_from_name
     utils.strip_barcode_from_fastq
     utils.bam_to_fastq
     utils.multiplex_fastq

@@ -62,13 +62,13 @@ impl Quantifier {
         let genome_index = GenomeBaseIndex::new(header);
 
         let mut umi_cache: ExternalChunkBuilder<Vec<Vec<(usize, u32)>>> =
-            ExternalChunkBuilder::new(tempfile::tempfile()?, Some(3))?;
+            ExternalChunkBuilder::new(tempfile::tempfile()?, 3)?;
         let mut spliced_cache: ExternalChunkBuilder<Vec<Vec<(usize, u32)>>> =
-            ExternalChunkBuilder::new(tempfile::tempfile()?, Some(3))?;
+            ExternalChunkBuilder::new(tempfile::tempfile()?, 3)?;
         let mut unspliced_cache: ExternalChunkBuilder<Vec<Vec<(usize, u32)>>> =
-            ExternalChunkBuilder::new(tempfile::tempfile()?, Some(3))?;
+            ExternalChunkBuilder::new(tempfile::tempfile()?, 3)?;
         let mut coverage_cache: ExternalChunkBuilder<Vec<Vec<(usize, i32)>>> =
-            ExternalChunkBuilder::new(tempfile::tempfile()?, Some(3))?;
+            ExternalChunkBuilder::new(tempfile::tempfile()?, 3)?;
 
         let adata: AnnData<H5> = AnnData::new(output)?;
         let num_cols = self.genes.len();

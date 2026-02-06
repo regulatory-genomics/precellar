@@ -12,6 +12,7 @@ modalities:
 - rna
 library_protocol: Custom
 library_kit: Custom
+chemistry_strandedness: forward
 sequence_protocol: Illumina
 sequence_kit: Custom
 sequence_spec:
@@ -274,7 +275,7 @@ library_spec:
     max_len: 29
     onlist: null
     regions: null
-    parent_id: atac
+    parent_id: rna
   - !Region
     region_id: index5_2
     region_type: index5

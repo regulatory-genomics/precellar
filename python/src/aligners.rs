@@ -1,12 +1,19 @@
-use std::{ops::{Deref, DerefMut}, path::PathBuf};
-use anyhow::Result;
+use anyhow::{bail, Result};
+use bwa_mem2::{AlignerOpts, BurrowsWheelerAligner, FMIndex};
+use log::warn;
 use noodles::sam::Header;
-use precellar::{align::{Aligner, AnnotatedFastq}, transcriptome::{Transcript, TxAligner}};
+use precellar::align::{Minimap2Aligner, Minimap2Opts};
+use precellar::{
+    align::{Aligner, AnnotatedFastq},
+    transcriptome::{Transcript, TxAligner},
+};
 use pyo3::prelude::*;
 use seqspec::ChemistryStrandedness;
 use star_aligner::{StarAligner, StarOpts};
-use bwa_mem2::{AlignerOpts, BurrowsWheelerAligner, FMIndex};
-use precellar::align::{Minimap2Aligner, Minimap2Opts};
+use std::{
+    ops::{Deref, DerefMut},
+    path::PathBuf,
+};
 
 pub enum AlignerRef<'py> {
     STAR(PyRefMut<'py, STAR>),
@@ -23,11 +30,18 @@ impl AlignerRef<'_> {
         }
     }
 
-    pub fn transcript_annotator(&self, strandness: Option<ChemistryStrandedness>) -> Option<TxAligner> {
+    pub fn transcript_annotator(
+        &self,
+        strandness: Option<ChemistryStrandedness>,
+    ) -> Option<TxAligner> {
         match self {
             AlignerRef::STAR(aligner) => {
-                let transcriptome: Vec<_> = aligner.get_transcriptome().unwrap().iter()
-                    .map(|t| Transcript::try_from(t.clone()).unwrap()).collect();
+                let transcriptome: Vec<_> = aligner
+                    .get_transcriptome()
+                    .unwrap()
+                    .iter()
+                    .map(|t| Transcript::try_from(t.clone()).unwrap())
+                    .collect();
                 Some(TxAligner::new(transcriptome, self.header(), strandness))
             }
             AlignerRef::BWA(_) => None,
@@ -72,7 +86,6 @@ impl Aligner for AlignerRef<'_> {
         }
     }
 }
-
 
 /** The STAR aligner.
 
@@ -149,10 +162,8 @@ impl BWAMEM2 {
         text_signature = "(index_path)",
     )]
     pub fn new(index_path: PathBuf) -> Result<Self> {
-        let aligner = BurrowsWheelerAligner::new(
-            FMIndex::read(index_path).unwrap(),
-            AlignerOpts::default(),
-        );
+        let aligner =
+            BurrowsWheelerAligner::new(FMIndex::read(index_path).unwrap(), AlignerOpts::default());
         Ok(BWAMEM2(aligner))
     }
 
@@ -170,7 +181,7 @@ impl BWAMEM2 {
 
     /// The minimum seed length of the aligner. The shorter the seed more
     /// sensitive the search will be. The default value is 19.
-    /// 
+    ///
     /// Returns
     /// -------
     /// int
@@ -208,37 +219,53 @@ impl BWAMEM2 {
     Parameters
     ----------
     index_path : str
-        The path to the Minimap2 index file (.mmi).
-    preset : str | None
-        The minimap2 preset to use.
+        The path to the Minimap2 index file (.mmi) or FASTA file.
+        If a FASTA file is provided, a temporary index will be created.
+    preset : str
+        The minimap2 preset to use. Defaults to 'map-ont'.
         Available presets:
+
+        Long reads DNA mapping:
         - 'map-ont': Oxford Nanopore genomic reads (default)
         - 'map-pb': PacBio CLR genomic reads
         - 'map-hifi': PacBio HiFi/CCS genomic reads
-        - 'splice': Long-read spliced alignment (RNA-seq)
+        - 'lr:hq': Long-read high-quality mapping
+
+        Spliced / RNA-seq alignment:
+        - 'splice': Long-read spliced alignment
         - 'splice:hq': High-quality long-read spliced alignment
+        - 'splice:sr': Short-read spliced alignment
+
+        Long assembly to reference mapping:
         - 'asm5': Assembly-to-assembly alignment (divergence ~5%)
         - 'asm10': Assembly-to-assembly alignment (divergence ~10%)
         - 'asm20': Assembly-to-assembly alignment (divergence ~20%)
+
+        Short reads mapping:
         - 'short': Short single-end reads
         - 'sr': Short paired-end reads
-        If None, defaults to 'map-ont'.
+
+        All-vs-all overlap mapping:
+        - 'ava-pb': PacBio read overlap
+        - 'ava-ont': Oxford Nanopore read overlap
 */
 #[pyclass]
-#[repr(transparent)]
-pub struct MINIMAP2(Minimap2Aligner);
+pub struct MINIMAP2 {
+    aligner: Minimap2Aligner,
+    _temp_index: Option<tempfile::TempPath>, // To hold temporary index if created from FASTA
+}
 
 impl Deref for MINIMAP2 {
     type Target = Minimap2Aligner;
 
     fn deref(&self) -> &Self::Target {
-        &self.0
+        &self.aligner
     }
 }
 
 impl DerefMut for MINIMAP2 {
     fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.0
+        &mut self.aligner
     }
 }
 
@@ -246,34 +273,56 @@ impl DerefMut for MINIMAP2 {
 impl MINIMAP2 {
     #[new]
     #[pyo3(
-        signature = (index_path, *, preset=None),
-        text_signature = "(index_path, *, preset=None)",
+        signature = (index_path, *, preset="map-ont"),
+        text_signature = "(index_path, *, preset='map-ont')",
     )]
-    pub fn new(index_path: PathBuf, preset: Option<&str>) -> Result<Self> {
-        let mut opts = Minimap2Opts::new(index_path);
+    pub fn new(index_path: PathBuf, preset: &str) -> Result<Self> {
+        let preset = match preset.to_lowercase().as_str() {
+            // Long Reads DNA Mapping
+            "map-ont" => minimap2::Preset::MapOnt,
+            "map-pb" => minimap2::Preset::MapPb,
+            "map-hifi" => minimap2::Preset::MapHifi,
+            // "map-iclr" => minimap2::Preset::MapIclr, // Mentioned in minimap2, but not supported by minimap2-rs
+            "lr:hq" => minimap2::Preset::LrHq, 
+            // Spliced / RNA-seq Alignment
+            "splice" => minimap2::Preset::Splice,
+            "splice:hq" => minimap2::Preset::SpliceHq,
+            "splice:sr" => minimap2::Preset::SpliceSr,
+            // Long Assembly to Reference Mapping
+            "asm5" => minimap2::Preset::Asm5,
+            "asm10" => minimap2::Preset::Asm10,
+            "asm20" => minimap2::Preset::Asm20,
+            // Short Reads Mapping
+            "short" => minimap2::Preset::Short,
+            "sr" => minimap2::Preset::Sr,
+            // All-vs-All overlap Mapping
+            "ava-pb" => minimap2::Preset::AvaPb,
+            "ava-ont" => minimap2::Preset::AvaOnt,
+            _ => bail!(
+                "Invalid preset '{}'. Valid presets: map-ont, map-pb, map-hifi, lr:hq, splice, splice:hq, splice:sr, asm5, asm10, asm20, short, sr, ava-pb, ava-ont",
+                preset
+            ),
+        };
 
-        // Parse preset string to minimap2::Preset enum
-        if let Some(preset_str) = preset {
-            let preset_enum = match preset_str.to_lowercase().as_str() {
-                "map-ont" => minimap2::Preset::MapOnt,
-                "map-pb" => minimap2::Preset::MapPb,
-                "map-hifi" => minimap2::Preset::MapHifi,
-                "splice" => minimap2::Preset::Splice,
-                "splice:hq" => minimap2::Preset::SpliceHq,
-                "asm5" => minimap2::Preset::Asm5,
-                "asm10" => minimap2::Preset::Asm10,
-                "asm20" => minimap2::Preset::Asm20,
-                "short" => minimap2::Preset::Short,
-                "sr" => minimap2::Preset::Sr,
-                _ => return Err(anyhow::anyhow!(
-                    "Invalid preset '{}'. Valid presets: map-ont, map-pb, map-hifi, splice, splice:hq, asm5, asm10, asm20, short, sr",
-                    preset_str
-                )),
-            };
-            opts = opts.with_preset(preset_enum);
-        }
-
-        Ok(MINIMAP2(Minimap2Aligner::new(opts)?))
+        let _temp_index = if is_fasta_file(&index_path) {
+            let tmp = tempfile::NamedTempFile::new()?.into_temp_path();
+            warn!("Provided index path is a FASTA file. Creating temporary minimap2 index at {:?}.", tmp);
+            warn!("This may take a few minutes. To save time in the future, consider pre-building the minimap2 index."); 
+            minimap2::Aligner::builder()
+                .preset(preset.clone())
+                .with_index(&index_path, Some(tmp.to_path_buf().to_str().unwrap()))
+                .map_err(|e| anyhow::anyhow!("Failed to create minimap2 index: {}", e))?;
+            Some(tmp)
+        } else {
+            None
+        };
+        let index = _temp_index.as_ref().map_or(index_path, |x| x.to_path_buf());
+        let opts = Minimap2Opts::new(index).with_preset(preset);
+        
+        Ok(Self {
+            aligner: Minimap2Aligner::new(opts)?,
+            _temp_index,
+        })
     }
 
     /// Get the currently configured preset name.
@@ -284,7 +333,27 @@ impl MINIMAP2 {
     ///     The preset name, or None if using default (map-ont).
     #[getter]
     pub fn get_preset(&self) -> Option<String> {
-        self.0.get_opts().preset().map(|p| format!("{:?}", p).to_lowercase())
+        self.get_opts()
+            .preset()
+            .map(|p| format!("{:?}", p).to_lowercase())
+    }
+}
+
+fn is_fasta_file(path: impl AsRef<std::path::Path>) -> bool {
+    let mut path = path.as_ref().to_path_buf();
+    if let Some(ext) = path.extension() {
+        if ext.to_str().unwrap().to_lowercase().as_str() == "gz" {
+            path = path.with_extension("");
+        }
+    }
+
+    if let Some(ext) = path.extension() {
+        match ext.to_str().unwrap().to_lowercase().as_str() {
+            "fa" | "fasta" | "fna" | "ffn" | "faa" | "frn" => true,
+            _ => false,
+        }
+    } else {
+        false
     }
 }
 

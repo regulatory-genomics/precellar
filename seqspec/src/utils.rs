@@ -68,7 +68,11 @@ pub async fn open_file_async(
 
     let compression = compression.or_else(|| detect_compression(src));
     let reader: Box<dyn AsyncRead + Send + Unpin> = match compression {
-        Some(Compression::Gzip) => Box::new(GzipDecoder::new(reader)),
+        Some(Compression::Gzip) => {
+            let mut decoder = GzipDecoder::new(reader);
+            decoder.multiple_members(true);
+            Box::new(decoder)
+        }
         Some(Compression::Zstd) => Box::new(ZstdDecoder::new(reader)),
         None => Box::new(reader),
     };

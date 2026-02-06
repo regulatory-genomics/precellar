@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use anyhow::Result;
-use bincode::{Decode, Encode};
+use bitcode::{Decode, Encode};
 use noodles::sam;
 use noodles::sam::alignment::{record::cigar::op::Kind, record_buf::RecordBuf};
 

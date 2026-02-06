@@ -435,7 +435,9 @@ impl Iterator for AnnotatedFastqReader {
     type Item = Vec<AnnotatedFastq>;
 
     fn next(&mut self) -> Option<Self::Item> {
+        // Group reads of the same index from different files into a SmallVec.
         let chunk = self.readers.next()?;
+
         let n = chunk.len();
         let annotators = &self.annotators;
         let result: Vec<_> = self.thread_pool.install(|| {
@@ -494,8 +496,8 @@ fn process_chunk<'a, I: IntoIterator<Item = &'a SmallVec<[fastq::Record; 4]>>>(
 
 /// A batched FASTQ reader that reads multiple FASTQ files in batches.
 struct BatchedFqReader {
-    readers: Vec<FastqReader>,
-    batch_size: usize,
+    readers: Vec<FastqReader>, // a list of open file handles
+    batch_size: usize,         // target size for one chunk of data
 }
 
 impl Iterator for BatchedFqReader {
@@ -504,12 +506,15 @@ impl Iterator for BatchedFqReader {
     fn next(&mut self) -> Option<Self::Item> {
         let mut batch = Vec::new();
         let mut accumulated_length = 0;
+
+        // Read records from all readers until reaching the batch size.
+        // while loop for vertical iteration; readers.iter_mut() for horizontal iteration.
         while accumulated_length < self.batch_size {
             let mut max_read = 0;
             let mut min_read = usize::MAX;
             let records: SmallVec<[_; 4]> = self
                 .readers
-                .iter_mut()
+                .iter_mut() // read one record from each FASTQ file at the same position
                 .flat_map(|reader| {
                     let mut buffer = fastq::Record::default();
                     let n = reader
@@ -519,6 +524,7 @@ impl Iterator for BatchedFqReader {
                     max_read = max_read.max(n);
                     if n > 0 {
                         accumulated_length += buffer.sequence().len();
+                        strip_fq_suffix(&mut buffer);
                         Some(buffer)
                     } else {
                         None
@@ -535,8 +541,9 @@ impl Iterator for BatchedFqReader {
             } else if min_read == 0 {
                 panic!("Unequal number of reads in the chunk");
             } else {
+                // Check records from all readers at the same position have the same name.
                 assert!(
-                    records.iter().map(|r| get_read_name(r)).all_equal(),
+                    records.iter().map(|r| r.name()).all_equal(),
                     "read names mismatch"
                 );
                 batch.push(records);
@@ -772,6 +779,7 @@ impl AnnotatedFastq {
 }
 
 impl AnnotatedFastq {
+    /// Join another AnnotatedFastq from the same insert into self.
     pub fn join(&mut self, other: Self) {
         if let Some(bc) = &mut self.barcode {
             if let Some(x) = other.barcode.as_ref() {
@@ -813,13 +821,15 @@ pub fn extend_fastq_record(this: &mut fastq::Record, other: &fastq::Record) {
         .extend_from_slice(other.quality_scores());
 }
 
-/// Get the read name from a Fastq record, stripping any /1 or /2 suffix.
-fn get_read_name(record: &fastq::Record) -> String {
-    let name = record.name().to_string();
-    name.strip_suffix("/1")
-        .or_else(|| name.strip_suffix("/2"))
-        .map(|x| x.to_owned())
-        .unwrap_or(name)
+fn strip_fq_suffix(record: &mut fastq::Record) {
+    let read_name = record.name();
+    let n = read_name.len();
+    if n > 2 {
+        let suffix = &read_name[n - 2..];
+        if suffix == b"/1" || suffix == b"/2" {
+            record.name_mut().truncate(n - 2);
+        }
+    }
 }
 
 pub struct NameCollatedRecords<'a, R> {

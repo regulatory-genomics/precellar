@@ -73,18 +73,26 @@ pub fn make_bwa_index(fasta: PathBuf, genome_prefix: PathBuf) -> Result<()> {
 /// fasta: Path
 ///    File path to the FASTA file containing reference sequences.
 /// output_index: Path
-///   Full path for the output minimap2 index file.
-/// preset: str | None
+///   File path for the output minimap2 index (.mmi file).
+/// preset: str
 ///    Optional preset to optimize index for specific read types:
-///    - 'map-ont': Oxford Nanopore reads (default)
-///    - 'map-pb': PacBio CLR reads
-///    - 'map-hifi': PacBio HiFi reads
-///    - 'splice': RNA-seq long reads
-///    - 'splice:hq': High-quality RNA-seq long reads
-///    - 'asm5', 'asm10', 'asm20': Assembly alignment
-///    - 'short': Short single-end reads
-///    - 'sr': Short paired-end reads
-///    If None, uses 'map-ont' defaults.
+///    - Long Reads DNA Mapping:
+///      - 'map-ont': Oxford Nanopore reads (default)
+///      - 'map-pb': PacBio CLR reads
+///      - 'map-hifi': PacBio HiFi reads
+///      - 'lr:hq': Long reads, high quality
+///    - Spliced / RNA-seq Alignment:
+///      - 'splice': RNA-seq long reads
+///      - 'splice:hq': High-quality RNA-seq long reads
+///      - 'splice:sr': Short-read RNA-seq
+///    - Long Assembly to Reference Mapping:
+///      - 'asm5', 'asm10', 'asm20': Assembly alignment (5%, 10%, 20% divergence)
+///    - Short Reads Mapping:
+///      - 'short': Short single-end reads
+///      - 'sr': Short paired-end reads
+///    - All-vs-All Overlap Mapping:
+///      - 'ava-pb': PacBio all-vs-all overlap
+///      - 'ava-ont': ONT all-vs-all overlap
 ///
 /// Examples
 /// --------
@@ -105,45 +113,48 @@ pub fn make_bwa_index(fasta: PathBuf, genome_prefix: PathBuf) -> Result<()> {
 /// make_bwa_index : Create BWA-MEM2 index for short reads
 #[pyfunction]
 #[pyo3(
-    signature = (fasta, output_index, *, preset=None),
-    text_signature = "(fasta, output_index, *, preset=None)",
+    signature = (fasta, output_index, *, preset="map-ont"),
+    text_signature = "(fasta, output_index, *, preset='map-ont')",
 )]
-pub fn make_minimap2_index(
-    fasta: PathBuf,
-    output_index: PathBuf,
-    preset: Option<&str>,
-) -> Result<()> {
-    // Start with builder
-    let builder = minimap2::Aligner::builder();
-
-    // Apply preset if provided, or use default map-ont
-    let builder = if let Some(preset_str) = preset {
-        let preset_enum = match preset_str.to_lowercase().as_str() {
-            "map-ont" => minimap2::Preset::MapOnt,
-            "map-pb" => minimap2::Preset::MapPb,
-            "map-hifi" => minimap2::Preset::MapHifi,
-            "splice" => minimap2::Preset::Splice,
-            "splice:hq" => minimap2::Preset::SpliceHq,
-            "asm5" => minimap2::Preset::Asm5,
-            "asm10" => minimap2::Preset::Asm10,
-            "asm20" => minimap2::Preset::Asm20,
-            "short" => minimap2::Preset::Short,
-            "sr" => minimap2::Preset::Sr,
-            _ => return Err(anyhow::anyhow!(
-                "Invalid preset '{}'. Valid presets: map-ont, map-pb, map-hifi, splice, splice:hq, asm5, asm10, asm20, short, sr",
-                preset_str
-            )),
-        };
-        builder.preset(preset_enum)
-    } else {
-        // Default to map-ont if no preset specified
-        builder.map_ont()
+pub fn make_minimap2_index(fasta: PathBuf, output_index: PathBuf, preset: &str) -> Result<()> {
+    let preset = match preset.to_lowercase().as_str() {
+        // Long Reads DNA Mapping
+        "map-ont" => minimap2::Preset::MapOnt,
+        "map-pb" => minimap2::Preset::MapPb,
+        "map-hifi" => minimap2::Preset::MapHifi,
+        "lr:hq" => minimap2::Preset::LrHq,
+        // Spliced / RNA-seq Alignment
+        "splice" => minimap2::Preset::Splice,
+        "splice:hq" => minimap2::Preset::SpliceHq,
+        "splice:sr" => minimap2::Preset::SpliceSr,
+        // Long Assembly to Reference Mapping
+        "asm5" => minimap2::Preset::Asm5,
+        "asm10" => minimap2::Preset::Asm10,
+        "asm20" => minimap2::Preset::Asm20,
+        // Short Reads Mapping
+        "short" => minimap2::Preset::Short,
+        "sr" => minimap2::Preset::Sr,
+        // All-vs-All overlap Mapping
+        "ava-pb" => minimap2::Preset::AvaPb,
+        "ava-ont" => minimap2::Preset::AvaOnt,
+        _ => bail!(
+            "Invalid preset '{}'. Valid presets: map-ont, map-pb, map-hifi, lr:hq, splice, splice:hq, splice:sr, asm5, asm10, asm20, short, sr, ava-pb, ava-ont",
+            preset,
+        ),
     };
 
+    info!(
+        "Creating minimap2 index for fasta: {:?} with preset: {:?}",
+        fasta, preset
+    );
     // Build index from FASTA and save to output
     // with_index(input, Some(output)) reads FASTA from input and saves .mmi to output
-    let _aligner = builder
-        .with_index(fasta.to_str().unwrap(), Some(output_index.to_str().unwrap()))
+    minimap2::Aligner::builder()
+        .preset(preset)
+        .with_index(
+            fasta.to_str().unwrap(),
+            Some(output_index.to_str().unwrap()),
+        )
         .map_err(|e| anyhow::anyhow!("Failed to create minimap2 index: {}", e))?;
 
     Ok(())
@@ -275,8 +286,10 @@ pub fn align<'py>(
     } else {
         if assay[0].chemistry_strandedness.is_some() {
             assay[0].chemistry_strandedness
-        } else {
+        } else if modality == Modality::RNA {
             panic!("strandedness must be provided if not specified in the assay. Possible values are 'unstranded', 'forward', 'reverse' or 'auto'")
+        } else {
+            None
         }
     };
 
@@ -413,9 +426,7 @@ impl<A: Aligner> Iterator for AlignProgressBar<'_, A> {
 
     fn next(&mut self) -> Option<Self::Item> {
         let item = self.alignments.next();
-        let processed = self.alignments.num_processed();
-        self.pb.set_position(processed as u64);
-
+        self.pb.set_position(self.alignments.num_processed() as u64);
         item
     }
 }

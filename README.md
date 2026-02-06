@@ -120,7 +120,7 @@ print(rna_qc)
 ```python
 import precellar
 
-assay = precellar.Assay('https://raw.githubusercontent.com/regulatory-genomics/precellar/refs/heads/main/seqspec_templates/dnbelabc4_rna_v1.yaml')
+assay = precellar.Assay('https://raw.githubusercontent.com/regulatory-genomics/precellar/refs/heads/main/seqspec_templates/dnbelabc4_rna_v1_dark.yaml')
 
 data = precellar.examples.dnbelabc4_rna_v1()
 assay.update_read('R1', fastq=data['R1'])
@@ -162,6 +162,30 @@ atac_qc = precellar.align(
     num_threads=8,
 )
 print(atac_qc)
+```
+
+</details>
+
+<details>
+<summary>MGI DNBelab C4 scATAC-seq v1</summary>
+
+```python
+import precellar
+
+assay = precellar.Assay('https://raw.githubusercontent.com/regulatory-genomics/precellar/refs/heads/main/seqspec_templates/dnbelabc4_atac_v1.yaml')
+
+data = precellar.examples.dnbelabc4_atac_v1()
+assay.update_read('R1', fastq=data['R1'])
+assay.update_read('R2', fastq=data['R2'])
+
+qc = precellar.align(
+    assay,
+    precellar.aligners.BWAMEM2("/data/Public/BWA_MEM2_index/GRCh38"),
+    output='fragments.tsv.zst',
+    output_type='fragment',
+    num_threads=8,
+)
+print(qc)
 ```
 
 </details>

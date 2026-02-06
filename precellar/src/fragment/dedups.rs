@@ -19,7 +19,7 @@
 // but not at the 3' end.
 
 use anyhow::{Context, Result};
-use bincode::{Decode, Encode};
+use bitcode::{Decode, Encode};
 use itertools::Itertools;
 use noodles::sam::alignment::record::Cigar;
 use noodles::sam::alignment::record::{cigar::op::Kind, Flags};
