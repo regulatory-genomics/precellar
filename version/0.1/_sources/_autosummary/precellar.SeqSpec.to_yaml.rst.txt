@@ -1,0 +1,6 @@
+precellar.SeqSpec.to\_yaml
+==========================
+
+.. currentmodule:: precellar
+
+.. automethod:: SeqSpec.to_yaml

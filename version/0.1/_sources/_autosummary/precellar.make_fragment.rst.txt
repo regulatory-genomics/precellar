@@ -1,0 +1,6 @@
+﻿precellar.make\_fragment
+========================
+
+.. currentmodule:: precellar
+
+.. autofunction:: make_fragment

@@ -1,0 +1,6 @@
+﻿precellar.make\_genome\_index
+=============================
+
+.. currentmodule:: precellar
+
+.. autofunction:: make_genome_index
