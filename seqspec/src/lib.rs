@@ -557,11 +557,13 @@ pub enum Modality {
     Protein,
     ATAC,
     Crispr,
+    HiC
 }
 
 impl Modality {
     pub fn from_str_case_insensitive(s: &str) -> Option<Self> {
         match s.to_uppercase().as_str() {
+            "HIC" => Some(Modality::HiC),
             "RNA" => Some(Modality::RNA),
             "ATAC" => Some(Modality::ATAC),
             "PROTEIN" => Some(Modality::Protein),
@@ -598,6 +600,7 @@ impl FromStr for Modality {
             "tag" => Ok(Modality::Tag),
             "protein" => Ok(Modality::Protein),
             "atac" => Ok(Modality::ATAC),
+            "hic" => Ok(Modality::HiC),
             "crispr" => Ok(Modality::Crispr),
             _ => bail!("Invalid modality: {}", s),
         }
@@ -613,6 +616,7 @@ impl std::fmt::Display for Modality {
             Modality::Protein => "protein",
             Modality::ATAC => "atac",
             Modality::Crispr => "crispr",
+            Modality::HiC => "hic",
         };
         write!(f, "{}", s)
     }
