@@ -15,6 +15,7 @@ use seqspec::{Assay, AssayType, FastqReader, Modality, SegmentInfo};
 use smallvec::SmallVec;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 /// Unified barcode processor that handles both short-read and long-read barcode processing
 #[derive(Debug)]
@@ -247,6 +248,7 @@ pub struct AlignmentResult<'a, A> {
     num_records: usize,
     num_processed: usize,
     thread_pool: rayon::ThreadPool,
+    alignment_duration: Duration,
 }
 
 impl<'a, A: Aligner> AlignmentResult<'a, A> {
@@ -281,6 +283,7 @@ impl<'a, A: Aligner> AlignmentResult<'a, A> {
             num_records,
             num_processed: 0,
             thread_pool,
+            alignment_duration: Duration::ZERO,
         }
     }
 }
@@ -302,7 +305,9 @@ impl<'a, A: Aligner> Iterator for AlignmentResult<'a, A> {
         self.num_processed += data.len();
 
         // Align the reads.
+        let start = Instant::now();
         let results: Vec<_> = self.aligner.align_reads(self.num_threads, data, &self.thread_pool);
+        self.alignment_duration += start.elapsed();
         let mut qc = self.qc.lock().unwrap();
         results.iter().for_each(|ali| match ali {
             (Some(ali1), Some(ali2)) => {
@@ -319,6 +324,15 @@ impl<'a, A: Aligner> Iterator for AlignmentResult<'a, A> {
             }
         });
         Some(results)
+    }
+}
+
+impl<'a, A> Drop for AlignmentResult<'a, A> {
+    fn drop(&mut self) {
+        debug!(
+            "Alignment wall-clock time: {:.2}s",
+            self.alignment_duration.as_secs_f64()
+        );
     }
 }
 
@@ -371,6 +385,7 @@ struct AnnotatedFastqReader {
     barcode_processor: BarcodeProcessor,
     qc: Arc<Mutex<QcFastq>>,
     thread_pool: rayon::ThreadPool,
+    annotation_duration: Duration,
 }
 
 impl AnnotatedFastqReader {
@@ -398,6 +413,7 @@ impl AnnotatedFastqReader {
             barcode_processor,
             qc,
             thread_pool,
+            annotation_duration: Duration::ZERO,
         }
     }
 
@@ -435,11 +451,12 @@ impl Iterator for AnnotatedFastqReader {
     type Item = Vec<AnnotatedFastq>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        // Group reads of the same index from different files into a SmallVec.
+        // Group reads of the same index from different fastq files into a SmallVec.
         let chunk = self.readers.next()?;
 
         let n = chunk.len();
         let annotators = &self.annotators;
+        let start = Instant::now();
         let result: Vec<_> = self.thread_pool.install(|| {
             chunk
                 .par_chunks(n / 128)
@@ -450,7 +467,17 @@ impl Iterator for AnnotatedFastqReader {
                 })
                 .collect()
         });
+        self.annotation_duration += start.elapsed();
         Some(result)
+    }
+}
+
+impl Drop for AnnotatedFastqReader {
+    fn drop(&mut self) {
+        debug!(
+            "Barcode annotation wall-clock time: {:.2}s",
+            self.annotation_duration.as_secs_f64()
+        );
     }
 }
 
