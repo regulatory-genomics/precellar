@@ -24,3 +24,4 @@ tokio = "1.41"
 tokio-util = "0.7"
 futures = "0.3"
 async-compression = { version = "0.4", features = ["gzip", "zstd", "tokio"] }
+editdistancek = "1.0"

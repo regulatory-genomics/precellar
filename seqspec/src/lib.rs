@@ -5,7 +5,8 @@ pub mod utils;
 use indexmap::{IndexMap, IndexSet};
 use log::{info, warn};
 pub use read::{
-    FastqReader, File, Read, SegmentInfo, SegmentInfoElem, SplitError, Strand, UrlType,
+    FastqReader, File, Read, Segment, SegmentInfo, SegmentInfoElem, SplitAutoRcBothResult,
+    SplitError, SplitResult, Strand, UrlType,
 };
 pub use region::LibSpec;
 pub use region::{Onlist, Region, RegionId, RegionType, SequenceType};
@@ -29,6 +30,12 @@ pub enum ChemistryStrandedness {
     Forward,
     Reverse,
     Unstranded,
+}
+
+#[derive(Debug, Clone)]
+pub enum ReadSegmentPlan {
+    Fixed(SegmentInfo),
+    AutoRc { forward: SegmentInfo },
 }
 
 /// Assay struct contains the information parsed from the sequence spec YAML file
@@ -439,6 +446,31 @@ impl Assay {
         Some(segments)
     }
 
+    /// Get strand-aware segment plan for one read.
+    ///
+    /// - Pos/Neg: returns a single fixed SegmentInfo (already oriented by read.strand)
+    /// - Unstranded: returns AutoRc plan that will try both orientations using RC-sequence paradigm
+    pub fn get_segment_plan(&self, read_id: &str) -> Option<ReadSegmentPlan> {
+        let read = self.sequence_spec.get(read_id)?;
+        let library_parent_region = self.library_spec.get_parent(&read.primer_id)?;
+        let parent = library_parent_region.read().unwrap();
+
+        match read.strand {
+            Strand::Unstranded => {
+                // Use forward segments only - RC-sequence paradigm handles orientation detection
+                if let Some(segments) = read.get_segments(&parent, true) {
+                    Some(ReadSegmentPlan::AutoRc { forward: segments })
+                } else {
+                    None
+                }
+            }
+            Strand::Pos | Strand::Neg => {
+                let segments = read.get_segments(&parent, true)?;
+                Some(ReadSegmentPlan::Fixed(segments))
+            }
+        }
+    }
+
     /// Return the barcode-whitelist map for a given modality.
     pub fn get_whitelists(&self, modality: Modality) -> IndexMap<RegionId, IndexSet<Vec<u8>>> {
         let regions = self
@@ -484,15 +516,29 @@ impl Assay {
             .get_parent(&read.primer_id)
             .ok_or_else(|| anyhow!("Primer not found: {}", read.primer_id))?;
         // Check if the primer exists
-        if let Some(segment_info) = read.get_segments(&region.read().unwrap(), true) {
+        if let Some(fwd_info) = read.get_segments(&region.read().unwrap(), true) {
             if let Some(mut reader) = read.open() {
                 let mut onlists = HashMap::new();
                 let mut total_reads = 0;
                 let mut invalid = 0;
                 reader.records().take(sample_size).try_for_each(|record| {
                     total_reads += 1;
-                    if let Ok(segments) = segment_info.split_with_tolerance(&record?, 0.2, 0.2) {
-                        segments.iter().for_each(|segment| {
+                    let record = record?;
+
+                    let split_result = match read.strand {
+                        Strand::Unstranded => {
+                            SegmentInfo::split_auto_rc(&fwd_info, &record, 0.2, 0.2, 0.0)
+                        }
+                        Strand::Pos => fwd_info.split_with_tolerance(&record, 0.2, 0.2, 0.0),
+                        Strand::Neg => {
+                            // For Neg strand, we still use forward layout but mark as reverse
+                            // In practice, Neg strand reads should be handled at the assay level
+                            fwd_info.split_with_tolerance(&record, 0.2, 0.2, 0.0)
+                        }
+                    };
+
+                    if let Ok(split_res) = split_result {
+                        split_res.segments.iter().for_each(|segment| {
                             if segment.is_barcode() {
                                 let id = segment.region_id();
                                 if let Some((onlist, n_matched)) =
@@ -504,7 +550,7 @@ impl Assay {
                                         ))
                                     })
                                 {
-                                    let seq_in_onlist = if segment_info.is_reverse() {
+                                    let seq_in_onlist = if split_res.is_reverse {
                                         onlist.contains(&rev_compl(segment.seq))
                                     } else {
                                         onlist.contains(segment.seq)

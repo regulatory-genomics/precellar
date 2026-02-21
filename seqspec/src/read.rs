@@ -1,7 +1,7 @@
 mod segment;
 use crate::region::Region;
 use crate::Modality;
-pub use segment::{Segment, SegmentInfo, SegmentInfoElem, SplitError};
+pub use segment::{Segment, SegmentInfo, SegmentInfoElem, SplitAutoRcBothResult, SplitError, SplitResult};
 
 use anyhow::{bail, Result};
 use file_download::download::Downloader;
@@ -175,32 +175,70 @@ impl Read {
     pub fn is_reverse(&self) -> bool {
         match self.strand {
             Strand::Neg => true,
-            Strand::Pos => false,
+            Strand::Pos | Strand::Unstranded => false,
         }
     }
 
     pub(crate) fn get_segments<'a>(&'a self, region: &'a Region, truncate_by_length: bool) -> Option<SegmentInfo> {
+        self.get_segments_oriented(region, truncate_by_length, self.is_reverse())
+    }
+
+    pub(crate) fn get_both_segments<'a>(
+        &'a self,
+        region: &'a Region,
+        truncate_by_length: bool,
+    ) -> Option<(SegmentInfo, SegmentInfo)> {
+        let fwd = self.get_segments_oriented(region, truncate_by_length, false)?;
+        let rev = self.get_segments_oriented(region, truncate_by_length, true)?;
+        Some((fwd, rev))
+    }
+
+    fn get_segments_oriented<'a>(
+        &'a self,
+        region: &'a Region,
+        truncate_by_length: bool,
+        is_reverse: bool,
+    ) -> Option<SegmentInfo> {
         if !region.sequence_type.is_joined() {
             return None;
         }
 
-        let subregions = region.subregions.iter();
-        let subregions: Box<dyn Iterator<Item = _>> = if self.is_reverse() {
-            Box::new(subregions.rev())
+        // Find the primer anchor in forward library order.
+        // Payload is defined as regions after primer.
+        let primer_index = region.subregions.iter().position(|subregion| {
+            let r = subregion.read().unwrap();
+            r.region_type.is_sequencing_primer() && r.region_id == self.primer_id
+        })?;
+
+        // Important for unstranded/reverse layouts:
+        // apply max_len truncation in forward library order first, then reverse.
+        // If we truncate on already-reversed order, a leading variable genomic block
+        // can swallow the budget and drop downstream barcode/linker segments.
+        if is_reverse && truncate_by_length {
+            let fwd_payload = region
+                .subregions
+                .iter()
+                .skip(primer_index + 1)
+                .map(|x| x.read().unwrap().deref().clone());
+            let fwd_truncated = SegmentInfo::new(fwd_payload, false).truncate_max(self.max_len as usize);
+            let mut rev_elems: Vec<SegmentInfoElem> = fwd_truncated.into_iter().collect();
+            rev_elems.reverse();
+            let segment_info = SegmentInfo::new(rev_elems, true);
+            return if segment_info.len() > 0 {
+                Some(segment_info)
+            } else {
+                None
+            };
+        }
+
+        let payload = region.subregions.iter().skip(primer_index + 1);
+        let segment_iter: Box<dyn Iterator<Item = Region>> = if is_reverse {
+            Box::new(payload.rev().map(|x| x.read().unwrap().deref().clone()))
         } else {
-            Box::new(subregions)
+            Box::new(payload.map(|x| x.read().unwrap().deref().clone()))
         };
 
-        let segment_info = subregions
-            .skip_while(|region| {
-                let region = region.read().unwrap();
-                let found =
-                    region.region_type.is_sequencing_primer() && region.region_id == self.primer_id;
-                !found
-            }) // Skip until we find the primer region
-            .skip(1)
-            .map(|x| x.read().unwrap().deref().clone());
-        let mut segment_info = SegmentInfo::new(segment_info, self.is_reverse());
+        let mut segment_info = SegmentInfo::new(segment_iter, is_reverse);
         if truncate_by_length {
             segment_info = segment_info.truncate_max(self.max_len as usize);
         }
@@ -217,6 +255,7 @@ impl Read {
 pub enum Strand {
     Pos,
     Neg,
+    Unstranded,
 }
 
 #[derive(Deserialize, Serialize, Debug, Clone, PartialEq)]
