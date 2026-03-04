@@ -1,203 +1,237 @@
 use anyhow::Result;
-use log::debug;
 use std::sync::{Arc, RwLock};
 use bio::alignment::pairwise::{Aligner, Scoring, MIN_SCORE};
 use bio::alignment::AlignmentOperation;
 
 use seqspec::region::Region;
 
-/// Alignment result for a fixed sequence region with anchor pos
+/// A composite alignment pattern built from regions between outermost fixed region and innermost one.
 #[derive(Debug, Clone)]
-pub struct FixedSequenceAlignment {
-    /// Region that was aligned
+pub struct CompositePattern {
+    /// The concatenated pattern bytes (fixed sequences + N-spacers)
+    pub pattern: Vec<u8>,
+    /// Region spans ordered by position in the pattern
+    pub spans: Vec<CompositeRegionSpan>,
+    /// Lookup: pattern position -> span index (precomputed, same length as pattern)
+    pub pos_to_span: Vec<usize>,
+}
+
+impl CompositePattern {
+    /// Total length of fixed (non-spacer) sequences in the pattern.
+    pub fn total_fixed_len(&self) -> usize {
+        self.spans.iter()
+            .filter(|s| !s.is_spacer)
+            .map(|s| s.pattern_end - s.pattern_start)
+            .sum()
+    }
+}
+
+/// Describes one region's span within the CompositePattern.
+#[derive(Debug, Clone)]
+pub struct CompositeRegionSpan {
+    /// The region this span corresponds to
     pub region: Arc<RwLock<Region>>,
-    /// Start position in the trimmed end sequence
-    pub query_start: usize,
-    /// End position in the trimmed end sequence
-    pub query_end: usize,
-    /// Match rate (matches / alignment_length)
-    pub score: f64,
-    /// Number of matches
-    pub matches: usize,
-    /// Total alignment length
-    pub alignment_length: usize,
-    /// Position in EndRegions (1-based, outermost is 1). None if not yet assigned.
-    pub position: Option<usize>,
+    /// Start offset in the composite pattern (0-based, inclusive)
+    pub pattern_start: usize,
+    /// End offset in the composite pattern (0-based, exclusive)
+    pub pattern_end: usize,
+    /// Whether this region used N-spacers (non-fixed) or actual sequence (fixed)
+    pub is_spacer: bool,
 }
 
-
-/// Sequence aligner for finding fixed regions in trimmed EndRegions from long reads
-/// Uses rust-bio's pairwise aligner with fitting alignment mode
-pub struct FittingAligner {
-    /// Minimum match score threshold
-    min_score: f64,
-    /// Scoring configuration for fitting alignment
-    scoring: Scoring<fn(u8, u8) -> i32>,
+/// Result of a composite fitting alignment, with per-region mapping.
+#[derive(Debug, Clone)]
+pub struct CompositeAlignmentResult {
+    /// Raw alignment score from rust-bio
+    pub score: i32,
+    /// Per-region boundaries in the read.
+    pub region_mappings: Vec<RegionMapping>,
 }
 
-// Define a match function for scoring initialization
-fn match_func(a: u8, b: u8) -> i32 {
-    if a == b { 2i32 } else { -1i32 }
+/// Per-region mapping result from a composite alignment.
+#[derive(Debug, Clone)]
+pub struct RegionMapping {
+    /// The region this mapping corresponds to
+    pub region: Arc<RwLock<Region>>,
+    /// Start position in the read (inclusive)
+    pub read_start: usize,
+    /// End position in the read (exclusive)
+    pub read_end: usize,
+    /// Whether this region's pattern segment was a spacer (N's)
+    pub is_spacer: bool,
+    /// Match rate (matches / alignment_length) for this region segment
+    pub match_rate: f64,
 }
+
+/// Match function for composite alignment.
+/// N in the pattern (spacer) matches any base with score +1.
+/// Otherwise, standard match (+2) / mismatch (-1).
+fn composite_match_func(a: u8, b: u8) -> i32 {
+    if a == b'N' {
+        1 // Spacer position: any base scores +1
+    } else if a == b {
+        2 // Fixed position match
+    } else {
+        -1 // Fixed position mismatch
+    }
+}
+
+/// Sequence aligner for composite fitting alignment of long reads.
+/// Aligns a composite pattern (fixed sequences + N-spacers) against a read segment.
+pub struct FittingAligner;
 
 impl FittingAligner {
-    /// Create a new sequence aligner with fitting alignment configuration
-    pub fn new() -> Result<Self> {
-        // Configure scoring for fitting alignment:
-        // match = +2, mismatch = -1, gap_penalty = -1
-        // For fitting alignment: 
-        // - xclip_prefix = MIN_SCORE (no gaps allowed at start of pattern)
-        // - yclip_prefix = 0 (gaps allowed at start of text, no penalty)
-        // - xclip_suffix = MIN_SCORE (no gaps allowed at end of pattern)  
-        // - yclip_suffix = 0 (gaps allowed at end of text, no penalty)
+    /// Perform a single composite fitting alignment of the pattern against the read segment.
+    /// Returns a CompositeAlignmentResult with per-region read boundaries.
+    pub fn align_composite(
+        end_sequence: &[u8],
+        composite: &CompositePattern,
+    ) -> Result<CompositeAlignmentResult> {
+        if composite.pattern.is_empty() {
+            return Ok(CompositeAlignmentResult {
+                score: 0,
+                region_mappings: Vec::new(),
+            });
+        }
+
+        // Build scoring with composite match function.
+        // match_scores must be None so rust-bio uses match_fn instead of SIMD fast path.
         let scoring = Scoring {
-            gap_open: -1,
+            gap_open: -1, // same as gap_extend due to indels in long_read sequencing
             gap_extend: -1,
-            match_fn: match_func as fn(u8, u8) -> i32,
-            match_scores: Some((2, -1)), // (match, mismatch)
-            xclip_prefix: MIN_SCORE,  // No gaps allowed at start of pattern
-            xclip_suffix: MIN_SCORE,  // No gaps allowed at end of pattern
-            yclip_prefix: 0,          // Allow gaps at start of text, no penalty
-            yclip_suffix: 0,          // Allow gaps at end of text, no penalty
+            match_fn: composite_match_func as fn(u8, u8) -> i32,
+            match_scores: None,
+            xclip_prefix: MIN_SCORE, // Must align entire pattern (no prefix clip)
+            xclip_suffix: MIN_SCORE, // Must align entire pattern (no suffix clip)
+            yclip_prefix: 0,         // Free read clipping at start (fitting)
+            yclip_suffix: 0,         // Free read clipping at end (fitting)
         };
-        
-        Ok(Self {
-            min_score: 0.7,
+
+        // Avoid unnecessary memory allocations with expeced size hints.
+        let mut aligner = Aligner::with_capacity_and_scoring(
+            composite.pattern.len(),
+            end_sequence.len(),
             scoring,
+        );
+
+        let alignment = aligner.custom(&composite.pattern, end_sequence);
+
+        // Extract per-region mappings by walking the alignment operations
+        let region_mappings = Self::extract_region_mappings(&alignment, composite);
+
+        Ok(CompositeAlignmentResult {
+            score: alignment.score,
+            region_mappings,
         })
     }
 
-    /// Align fixed sequences to find their positions in the end sequence using fitting alignment
-    pub fn align_fixed_sequences(
-        &mut self,
-        end_sequence: &[u8],
-        fixed_regions: &[Arc<RwLock<Region>>],
-    ) -> Result<Vec<FixedSequenceAlignment>> {
-        let mut results = Vec::new();
+    /// Walk alignment operations to extract per-region read boundaries.
+    ///
+    /// In Custom mode, operations start from (x=0, y=0) with Yclip/Xclip as
+    /// explicit operations in the list.
+    fn extract_region_mappings(
+        alignment: &bio::alignment::Alignment,
+        composite: &CompositePattern,
+    ) -> Vec<RegionMapping> {
+        if composite.spans.is_empty() {
+            return Vec::new();
+        }
 
-        for fixed_region in fixed_regions {
-            let fixed_sequence = {
-                let region_guard = fixed_region.read().unwrap();
-                let seq = region_guard.sequence.as_bytes().to_vec();
-                
-                // // Skip if fixed sequence is too short
-                // if seq.len() < 15 {
-                //     continue;
-                // }
-                seq
-            };
+        let num_spans = composite.spans.len();
+        let mut span_read_start: Vec<Option<usize>> = vec![None; num_spans];
+        let mut span_read_end: Vec<usize> = vec![0; num_spans];
+        let mut span_matches: Vec<usize> = vec![0; num_spans];
+        let mut span_total: Vec<usize> = vec![0; num_spans];
 
-            let mut aligner = Aligner::with_capacity_and_scoring(
-                fixed_sequence.len(), 
-                end_sequence.len(), 
-                self.scoring
-            );
-            
-            // Customize with fitting alignment parameters
-            let alignment = aligner.custom(&fixed_sequence, end_sequence);
-            
-            // Calculate number of matches and alignment length
-            let (matches, alignment_length) = self.calculate_alignment_stats(&alignment);
+        // In Custom mode, operations start from (0, 0)
+        let mut x_pos: usize = 0;
+        let mut y_pos: usize = 0;
 
-            // println!("Alignment score from rust-bio: {}", alignment.score);
-
-            let score = if alignment_length > 0 {
-                matches as f64 / alignment_length as f64
-            } else {
-                0.0
-            };
-
-            if score >= self.min_score {
-
-                // ystart and yend are the start and end positions in the end sequence
-                let (query_start, query_end) = (alignment.ystart, alignment.yend);
-                
-                results.push(FixedSequenceAlignment {
-                    region: fixed_region.clone(),
-                    query_start,
-                    query_end,
-                    score,
-                    matches,
-                    alignment_length,
-                    position: None,
-                });
-            } else {
-                // Debug log for low-quality alignment (warning will be emitted at higher level if both orientations fail)
-                let region_guard = fixed_region.read().unwrap();
-                debug!(
-                    "Fixed region '{}' (sequence: '{}') alignment score ({:.3}) below threshold ({:.3}), skipping",
-                    region_guard.region_id, region_guard.sequence, score, self.min_score
-                );
+        for op in &alignment.operations {
+            match op {
+                AlignmentOperation::Match | AlignmentOperation::Subst => {
+                    if x_pos < composite.pattern.len() {
+                        let span_idx = composite.pos_to_span[x_pos];
+                        if span_read_start[span_idx].is_none() {
+                            span_read_start[span_idx] = Some(y_pos);
+                        }
+                        span_read_end[span_idx] = y_pos + 1;
+                        span_total[span_idx] += 1;
+                        if matches!(op, AlignmentOperation::Match) {
+                            span_matches[span_idx] += 1;
+                        }
+                    }
+                    x_pos += 1;
+                    y_pos += 1;
+                }
+                AlignmentOperation::Ins => {
+                    // Gap in read (y): consumes 1 from pattern, 0 from read
+                    if x_pos < composite.pattern.len() {
+                        let span_idx = composite.pos_to_span[x_pos];
+                        if span_read_start[span_idx].is_none() {
+                            span_read_start[span_idx] = Some(y_pos);
+                        }
+                        // Keep span_read_end at least y_pos so fully-deleted spans
+                        // get a zero-width region at the correct read position
+                        span_read_end[span_idx] = span_read_end[span_idx].max(y_pos);
+                        span_total[span_idx] += 1;
+                    }
+                    x_pos += 1;
+                }
+                AlignmentOperation::Del => {
+                    // Gap in pattern (x): consumes 0 from pattern, 1 from read
+                    if x_pos < composite.pattern.len() {
+                        let span_idx = composite.pos_to_span[x_pos];
+                        if span_read_start[span_idx].is_none() {
+                            span_read_start[span_idx] = Some(y_pos);
+                        }
+                        span_read_end[span_idx] = y_pos + 1;
+                        span_total[span_idx] += 1;
+                    } else if num_spans > 0 {
+                        // Deletion past end of pattern: attribute to last span
+                        let span_idx = num_spans - 1;
+                        span_read_end[span_idx] = y_pos + 1;
+                        span_total[span_idx] += 1;
+                    }
+                    y_pos += 1;
+                }
+                AlignmentOperation::Yclip(len) => {
+                    y_pos += len;
+                }
+                AlignmentOperation::Xclip(len) => {
+                    x_pos += len;
+                }
             }
         }
 
-        Ok(results)
-    }
+        // Build RegionMapping for each span
+        composite
+            .spans
+            .iter()
+            .enumerate()
+            .map(|(idx, span)| {
+                let read_start = span_read_start[idx].unwrap_or(0);
+                let read_end = span_read_end[idx];
+                let match_rate = if span_total[idx] > 0 {
+                    span_matches[idx] as f64 / span_total[idx] as f64
+                } else {
+                    0.0
+                };
 
-    /// Calculate alignment statistics from bio::alignment operations
-    fn calculate_alignment_stats(&self, alignment: &bio::alignment::Alignment) -> (usize, usize) {
-        let mut matches = 0;
-        let mut total_length = 0;
-        
-        for operation in &alignment.operations {
-            match operation {
-                AlignmentOperation::Match => {
-                    matches += 1;
-                    total_length += 1;
+                RegionMapping {
+                    region: span.region.clone(),
+                    read_start,
+                    read_end,
+                    is_spacer: span.is_spacer,
+                    match_rate,
                 }
-                AlignmentOperation::Subst => {
-                    total_length += 1;
-                }
-                AlignmentOperation::Del | AlignmentOperation::Ins => {
-                    total_length += 1;
-                }
-                _ => {}
-            }
-        }
-        
-        (matches, total_length)
+            })
+            .collect()
     }
-
-}
-
-/// Selects the best non-overlapping alignments using a greedy algorithm.
-///
-/// Sorts all candidates by score in descending order, then iteratively picks the
-/// next best-scoring alignment that does not conflict with those already selected.
-/// The final result is sorted by the alignment start position.
-pub fn find_non_overlapping_alignments(
-    alignments: Vec<FixedSequenceAlignment>
-) -> Vec<FixedSequenceAlignment> {
-    if alignments.is_empty() {
-        return Vec::new();
-    }
-
-    let mut sorted_alignments = alignments;
-    // Sort by score (descending)
-    sorted_alignments.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
-
-    let mut selected = Vec::new();
-    
-    for alignment in sorted_alignments {
-        // Check if this alignment overlaps with any already selected
-        let overlaps = selected.iter().any(|selected_aln: &FixedSequenceAlignment| {
-            !(alignment.query_end <= selected_aln.query_start || 
-              alignment.query_start >= selected_aln.query_end)
-        });
-        
-        // Greedy algorithm: save high score fixed alignments and discard lower overlapping ones
-        if !overlaps {
-            selected.push(alignment);
-        }
-    }
-    
-    // Sort selected alignments by position
-    selected.sort_by_key(|a| a.query_start);
-    
-    selected
 }
 
 /// Calculate fitting alignment distance between short sequence and long sequence
+/// Used for comparing a barcode candidate against a whitelist entry.
 pub fn fitting_alignment_distance(short_seq: &[u8], long_seq: &[u8]) -> usize {
     let m = short_seq.len();
     let n = long_seq.len();
@@ -239,125 +273,131 @@ mod tests {
     use super::*;
     use seqspec::{RegionType, SequenceType};
 
-    // Create test fixed sequence region
-    fn create_test_region(
-        id: &str,
-        sequence: &str,
-        min_len: u32,
-        max_len: u32,
-    ) -> Arc<RwLock<Region>> {
+    fn create_fixed_region(id: &str, sequence: &str) -> Arc<RwLock<Region>> {
+        let len = sequence.len() as u32;
         Arc::new(RwLock::new(Region {
             region_id: id.to_string(),
             region_type: RegionType::Linker,
             name: id.to_string(),
             sequence_type: SequenceType::Fixed,
             sequence: sequence.to_string(),
-            min_len,
-            max_len,
+            min_len: len,
+            max_len: len,
             onlist: None,
             subregions: vec![],
         }))
     }
 
-    #[test]
-    fn test_find_non_overlapping_alignments() {
-        let region1 = create_test_region("r1", "ATCG", 4, 4);
-        let region2 = create_test_region("r2", "GCTA", 4, 4);
-        let region3 = create_test_region("r3", "TTTT", 4, 4);
+    fn create_barcode_region(id: &str, len: u32) -> Arc<RwLock<Region>> {
+        Arc::new(RwLock::new(Region {
+            region_id: id.to_string(),
+            region_type: RegionType::Barcode,
+            name: id.to_string(),
+            sequence_type: SequenceType::Onlist,
+            sequence: "N".repeat(len as usize),
+            min_len: len,
+            max_len: len,
+            onlist: None,
+            subregions: vec![],
+        }))
+    }
 
-        let alignments = vec![
-            FixedSequenceAlignment {
-                region: region1,
-                query_start: 10,
-                query_end: 14,
-                score: 0.9,
-                matches: 4,
-                alignment_length: 4,
-                position: None,
+    fn create_test_composite() -> CompositePattern {
+        // Pattern: ACGTACGTACGTACGT (16bp fixed) + NNNNNNNNNN (10bp spacer) + TGCATGCATGCATGCA (16bp fixed)
+        let pattern = b"ACGTACGTACGTACGTNNNNNNNNNNTGCATGCATGCATGCA".to_vec();
+        let spans = vec![
+            CompositeRegionSpan {
+                region: create_fixed_region("r1", "ACGTACGTACGTACGT"),
+                pattern_start: 0,
+                pattern_end: 16,
+                is_spacer: false,
             },
-            FixedSequenceAlignment {
-                region: region2,
-                query_start: 12, // Overlaps with first
-                query_end: 16,
-                score: 0.8,
-                matches: 4,
-                alignment_length: 4,
-                position: None,
+            CompositeRegionSpan {
+                region: create_barcode_region("bc1", 10),
+                pattern_start: 16,
+                pattern_end: 26,
+                is_spacer: true,
             },
-            FixedSequenceAlignment {
-                region: region3,
-                query_start: 20, // No overlap
-                query_end: 24,
-                score: 0.7,
-                matches: 4,
-                alignment_length: 4,
-                position: None,
+            CompositeRegionSpan {
+                region: create_fixed_region("r2", "TGCATGCATGCATGCA"),
+                pattern_start: 26,
+                pattern_end: 42,
+                is_spacer: false,
             },
         ];
-
-        let non_overlapping = find_non_overlapping_alignments(alignments);
-        
-        // Should select the first (highest score) and third (no overlap)
-        assert_eq!(non_overlapping.len(), 2);
-        assert_eq!(non_overlapping[0].query_start, 10);
-        assert_eq!(non_overlapping[1].query_start, 20);
+        let mut pos_to_span = vec![0usize; pattern.len()];
+        for (idx, span) in spans.iter().enumerate() {
+            for p in span.pattern_start..span.pattern_end {
+                pos_to_span[p] = idx;
+            }
+        }
+        CompositePattern { pattern, spans, pos_to_span }
     }
 
     #[test]
-    fn test_fitting_alignment_basic() {
-        // Test the specific example: short sequence v="AT", long sequence w="GCATG"
-        // Scoring: match = +2, mismatch = -1, gap_penalty = -1
-        // This test verifies that fitting alignment works correctly
-        let mut aligner = FittingAligner::new().unwrap();
-        let long_seq = b"GCATG";  // text to search in
-        
-        // Create a test fixed sequence region
-        let region = create_test_region("test", "AT", 2, 2);
-        let fixed_regions = vec![region];
-        
-        let alignments = aligner.align_fixed_sequences(long_seq, &fixed_regions).unwrap();
-        
-        
-        // Should find the "AT" at position 2-4 in "GCATG"
-        assert!(!alignments.is_empty(), "Should find at least one alignment");
-        let best_alignment = &alignments[0];
-        
-        // The "AT" should be found at positions 2-4 in "GCATG"
-        assert_eq!(best_alignment.query_start, 2);
-        assert_eq!(best_alignment.query_end, 4);
-        assert_eq!(best_alignment.matches, 2);  // Both A and T match
-        assert_eq!(best_alignment.alignment_length, 2);
-        assert_eq!(best_alignment.score, 1.0);  // Perfect match
+    fn test_composite_alignment_perfect_match() {
+        let composite = create_test_composite();
+
+        let read = b"ACGTACGTACGTACGTAAAAAAAAAATGCATGCATGCATGCA";
+        let result = FittingAligner::align_composite(read, &composite).unwrap();
+
+        assert_eq!(result.region_mappings.len(), 3);
+        // Fixed region 1
+        assert_eq!(result.region_mappings[0].read_start, 0);
+        assert_eq!(result.region_mappings[0].read_end, 16);
+        assert!((result.region_mappings[0].match_rate - 1.0).abs() < 0.01);
+        // Barcode spacer
+        assert_eq!(result.region_mappings[1].read_start, 16);
+        assert_eq!(result.region_mappings[1].read_end, 26);
+        // Fixed region 2
+        assert_eq!(result.region_mappings[2].read_start, 26);
+        assert_eq!(result.region_mappings[2].read_end, 42);
+        assert!((result.region_mappings[2].match_rate - 1.0).abs() < 0.01);
     }
-    
+
     #[test]
-    fn test_fitting_alignment_properties() {
-        // This test verifies the key properties of fitting alignment:
-        // 1. First row initialization to 0 (no penalty for gaps at start of long sequence)
-        // 2. Finding maximum in last row (no penalty for gaps at end of long sequence)
-        
-        let mut aligner = FittingAligner::new().unwrap();
-        
-        // Test case where the pattern appears at the very beginning
-        let text_start = b"GCATTTTT";
-        let region_start = create_test_region("start", "GC", 2, 2);
-        let alignments_start = aligner.align_fixed_sequences(text_start, &vec![region_start]).unwrap();
-        
-        assert!(!alignments_start.is_empty());
-        assert_eq!(alignments_start[0].query_start, 0);  // Found at start
-        assert_eq!(alignments_start[0].query_end, 2);
-        
-        // Test case where the pattern appears at the very end
-        let text_end = b"GGGGGGTT";
-        let region_end = create_test_region("end", "TT", 2, 2);
-        let alignments_end = aligner.align_fixed_sequences(text_end, &vec![region_end]).unwrap();
-        
-        assert!(!alignments_end.is_empty());
-        assert_eq!(alignments_end[0].query_start, 6);  // Found at end
-        assert_eq!(alignments_end[0].query_end, 8);
-        
-        // Both should have perfect scores since they're exact matches
-        assert_eq!(alignments_start[0].score, 1.0);
-        assert_eq!(alignments_end[0].score, 1.0);
+    fn test_composite_alignment_fitting_in_longer_read() {
+        // Composite pattern should fit within a longer read (Yclip at both ends)
+        let composite = create_test_composite();
+
+        // Read with flanking sequences
+        let read = b"GGGGGACGTACGTACGTACGTCCCCCCCCCCGTGCATGCATGCATGCATTTTT";
+        let result = FittingAligner::align_composite(read, &composite).unwrap();
+
+        assert_eq!(result.region_mappings.len(), 3);
+        // Fixed region 1 should be found after the flanking G's
+        assert_eq!(result.region_mappings[0].read_start, 5);
+        assert_eq!(result.region_mappings[0].read_end, 21);
+        // Fixed region 2 should end before the trailing T's
+        assert_eq!(result.region_mappings[2].read_end, 48);
+        // Both fixed regions should have high match rates
+        assert!(result.region_mappings[0].match_rate >= 0.9);
+        assert!(result.region_mappings[2].match_rate >= 0.9);
+    }
+
+    #[test]
+    fn test_composite_alignment_with_indels() {
+        // Test with 1 mismatch in fixed region
+        let composite = create_test_composite();
+
+        // 1 mismatch in fixed1 (T->G at end), perfect barcode + 2 del in fixed2
+        let read = b"ACGTACGTACGTACGGAAAAAAAAAATGCATGCATCATCAGGGG";
+        let result = FittingAligner::align_composite(read, &composite).unwrap();
+
+        assert_eq!(result.region_mappings.len(), 3);
+        assert_eq!(result.region_mappings[0].read_start, 0);
+        assert_eq!(result.region_mappings[0].read_end, 16);
+        // Match rate should be 15/16 = 0.9375
+        assert!(
+            (result.region_mappings[0].match_rate - 15.0 / 16.0).abs() < 0.01,
+            "Expected ~0.9375, got {}",
+            result.region_mappings[0].match_rate
+        );
+        // Barcode region
+        assert_eq!(result.region_mappings[1].read_start, 16);
+        assert_eq!(result.region_mappings[1].read_end, 26);
+
+        assert_eq!(result.region_mappings[2].read_start, 26);
+        assert_eq!(result.region_mappings[2].read_end, 40);
     }
 }

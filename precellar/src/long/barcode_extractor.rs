@@ -1,6 +1,5 @@
 use anyhow::Result;
 use indexmap::{IndexMap, IndexSet};
-use log::warn;
 use std::sync::{Arc, RwLock};
 
 use seqspec::region::{LibSpec, Region};
@@ -8,7 +7,7 @@ use seqspec::Modality;
 
 use super::{
     find_innermost_regions, EndRegions,
-    sequence_aligner::{FittingAligner, FixedSequenceAlignment, find_non_overlapping_alignments},
+    sequence_aligner::{CompositeAlignmentResult, CompositePattern, FittingAligner},
     barcode_index::BarcodeIndex,
 };
 
@@ -21,8 +20,6 @@ pub struct LongReadBarcodeResult {
     pub confidence: f64,
     /// Whether the end segments were reverse-complemented during extraction
     pub is_reverse_complemented: bool,
-    /// Whether some anchors were not detected in both orientations (for QC tracking)
-    pub has_missing_anchors: bool,
 }
 
 impl LongReadBarcodeResult {
@@ -40,65 +37,74 @@ pub struct ExtractedBarcode {
     pub confidence: f64,   // confidence = 1.0 - (min_edit_distance / barcode_length)
 }
 
-/// Evidence for read orientation determination, including found anchors for reuse
+/// Evidence for read orientation determination using composite alignment
 #[derive(Debug, Clone)]
 pub struct OrientationEvidence {
-    /// Number of anchors found
-    pub num_anchors: usize,
-    /// Whether anchors are in valid order (outside-to-inside)
-    pub valid_order: bool,
-    /// Average confidence of anchor alignments
-    pub avg_confidence: f64,
+    /// Total composite alignment score (sum of 5' and 3' scores)
+    pub total_score: i32,
+    /// Average match rate of fixed regions
+    pub avg_fixed_match_rate: f64,
+    /// Number of fixed regions with match rate >= threshold
+    pub num_good_fixed_regions: usize,
+    /// Total number of fixed regions expected
+    pub total_fixed_regions: usize,
 }
 
 impl OrientationEvidence {
     /// Check if evidence meets conservative thresholds for accepting orientation
-    /// Conservative thresholds: ≥2 anchors, valid order, ≥0.8 confidence
+    /// Conservative thresholds: ≥2 anchors, ≥0.8 confidence
     pub fn meets_threshold(&self) -> bool {
-        self.num_anchors >= 2 && self.valid_order && self.avg_confidence >= 0.8
+        self.num_good_fixed_regions >= 2 && self.avg_fixed_match_rate >= 0.8
     }
 
-    /// Create from anchor list (FixedSequenceAlignment with position set)
-    pub fn from_anchors(anchors: &[FixedSequenceAlignment], valid_order: bool) -> Self {
-        let num_anchors = anchors.len();
-        let avg_confidence = if num_anchors > 0 {
-            anchors.iter().map(|a| a.score).sum::<f64>() / num_anchors as f64
-        } else {
+    /// Build from composite alignment results of both ends
+    pub fn from_composite(
+        five_prime: &Option<CompositeAlignmentResult>,
+        three_prime: &Option<CompositeAlignmentResult>,
+    ) -> Self {
+        let mut total_score = 0i32;
+        let mut fixed_rates = Vec::new();
+
+        for result in [five_prime, three_prime].into_iter().flatten() {
+            total_score += result.score;
+            for mapping in &result.region_mappings {
+                if !mapping.is_spacer {
+                    fixed_rates.push(mapping.match_rate);
+                }
+            }
+        }
+
+        let num_good = fixed_rates.iter().filter(|&&r| r >= 0.8).count();
+        let avg_rate = if fixed_rates.is_empty() {
             0.0
+        } else {
+            fixed_rates.iter().sum::<f64>() / fixed_rates.len() as f64
         };
 
-        Self {
-            num_anchors,
-            valid_order,
-            avg_confidence,
+        OrientationEvidence {
+            total_score,
+            avg_fixed_match_rate: avg_rate,
+            num_good_fixed_regions: num_good,
+            total_fixed_regions: fixed_rates.len(),
         }
     }
 }
 
-/// End segment with precomputed anchors for reuse
+/// End segment with precomputed composite alignment for reuse during orientation detection.
 #[derive(Debug)]
-struct EndSegmentWithAnchors {
+struct EndSegmentWithAlignment {
     /// The cut segment sequence (empty if sequence was too short)
     sequence: Vec<u8>,
-    /// The cut segment quality scores
-    quality: Vec<u8>,
-    /// Precomputed anchors from orientation detection (FixedSequenceAlignment with position set)
-    anchors: Vec<FixedSequenceAlignment>,
-    /// Whether anchors are in valid order
-    valid_order: bool,
-    /// Number of expected fixed regions (for tracking alignment failures)
-    expected_fixed_count: usize,
+    /// Precomputed composite alignment result
+    composite_result: Option<CompositeAlignmentResult>,
 }
 
-impl EndSegmentWithAnchors {
+impl EndSegmentWithAlignment {
     /// Create an empty segment (used when source sequence is too short)
     fn empty() -> Self {
         Self {
             sequence: Vec::new(),
-            quality: Vec::new(),
-            anchors: Vec::new(),
-            valid_order: false,
-            expected_fixed_count: 0,
+            composite_result: None,
         }
     }
 
@@ -106,95 +112,7 @@ impl EndSegmentWithAnchors {
     fn is_empty(&self) -> bool {
         self.sequence.is_empty()
     }
-
-    /// Check if all expected fixed regions were found
-    fn all_fixed_found(&self) -> bool {
-        self.anchors.len() >= self.expected_fixed_count
-    }
 }
-
-/// Find and validate fixed sequence alignments
-pub struct AnchorFinder {
-    aligner: FittingAligner,
-}
-
-impl AnchorFinder {
-    /// Create a new anchor finder
-    pub fn new() -> Result<Self> {
-        Ok(Self {
-            aligner: FittingAligner::new()?,
-        })
-    }
-
-    /// Find anchor positions using fixed sequence alignment.
-    /// Returns FixedSequenceAlignment with position field set.
-    pub fn find_anchors(
-        &mut self,
-        sequence: &[u8],
-        fixed_regions: &[Arc<RwLock<Region>>],
-        end_regions: &EndRegions,
-    ) -> Result<Vec<FixedSequenceAlignment>> {
-        if fixed_regions.is_empty() {
-            return Ok(Vec::new());
-        }
-
-        let alignments = self.aligner.align_fixed_sequences(sequence, fixed_regions)?;
-        // Greedy algorithm: save high score fixed alignments and discard lower overlapping ones
-        let non_overlapping = find_non_overlapping_alignments(alignments);
-
-        // Build position map from EndRegions
-        let position_map = end_regions.build_position_map();
-
-        // Set position on each alignment
-        let mut anchors = Vec::new();
-        for mut alignment in non_overlapping {
-            let region_guard = alignment.region.read().unwrap();
-            if let Some(&position) = position_map.get(&region_guard.region_id) {
-                drop(region_guard);
-                alignment.position = Some(position);
-                anchors.push(alignment);
-            }
-        }
-
-        Ok(anchors)
-    }
-
-    /// Validate that fixed region alignments are in correct order (outside to inside)
-    pub fn validate_order(
-        &self,
-        anchors: &[FixedSequenceAlignment],
-    ) -> Result<bool> {
-        if anchors.len() <= 1 {
-            return Ok(true); // Single or no alignment is always valid
-        }
-
-        // Sort anchors by their position (outside to inside)
-        let mut sorted_anchors = anchors.to_vec();
-        sorted_anchors.sort_by_key(|anchor| anchor.position);
-
-        // Check that alignments are in correct positional order
-        for i in 0..sorted_anchors.len() - 1 {
-            let current = &sorted_anchors[i];
-            let next = &sorted_anchors[i + 1];
-
-            // For outside-to-inside order, the end position of outer region
-            // should be less than or equal to start position of inner region
-            if current.query_end > next.query_start {
-                let current_region = current.region.read().unwrap();
-                let next_region = next.region.read().unwrap();
-                warn!(
-                    "Fixed region order violation: {} (end: {}) overlaps with {} (start: {})",
-                    current_region.region_id, current.query_end,
-                    next_region.region_id, next.query_start
-                );
-                return Ok(false);
-            }
-        }
-
-        Ok(true)
-    }
-}
-
 
 /// Find the best barcode match using k-mer indexed search
 fn find_best_barcode_match(
@@ -219,171 +137,129 @@ fn find_best_barcode_match(
     })
 }
 
-/// Locate the potential barcode window using position-based logic
-fn locate_barcode(
+/// Locate the barcode extraction window using a strict topological hierarchy
+/// based on aligned fixed region boundaries.
+///
+/// Hierarchy:
+/// 1. Outer-Adjacent Anchoring: the immediate outer neighbor is a fixed region →
+///    start from its read_end, extend inward by up to 1.2× barcode_len, capped by
+///    the next inner fixed region's read_start.
+/// 2. Inner-Adjacent Anchoring: the immediate inner neighbor is a fixed region →
+///    anchor to its read_start, extract outward by up to 1.2× barcode_len.
+/// 3. Sandwiched (Non-Adjacent): barcode between two non-adjacent fixed regions →
+///    extract the entire gap between them.
+/// 4. Terminal / Edge: barcode at the EndSegment edge → extract from segment boundary
+///    to nearest anchor.
+fn locate_barcode_extraction_window(
     barcode_region: &Arc<RwLock<Region>>,
-    anchors: &[FixedSequenceAlignment],
     end_regions: &EndRegions,
+    composite_result: &CompositeAlignmentResult,
     sequence_length: usize,
 ) -> Option<(usize, usize)> {
-    let region_guard = barcode_region.read().unwrap();
-    let barcode_length = region_guard.max_len as usize; // For barcode regions, the max_len should be equal to the min_len
-    let region_id = region_guard.region_id.clone();
-    drop(region_guard);
+    let barcode_length = {
+        let r = barcode_region.read().unwrap();
+        r.max_len as usize
+    };
+    let target_length = ((barcode_length as f64) * 1.2).ceil() as usize;
+    
+    // Search window must be above a minimum length threshold to avoid spurious extractions
+    let min_length = ((barcode_length as f64) * 0.8).floor() as usize;
 
-    // Get barcode position using position map
-    let position_map = end_regions.build_position_map();
-    let barcode_pos = position_map.get(&region_id).copied()?;
+    // Find barcode position in EndRegions (ordered outer-to-inner)
+    let barcode_pos = end_regions.regions.iter()
+        .position(|r| Arc::ptr_eq(r, barcode_region))?;
 
-    // Find closest outer and inner anchors in one pass
-    let mut closest_outer: Option<&FixedSequenceAlignment> = None;
-    let mut closest_inner: Option<&FixedSequenceAlignment> = None;
-
-    for anchor in anchors {
-        let anchor_pos = anchor.position.unwrap_or(0);
-        if anchor_pos < barcode_pos {
-            // Outer anchor: find the one with highest position (closest to barcode)
-            if closest_outer.is_none() || anchor_pos > closest_outer.unwrap().position.unwrap_or(0) {
-                closest_outer = Some(anchor);
-            }
-        } else if anchor_pos > barcode_pos {
-            // Inner anchor: find the one with lowest position (closest to barcode)
-            if closest_inner.is_none() || anchor_pos < closest_inner.unwrap().position.unwrap_or(usize::MAX) {
-                closest_inner = Some(anchor);
-            }
-        }
-    }
-
-    // Determine extraction range based on adjacency and anchor positions
-    determine_extraction_range(
-        barcode_pos,
-        barcode_length,
-        closest_outer,
-        closest_inner,
-        sequence_length,
-    )
-}
-
-/// Determine extraction range based on adjacency and anchor positions
-fn determine_extraction_range(
-    barcode_pos: usize,
-    barcode_length: usize,
-    closest_outer: Option<&FixedSequenceAlignment>,
-    closest_inner: Option<&FixedSequenceAlignment>,
-    sequence_length: usize,
-) -> Option<(usize, usize)> {
-    // Check if inner anchor is adjacent (position = barcode_pos + 1)
-    if let Some(inner_anchor) = closest_inner {
-        if inner_anchor.position == Some(barcode_pos + 1) {
-            // Inner anchor is adjacent - extract before it
-            return extract_with_adjacent_inner(
-                closest_outer,
-                inner_anchor,
-                barcode_length,
-                sequence_length,
-            );
-        }
-    }
-
-    // Check if outer anchor is adjacent (position = barcode_pos - 1)
-    if let Some(outer_anchor) = closest_outer {
-        if outer_anchor.position == Some(barcode_pos - 1) {
-            // Outer anchor is adjacent - extract after it
-            return extract_with_adjacent_outer(
-                outer_anchor,
-                closest_inner,
-                barcode_length,
-                sequence_length,
-            );
-        }
-    }
-
-    // Neither is adjacent - extract between nearest anchors
-    extract_between_anchors(
-        closest_outer,
-        closest_inner,
-        barcode_length,
-        sequence_length,
-    )
-}
-
-/// Extract barcode with adjacent inner anchor
-fn extract_with_adjacent_inner(
-    closest_outer: Option<&FixedSequenceAlignment>,
-    inner_anchor: &FixedSequenceAlignment,
-    barcode_length: usize,
-    sequence_length: usize,
-) -> Option<(usize, usize)> {
-    let target_length = (barcode_length as f64 * 1.2).ceil() as usize;
-    let min_length = (barcode_length as f64 * 0.8).floor() as usize;
-
-    let end = inner_anchor.query_start;
-    let mut start = if end >= target_length {
-        end - target_length
-    } else {
-        0
+    // Helper: look up a region's aligned coordinates from composite result
+    let get_fixed_coords = |region: &Arc<RwLock<Region>>| -> Option<(usize, usize)> {
+        composite_result.region_mappings.iter()
+            .find(|m| Arc::ptr_eq(&m.region, region) && !m.is_spacer)
+            .map(|m| (m.read_start, m.read_end))
     };
 
-    // Adjust start to avoid overlap with outer anchor
-    if let Some(outer_anchor) = closest_outer {
-        start = start.max(outer_anchor.query_end);
-    }
-
-    let actual_length = end.saturating_sub(start); // avoid negative length
-    if actual_length >= min_length && end <= sequence_length {
-        Some((start, end))
+    // Check immediate outer neighbor for structural adjacency
+    let outer_adjacent = if barcode_pos > 0 {
+        let outer_region = &end_regions.regions[barcode_pos - 1];
+        if outer_region.read().unwrap().sequence_type.is_fixed() {
+            get_fixed_coords(outer_region)
+        } else {
+            None
+        }
     } else {
         None
-    }
-}
+    };
 
-/// Extract barcode with adjacent outer anchor
-fn extract_with_adjacent_outer(
-    outer_anchor: &FixedSequenceAlignment,
-    closest_inner: Option<&FixedSequenceAlignment>,
-    barcode_length: usize,
-    sequence_length: usize,
-) -> Option<(usize, usize)> {
-    let target_length = (barcode_length as f64 * 1.2).ceil() as usize;
-    let min_length = (barcode_length as f64 * 0.8).floor() as usize;
+    // Check immediate inner neighbor for structural adjacency
+    let inner_adjacent = if barcode_pos + 1 < end_regions.regions.len() {
+        let inner_region = &end_regions.regions[barcode_pos + 1];
+        if inner_region.read().unwrap().sequence_type.is_fixed() {
+            get_fixed_coords(inner_region)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
 
-    let start = outer_anchor.query_end;
-    let mut end = start + target_length;
+    // Find nearest fixed region on each side (not necessarily adjacent)
+    let nearest_outer_fixed = (0..barcode_pos).rev()
+        .find_map(|i| {
+            let region = &end_regions.regions[i];
+            if region.read().unwrap().sequence_type.is_fixed() {
+                get_fixed_coords(region)
+            } else {
+                None
+            }
+        });
 
-    // Adjust end to avoid overlap with inner anchor or sequence end
-    if let Some(inner_anchor) = closest_inner {
-        end = end.min(inner_anchor.query_start);
-    }
-    end = end.min(sequence_length);
+    let nearest_inner_fixed = ((barcode_pos + 1)..end_regions.regions.len())
+        .find_map(|i| {
+            let region = &end_regions.regions[i];
+            if region.read().unwrap().sequence_type.is_fixed() {
+                get_fixed_coords(region)
+            } else {
+                None
+            }
+        });
+
+    let (start, end) = if let Some((_, outer_end)) = outer_adjacent {
+        // Case 1: Outer-Adjacent Anchoring
+        let max_end = outer_end + target_length;
+        let capped_end = if let Some((inner_start, _)) = nearest_inner_fixed {
+            max_end.min(inner_start)
+        } else {
+            max_end.min(sequence_length)
+        };
+        (outer_end, capped_end)
+    } else if let Some((inner_start, _)) = inner_adjacent {
+        // Case 2: Inner-Adjacent Anchoring
+        let min_start = inner_start.saturating_sub(target_length);
+        let capped_start = if let Some((_, outer_end)) = nearest_outer_fixed {
+            min_start.max(outer_end)
+        } else {
+            min_start
+        };
+        (capped_start, inner_start)
+    } else {
+        match (nearest_outer_fixed, nearest_inner_fixed) {
+            // Case 3: Sandwiched (Non-Adjacent) Anchoring
+            (Some((_, outer_end)), Some((inner_start, _))) => {
+                (outer_end, inner_start)
+            }
+            // Case 4: Terminal / Edge Extraction
+            (None, Some((inner_start, _))) => {
+                (0, inner_start)
+            }
+            (Some((_, outer_end)), None) => {
+                (outer_end, sequence_length)
+            }
+            (None, None) => {
+                return None;
+            }
+        }
+    };
 
     let actual_length = end.saturating_sub(start);
-    if actual_length >= min_length {
-        Some((start, end))
-    } else {
-        None
-    }
-}
-
-/// Extract barcode between nearest anchors when neither is adjacent
-fn extract_between_anchors(
-    closest_outer: Option<&FixedSequenceAlignment>,
-    closest_inner: Option<&FixedSequenceAlignment>,
-    barcode_length: usize,
-    sequence_length: usize,
-) -> Option<(usize, usize)> {
-    let min_length = (barcode_length as f64 * 0.8).floor() as usize;
-
-    let start = closest_outer
-        .map(|anchor| anchor.query_end)
-        .unwrap_or(0);
-
-    let end = closest_inner
-        .map(|anchor| anchor.query_start)
-        .unwrap_or(sequence_length);
-
-    let available_length = end.saturating_sub(start);
-
-    if available_length >= min_length {
+    if actual_length >= min_length && end <= sequence_length {
         Some((start, end))
     } else {
         None
@@ -396,11 +272,17 @@ fn extract_between_anchors(
 pub struct BarcodeExtractor {
     five_prime_regions: EndRegions,
     three_prime_regions: EndRegions,
+    /// Prebuilt composite patterns (built once, reused for all reads)
+    five_prime_composite: CompositePattern,
+    three_prime_composite: CompositePattern,
     /// Barcode whitelist indices: region_id -> BarcodeIndex
     whitelist_indices: IndexMap<String, BarcodeIndex>,
 }
 
 impl BarcodeExtractor {
+    /// Minimum average fixed-region match rate for barcode extraction
+    const MIN_MATCH_RATE: f64 = 0.7;
+
     /// Create a new barcode extractor for the given library_spec, modality, and whitelists.
     pub fn new(
         lib_spec: &LibSpec,
@@ -421,10 +303,31 @@ impl BarcodeExtractor {
         }
 
         let (five_prime_regions, three_prime_regions) = find_innermost_regions(lib_spec, modality)?;
+        let five_prime_composite = five_prime_regions.build_composite_pattern();
+        let three_prime_composite = three_prime_regions.build_composite_pattern();
+
+        // Validate minimum total fixed sequence length (12bp) for each end
+        const MIN_FIXED_LEN: usize = 12;
+        let five_prime_fixed_len = five_prime_composite.total_fixed_len();
+        if five_prime_fixed_len > 0 && five_prime_fixed_len < MIN_FIXED_LEN {
+            anyhow::bail!(
+                "5' end has insufficient total fixed sequence length ({} bp < {} bp minimum) for composite alignment",
+                five_prime_fixed_len, MIN_FIXED_LEN
+            );
+        }
+        let three_prime_fixed_len = three_prime_composite.total_fixed_len();
+        if three_prime_fixed_len > 0 && three_prime_fixed_len < MIN_FIXED_LEN {
+            anyhow::bail!(
+                "3' end has insufficient total fixed sequence length ({} bp < {} bp minimum) for composite alignment",
+                three_prime_fixed_len, MIN_FIXED_LEN
+            );
+        }
 
         Ok(Self {
             five_prime_regions,
             three_prime_regions,
+            five_prime_composite,
+            three_prime_composite,
             whitelist_indices,
         })
     }
@@ -446,11 +349,18 @@ impl BarcodeExtractor {
         let sequence = record.sequence();
         let quality = record.quality_scores();
 
-        // Step 1: Cut end segments and find anchors for forward orientation
-        let forward_5p = self.cut_and_analyze_segment(sequence, quality, &self.five_prime_regions, true, false)?;
-        let forward_3p = self.cut_and_analyze_segment(sequence, quality, &self.three_prime_regions, false, false)?;
+        // Step 1: Cut end segments and composite-align for forward orientation
+        let forward_5p = self.cut_and_analyze_segment(
+            sequence, quality, &self.five_prime_regions, &self.five_prime_composite, true, false,
+        )?;
+        let forward_3p = self.cut_and_analyze_segment(
+            sequence, quality, &self.three_prime_regions, &self.three_prime_composite, false, false,
+        )?;
 
-        let forward_evidence = Self::combine_evidence(&forward_5p, &forward_3p);
+        let forward_evidence = OrientationEvidence::from_composite(
+            &forward_5p.composite_result,
+            &forward_3p.composite_result,
+        );
 
         // Step 2: If forward meets threshold, use it directly (fast path)
         if forward_evidence.meets_threshold() {
@@ -458,151 +368,115 @@ impl BarcodeExtractor {
         }
 
         // Step 3: Forward didn't meet threshold, try reverse orientation
-        // Only RC end segments, not full read
-        let reverse_5p = self.cut_and_analyze_segment(sequence, quality, &self.five_prime_regions, true, true)?;
-        let reverse_3p = self.cut_and_analyze_segment(sequence, quality, &self.three_prime_regions, false, true)?;
+        // Only Rc end segments, not full read.
+        let reverse_5p = self.cut_and_analyze_segment(
+            sequence, quality, &self.five_prime_regions, &self.five_prime_composite, true, true,
+        )?;
+        let reverse_3p = self.cut_and_analyze_segment(
+            sequence, quality, &self.three_prime_regions, &self.three_prime_composite, false, true,
+        )?;
 
-        let reverse_evidence = Self::combine_evidence(&reverse_5p, &reverse_3p);
+        let reverse_evidence = OrientationEvidence::from_composite(
+            &reverse_5p.composite_result,
+            &reverse_3p.composite_result,
+        );
 
         // Step 4: Compare and choose better orientation
         let should_rc = self.compare_evidence(&forward_evidence, &reverse_evidence);
+        let chosen_evidence = if should_rc { &reverse_evidence } else { &forward_evidence };
 
-        // Check if both orientations failed to find all fixed regions (for QC tracking)
-        let forward_all_found = forward_5p.all_fixed_found() && forward_3p.all_fixed_found();
-        let reverse_all_found = reverse_5p.all_fixed_found() && reverse_3p.all_fixed_found();
-        let has_missing_anchors = !forward_all_found && !reverse_all_found;
-
-        #[cfg(debug_assertions)]
-        if has_missing_anchors {
-            let read_name = std::str::from_utf8(record.name()).unwrap_or("<invalid>");
-            eprintln!(
-                "[DEBUG] Read '{}': fixed region alignment failed in both orientations \
-                (forward: {}/{} 5', {}/{} 3'; reverse: {}/{} 5', {}/{} 3')",
-                read_name,
-                forward_5p.anchors.len(), forward_5p.expected_fixed_count,
-                forward_3p.anchors.len(), forward_3p.expected_fixed_count,
-                reverse_5p.anchors.len(), reverse_5p.expected_fixed_count,
-                reverse_3p.anchors.len(), reverse_3p.expected_fixed_count,
-            );
-            eprintln!(
-                "[DEBUG] Failed FASTQ record:\n@{}\n{}\n+\n{}",
-                read_name,
-                std::str::from_utf8(sequence).unwrap_or("<invalid seq>"),
-                std::str::from_utf8(quality).unwrap_or("<invalid qual>"),
-            );
+        // Step 5: Gate on composite alignment quality before barcode extraction
+        if chosen_evidence.avg_fixed_match_rate < Self::MIN_MATCH_RATE {
+            #[cfg(debug_assertions)]
+            {
+                let read_name = std::str::from_utf8(record.name()).unwrap_or("<invalid>");
+                eprintln!(
+                    "[DEBUG] Read '{}': low composite alignment quality \
+                    (chosen avg_fixed_match_rate: {:.3}, threshold: {:.1}; \
+                    forward: {:.3}, reverse: {:.3})",
+                    read_name,
+                    chosen_evidence.avg_fixed_match_rate, Self::MIN_MATCH_RATE,
+                    forward_evidence.avg_fixed_match_rate, reverse_evidence.avg_fixed_match_rate,
+                );
+            }
+            return Ok(LongReadBarcodeResult {
+                barcode: None,
+                confidence: 0.0,
+                is_reverse_complemented: should_rc,
+            });
         }
 
-        let mut result = if should_rc {
-            self.extract_barcodes_from_segments(reverse_5p, reverse_3p, true)?
+        // Step 6: Extract barcodes using cached anchors from the chosen orientation
+        if should_rc {
+            self.extract_barcodes_from_segments(reverse_5p, reverse_3p, true)
         } else {
-            self.extract_barcodes_from_segments(forward_5p, forward_3p, false)?
-        };
-        result.has_missing_anchors = has_missing_anchors;
-        Ok(result)
+            self.extract_barcodes_from_segments(forward_5p, forward_3p, false)
+        }
     }
 
-    /// Cut end segment and find anchors in one pass.
+    /// Cut end segment and find fixed-region alignment in one pass.
     /// Returns the segment with precomputed anchors for reuse.
     /// Returns an empty segment if the FASTQ sequence is too short.
     fn cut_and_analyze_segment(
         &self,
         sequence: &[u8],
-        quality: &[u8],
+        _quality: &[u8],
         end_regions: &EndRegions,
+        composite: &CompositePattern,
         is_five_prime: bool,
         should_rc: bool,
-    ) -> Result<EndSegmentWithAnchors> {
+    ) -> Result<EndSegmentWithAlignment> {
         let cut_length = end_regions.calculate_cut_length();
 
         if sequence.len() < cut_length {
-            return Ok(EndSegmentWithAnchors::empty());
+            return Ok(EndSegmentWithAlignment::empty());
         }
 
         // Determine which end to cut from based on orientation
         let cut_from_beginning = should_rc != is_five_prime;
 
-        let (seq_segment, qual_segment) = if cut_from_beginning {
-            (&sequence[..cut_length], &quality[..cut_length])
+        let seq_segment = if cut_from_beginning {
+            &sequence[..cut_length]
         } else {
             let start = sequence.len() - cut_length;
-            (&sequence[start..], &quality[start..])
+            &sequence[start..]
         };
 
         // Apply RC to the segment if needed
-        let (final_seq, final_qual) = if should_rc {
-            let rc_seq = seqspec::utils::rev_compl(seq_segment);
-            let rc_qual: Vec<u8> = qual_segment.iter().copied().rev().collect();
-            (rc_seq, rc_qual)
+        let final_seq = if should_rc {
+            seqspec::utils::rev_compl(seq_segment)
         } else {
-            (seq_segment.to_vec(), qual_segment.to_vec())
+            seq_segment.to_vec()
         };
 
-        // Find anchors
-        let fixed_regions = end_regions.get_fixed_regions();
-        let expected_fixed_count = fixed_regions.len();
-        let mut anchor_finder = AnchorFinder::new()?;
-        let anchors = anchor_finder.find_anchors(&final_seq, &fixed_regions, end_regions)?;
+        // Perform composite alignment
+        let composite_result = FittingAligner::align_composite(&final_seq, composite)?;
 
-        let valid_order = if !anchors.is_empty() {
-            anchor_finder.validate_order(&anchors)?
-        } else {
-            false
-        };
-
-        Ok(EndSegmentWithAnchors {
+        Ok(EndSegmentWithAlignment {
             sequence: final_seq,
-            quality: final_qual,
-            anchors,
-            valid_order,
-            expected_fixed_count,
+            composite_result: Some(composite_result),
         })
     }
 
-    /// Combine evidence from both ends
-    fn combine_evidence(
-        five_prime: &EndSegmentWithAnchors,
-        three_prime: &EndSegmentWithAnchors,
-    ) -> OrientationEvidence {
-        let total_anchors = five_prime.anchors.len() + three_prime.anchors.len();
-
-        let avg_confidence = if total_anchors > 0 {
-            let five_conf: f64 = five_prime.anchors.iter().map(|a| a.score).sum();
-            let three_conf: f64 = three_prime.anchors.iter().map(|a| a.score).sum();
-            (five_conf + three_conf) / total_anchors as f64
-        } else {
-            0.0
-        };
-
-        OrientationEvidence {
-            num_anchors: total_anchors,
-            valid_order: five_prime.valid_order && three_prime.valid_order,
-            avg_confidence,
-        }
-    }
-
-    /// Extract barcodes from precomputed segments with cached anchors
+    /// Extract barcodes from precomputed segments with composite alignment
     fn extract_barcodes_from_segments(
         &self,
-        five_prime: EndSegmentWithAnchors,
-        three_prime: EndSegmentWithAnchors,
+        five_prime: EndSegmentWithAlignment,
+        three_prime: EndSegmentWithAlignment,
         is_reverse_complemented: bool,
     ) -> Result<LongReadBarcodeResult> {
         let mut extracted_barcodes = Vec::new();
 
-        // Process 5' end using cached anchors
         if !five_prime.is_empty() {
-            let barcode_results = self.extract_barcodes_with_cached_anchors(
-                &five_prime,
-                &self.five_prime_regions,
+            let barcode_results = self.extract_barcodes_from_composite(
+                &five_prime, &self.five_prime_regions,
             )?;
             extracted_barcodes.extend(barcode_results);
         }
 
-        // Process 3' end using cached anchors
         if !three_prime.is_empty() {
-            let barcode_results = self.extract_barcodes_with_cached_anchors(
-                &three_prime,
-                &self.three_prime_regions,
+            let barcode_results = self.extract_barcodes_from_composite(
+                &three_prime, &self.three_prime_regions,
             )?;
             extracted_barcodes.extend(barcode_results);
         }
@@ -612,41 +486,33 @@ impl BarcodeExtractor {
         Ok(result)
     }
 
-    /// Extract barcodes using precomputed anchors
-    fn extract_barcodes_with_cached_anchors(
+    /// Extract barcodes using composite alignment result.
+    /// Uses topological hierarchy to locate barcode extraction windows
+    /// based on aligned fixed region boundaries.
+    fn extract_barcodes_from_composite(
         &self,
-        segment: &EndSegmentWithAnchors,
+        segment: &EndSegmentWithAlignment,
         end_regions: &EndRegions,
     ) -> Result<Vec<ExtractedBarcode>> {
-        if !end_regions.has_barcode {
-            return Ok(Vec::new());
-        }
-
-        // Skip if anchor order is invalid
-        if !segment.anchors.is_empty() && !segment.valid_order {
-            warn!("Fixed region alignment order is incorrect, skipping this end");
-            return Ok(Vec::new());
-        }
+        let composite_result = match &segment.composite_result {
+            Some(r) => r,
+            None => return Ok(Vec::new()),
+        };
 
         let barcode_regions = end_regions.get_barcode_regions();
-        if barcode_regions.is_empty() {
-            return Ok(Vec::new());
-        }
-
         let mut extracted_barcodes = Vec::new();
 
-        for barcode_region in barcode_regions {
-            if let Some(extraction_range) = locate_barcode(
-                &barcode_region,
-                &segment.anchors,
-                end_regions,
-                segment.sequence.len(),
-            ) {
-                let candidate_seq = &segment.sequence[extraction_range.0..extraction_range.1];
+        for barcode_region in &barcode_regions {
+            let window = locate_barcode_extraction_window(
+                barcode_region, end_regions, composite_result, segment.sequence.len(),
+            );
+
+            if let Some((start, end)) = window {
+                let candidate_seq = &segment.sequence[start..end];
 
                 if let Some(matched) = find_best_barcode_match(
                     candidate_seq,
-                    &barcode_region,
+                    barcode_region,
                     &self.whitelist_indices,
                 ) {
                     extracted_barcodes.push(matched);
@@ -675,22 +541,15 @@ impl BarcodeExtractor {
     /// Compare evidence and choose which orientation is better
     /// Returns true if reverse-complement should be used
     fn compare_evidence(&self, forward: &OrientationEvidence, reverse: &OrientationEvidence) -> bool {
-        // Choose reverse if: more anchors, OR same anchors but better quality
-        if reverse.num_anchors > forward.num_anchors {
-            true
-        } else if reverse.num_anchors == forward.num_anchors {
-            // Same number of anchors, use tie-breaker logic
-            if reverse.valid_order && !forward.valid_order {
-                true
-            } else if forward.valid_order && !reverse.valid_order {
-                false
-            } else {
-                // Both have same order status, choose higher confidence
-                reverse.avg_confidence > forward.avg_confidence
-            }
-        } else {
-            false
+        // Primary: more good fixed regions found
+        if reverse.num_good_fixed_regions > forward.num_good_fixed_regions {
+            return true;
         }
+        if forward.num_good_fixed_regions > reverse.num_good_fixed_regions {
+            return false;
+        }
+        // Secondary: higher total alignment score
+        reverse.total_score > forward.total_score
     }
 
     /// Combine multiple extracted barcodes into final result.
@@ -700,7 +559,6 @@ impl BarcodeExtractor {
                 barcode: None,
                 confidence: 0.0,
                 is_reverse_complemented: false,
-                has_missing_anchors: false,
             });
         }
 
@@ -710,7 +568,6 @@ impl BarcodeExtractor {
                 barcode: Some(barcode.barcode.clone()),
                 confidence: barcode.confidence,
                 is_reverse_complemented: false,
-                has_missing_anchors: false,
             });
         }
 
@@ -729,7 +586,6 @@ impl BarcodeExtractor {
             barcode: Some(combined_barcode),
             confidence: average_confidence,
             is_reverse_complemented: false,
-            has_missing_anchors: false,
         })
     }
 }
@@ -737,172 +593,242 @@ impl BarcodeExtractor {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use super::super::sequence_aligner::fitting_alignment_distance;
+    use super::super::sequence_aligner::{fitting_alignment_distance, RegionMapping};
+    use seqspec::{RegionType, SequenceType};
+
+    fn create_test_region(
+        id: &str,
+        region_type: RegionType,
+        sequence_type: SequenceType,
+        min_len: u32,
+        max_len: u32,
+    ) -> Arc<RwLock<Region>> {
+        Arc::new(RwLock::new(Region {
+            region_id: id.to_string(),
+            region_type,
+            name: id.to_string(),
+            sequence_type,
+            sequence: String::new(),
+            min_len,
+            max_len,
+            onlist: None,
+            subregions: vec![],
+        }))
+    }
+
+    fn make_fixed_mapping(region: &Arc<RwLock<Region>>, start: usize, end: usize) -> RegionMapping {
+        RegionMapping {
+            region: region.clone(),
+            read_start: start,
+            read_end: end,
+            is_spacer: false,
+            match_rate: 0.95,
+        }
+    }
+
+    fn make_spacer_mapping(region: &Arc<RwLock<Region>>, start: usize, end: usize) -> RegionMapping {
+        RegionMapping {
+            region: region.clone(),
+            read_start: start,
+            read_end: end,
+            is_spacer: true,
+            match_rate: 0.0,
+        }
+    }
+
+    #[test]
+    fn test_locate_barcode_case1_outer_adjacent() {
+        // Layout: fixed1(16bp) -> barcode(10bp) -> fixed2(16bp)
+        // Case 1: outer neighbor (fixed1) is structurally adjacent
+        // Window: [fixed1.read_end, fixed1.read_end + 1.2*10], capped by fixed2.read_start
+        let fixed1 = create_test_region("fixed1", RegionType::Linker, SequenceType::Fixed, 16, 16);
+        let barcode = create_test_region("bc1", RegionType::Barcode, SequenceType::Onlist, 10, 10);
+        let fixed2 = create_test_region("fixed2", RegionType::Linker, SequenceType::Fixed, 16, 16);
+
+        let mut end_regions = EndRegions::new(super::super::EndType::FivePrime);
+        end_regions.add_region(fixed1.clone());
+        end_regions.add_region(barcode.clone());
+        end_regions.add_region(fixed2.clone());
+
+        let composite_result = CompositeAlignmentResult {
+            score: 50,
+            region_mappings: vec![
+                make_fixed_mapping(&fixed1, 0, 17),
+                make_spacer_mapping(&barcode, 17, 26),
+                make_fixed_mapping(&fixed2, 26, 42),
+            ],
+        };
+
+        let window = locate_barcode_extraction_window(&barcode, &end_regions, &composite_result, 100);
+        let (start, end) = window.unwrap();
+
+        // start = fixed1.read_end = 17
+        // max_end = 17 + ceil(10*1.2) = 17 + 12 = 29, capped by fixed2.read_start = 26
+        assert_eq!(start, 17);
+        assert_eq!(end, 26);
+    }
+
+    #[test]
+    fn test_locate_barcode_case2_inner_adjacent() {
+        // Layout: random -> barcode(10bp) -> fixed1(16bp)
+        // Case 2: inner neighbor (fixed1) is structurally adjacent
+        // Window: [fixed1.read_start - 1.2*10, fixed1.read_start]
+        let random = create_test_region("random", RegionType::IlluminaP5, SequenceType::Random, 20, 20);
+        let barcode = create_test_region("bc1", RegionType::Barcode, SequenceType::Onlist, 10, 10);
+        let fixed1 = create_test_region("fixed1", RegionType::Linker, SequenceType::Fixed, 16, 16);
+
+        let mut end_regions = EndRegions::new(super::super::EndType::FivePrime);
+        end_regions.add_region(random.clone());
+        end_regions.add_region(barcode.clone());
+        end_regions.add_region(fixed1.clone());
+
+        // Composite only contains fixed1 (single fixed region)
+        let composite_result = CompositeAlignmentResult {
+            score: 30,
+            region_mappings: vec![
+                make_fixed_mapping(&fixed1, 30, 46),
+            ],
+        };
+
+        let window = locate_barcode_extraction_window(&barcode, &end_regions, &composite_result, 100);
+        let (start, end) = window.unwrap();
+
+        // end = fixed1.read_start = 30
+        // min_start = 30 - 12 = 18, no outer fixed to cap
+        assert_eq!(start, 18);
+        assert_eq!(end, 30);
+    }
+
+    #[test]
+    fn test_locate_barcode_case3_sandwiched_non_adjacent() {
+        // Layout: fixed1(16bp) -> umi(4bp) -> barcode(10bp) -> umi2(4bp) -> fixed2(16bp)
+        // Case 3: neither immediate neighbor is fixed, but both sides have fixed regions
+        // Window: entire gap [fixed1.read_end, fixed2.read_start]
+        let fixed1 = create_test_region("fixed1", RegionType::Linker, SequenceType::Fixed, 16, 16);
+        let umi1 = create_test_region("umi1", RegionType::Umi, SequenceType::Random, 4, 4);
+        let barcode = create_test_region("bc1", RegionType::Barcode, SequenceType::Onlist, 10, 10);
+        let umi2 = create_test_region("umi2", RegionType::Umi, SequenceType::Random, 4, 4);
+        let fixed2 = create_test_region("fixed2", RegionType::Linker, SequenceType::Fixed, 16, 16);
+
+        let mut end_regions = EndRegions::new(super::super::EndType::FivePrime);
+        end_regions.add_region(fixed1.clone());
+        end_regions.add_region(umi1.clone());
+        end_regions.add_region(barcode.clone());
+        end_regions.add_region(umi2.clone());
+        end_regions.add_region(fixed2.clone());
+
+        let composite_result = CompositeAlignmentResult {
+            score: 50,
+            region_mappings: vec![
+                make_fixed_mapping(&fixed1, 0, 16),
+                make_spacer_mapping(&umi1, 16, 20),
+                make_spacer_mapping(&barcode, 20, 30),
+                make_spacer_mapping(&umi2, 30, 34),
+                make_fixed_mapping(&fixed2, 34, 50),
+            ],
+        };
+
+        let window = locate_barcode_extraction_window(&barcode, &end_regions, &composite_result, 100);
+        let (start, end) = window.unwrap();
+
+        // Entire gap between fixed regions
+        assert_eq!(start, 16); // fixed1.read_end
+        assert_eq!(end, 34);   // fixed2.read_start (note: NOT 50, which is read_end)
+    }
+
+    #[test]
+    fn test_locate_barcode_case4_terminal_edge() {
+        // Layout: barcode(10bp) -> umi(4bp) -> fixed1(16bp)
+        // Case 4: barcode at outer edge, no fixed region on outer side
+        // Window: [0, fixed1.read_start] (but fixed1 is not adjacent, umi in between)
+        let barcode = create_test_region("bc1", RegionType::Barcode, SequenceType::Onlist, 10, 10);
+        let umi = create_test_region("umi1", RegionType::Umi, SequenceType::Random, 4, 4);
+        let fixed1 = create_test_region("fixed1", RegionType::Linker, SequenceType::Fixed, 16, 16);
+
+        let mut end_regions = EndRegions::new(super::super::EndType::FivePrime);
+        end_regions.add_region(barcode.clone());
+        end_regions.add_region(umi.clone());
+        end_regions.add_region(fixed1.clone());
+
+        let composite_result = CompositeAlignmentResult {
+            score: 30,
+            region_mappings: vec![
+                make_fixed_mapping(&fixed1, 14, 30),
+            ],
+        };
+
+        let window = locate_barcode_extraction_window(&barcode, &end_regions, &composite_result, 50);
+        let (start, end) = window.unwrap();
+
+        // Terminal: from segment start (0) to nearest inner fixed region's read_start
+        assert_eq!(start, 0);
+        assert_eq!(end, 14); // fixed1.read_start
+    }
+
+    #[test]
+    fn test_locate_barcode_window_too_small() {
+        // Layout: fixed1(16bp) -> barcode(10bp) -> fixed2(16bp)
+        // But fixed regions are so close that window < 0.8 * barcode_len
+        let fixed1 = create_test_region("fixed1", RegionType::Linker, SequenceType::Fixed, 16, 16);
+        let barcode = create_test_region("bc1", RegionType::Barcode, SequenceType::Onlist, 10, 10);
+        let fixed2 = create_test_region("fixed2", RegionType::Linker, SequenceType::Fixed, 16, 16);
+
+        let mut end_regions = EndRegions::new(super::super::EndType::FivePrime);
+        end_regions.add_region(fixed1.clone());
+        end_regions.add_region(barcode.clone());
+        end_regions.add_region(fixed2.clone());
+
+        // Gap between fixed regions is only 5bp < floor(10*0.8) = 8bp
+        let composite_result = CompositeAlignmentResult {
+            score: 50,
+            region_mappings: vec![
+                make_fixed_mapping(&fixed1, 0, 16),
+                make_spacer_mapping(&barcode, 16, 21),
+                make_fixed_mapping(&fixed2, 21, 37),
+            ],
+        };
+
+        let window = locate_barcode_extraction_window(&barcode, &end_regions, &composite_result, 100);
+        assert!(window.is_none(), "Window should be rejected when too small");
+    }
 
     #[test]
     fn test_orientation_evidence_thresholds() {
         // Case 1: Meets all thresholds
         let evidence = OrientationEvidence {
-            num_anchors: 2,
-            valid_order: true,
-            avg_confidence: 0.90,
+            total_score: 100,
+            avg_fixed_match_rate: 0.90,
+            num_good_fixed_regions: 2,
+            total_fixed_regions: 2,
         };
         assert!(evidence.meets_threshold());
 
-        // Case 2: Below confidence threshold (0.8)
+        // Case 2: Below match rate threshold
         let evidence = OrientationEvidence {
-            num_anchors: 2,
-            valid_order: true,
-            avg_confidence: 0.79,
+            total_score: 50,
+            avg_fixed_match_rate: 0.60,
+            num_good_fixed_regions: 0,
+            total_fixed_regions: 2,
         };
         assert!(!evidence.meets_threshold());
 
-        // Case 3: Below anchor count
+        // Case 3: No good fixed regions
         let evidence = OrientationEvidence {
-            num_anchors: 1,
-            valid_order: true,
-            avg_confidence: 0.90,
+            total_score: 30,
+            avg_fixed_match_rate: 0.50,
+            num_good_fixed_regions: 0,
+            total_fixed_regions: 1,
         };
         assert!(!evidence.meets_threshold());
 
-        // Case 4: Invalid order
+        // Case 4: Edge case - exactly at threshold
         let evidence = OrientationEvidence {
-            num_anchors: 2,
-            valid_order: false,
-            avg_confidence: 0.90,
-        };
-        assert!(!evidence.meets_threshold());
-
-        // Case 5: Edge case - exactly at threshold
-        let evidence = OrientationEvidence {
-            num_anchors: 2,
-            valid_order: true,
-            avg_confidence: 0.80,
+            total_score: 80,
+            avg_fixed_match_rate: 0.80,
+            num_good_fixed_regions: 2,
+            total_fixed_regions: 2,
         };
         assert!(evidence.meets_threshold());
-    }
-
-    #[test]
-    fn test_orientation_evidence_from_anchors_empty() {
-        let anchors: Vec<FixedSequenceAlignment> = vec![];
-        let evidence = OrientationEvidence::from_anchors(&anchors, false);
-
-        assert_eq!(evidence.num_anchors, 0);
-        assert!(!evidence.valid_order);
-        assert_eq!(evidence.avg_confidence, 0.0);
-    }
-
-    #[test]
-    fn test_orientation_detection_with_alignment_scores() {
-        use seqspec::{Modality, RegionType, SequenceType};
-        use seqspec::region::{LibSpec, Region};
-        use indexmap::{IndexMap, IndexSet};
-
-        // Create regions with one fixed sequence
-        // lib structure: fixed(16bp "AAAAAAAAAAAAAAAA") -> barcode(10bp) -> cdna
-        let fixed_seq = "AAAAAAAAAAAAAAAA"; // 16bp of A's
-
-        let fixed_5p = Arc::new(RwLock::new(Region {
-            region_id: "fixed_5p".to_string(),
-            region_type: RegionType::Linker,
-            name: "fixed_5p".to_string(),
-            sequence_type: SequenceType::Fixed,
-            sequence: fixed_seq.to_string(),
-            min_len: 16,
-            max_len: 16,
-            onlist: None,
-            subregions: vec![],
-        }));
-
-        let barcode = Arc::new(RwLock::new(Region {
-            region_id: "bc1".to_string(),
-            region_type: RegionType::Barcode,
-            name: "bc1".to_string(),
-            sequence_type: SequenceType::Onlist,
-            sequence: "".to_string(),
-            min_len: 10,
-            max_len: 10,
-            onlist: None,
-            subregions: vec![],
-        }));
-
-        let cdna = Arc::new(RwLock::new(Region {
-            region_id: "cdna".to_string(),
-            region_type: RegionType::Cdna,
-            name: "cdna".to_string(),
-            sequence_type: SequenceType::Random,
-            sequence: "".to_string(),
-            min_len: 100,
-            max_len: 1000,
-            onlist: None,
-            subregions: vec![],
-        }));
-
-        let modality_region = Region {
-            region_id: "rna".to_string(),
-            region_type: RegionType::Modality(Modality::RNA),
-            name: "RNA".to_string(),
-            sequence_type: SequenceType::Joined,
-            sequence: "".to_string(),
-            min_len: 0,
-            max_len: 0,
-            onlist: None,
-            subregions: vec![fixed_5p, barcode, cdna],
-        };
-
-        let lib_spec = LibSpec::new(vec![modality_region]).unwrap();
-        let whitelists: IndexMap<String, IndexSet<Vec<u8>>> = IndexMap::new();
-        let extractor = BarcodeExtractor::new(&lib_spec, &Modality::RNA, whitelists).unwrap();
-
-        let cut_length = extractor.five_prime_regions().calculate_cut_length();
-
-        // Create a test sequence that indicates forward orientation:
-        let sequence_with_error = format!(
-            "{}{}{}",
-            "AAAAACAAAAACAAAAA",                                // 17bp: 15 A's + 2 insertion (C)
-            "C".repeat(cut_length + 10),                        // C's in the middle
-            "TTTTCTTTTCTTTTCCC"                                 // 17bp: 12 T's + 5 insertion (C)
-        );
-        let test_sequence = sequence_with_error.as_bytes();
-        let test_quality = "I".repeat(test_sequence.len());
-
-        // Test forward orientation
-        let forward_5p = extractor.cut_and_analyze_segment(
-            test_sequence,
-            test_quality.as_bytes(),
-            extractor.five_prime_regions(),
-            true,  // is_five_prime
-            false, // should_rc = false (forward)
-        ).unwrap();
-
-        // Test reverse orientation - cut from end and RC
-        let reverse_5p = extractor.cut_and_analyze_segment(
-            test_sequence,
-            test_quality.as_bytes(),
-            extractor.five_prime_regions(),
-            true, // is_five_prime
-            true, // should_rc = true (reverse)
-        ).unwrap();
-
-        // Forward should have better anchor match
-        // Reverse would have RC of T's at end = A's
-        println!("Forward anchors: {:?}", forward_5p.anchors.len());
-        println!("Reverse anchors: {:?}", reverse_5p.anchors.len());
-
-        // Combine evidence and compare
-        let forward_evidence = BarcodeExtractor::combine_evidence(&forward_5p, &EndSegmentWithAnchors::empty());
-        let reverse_evidence = BarcodeExtractor::combine_evidence(&reverse_5p, &EndSegmentWithAnchors::empty());
-
-        println!("Forward evidence: anchors={}, valid_order={}, confidence={:.3}",
-            forward_evidence.num_anchors, forward_evidence.valid_order, forward_evidence.avg_confidence);
-        println!("Reverse evidence: anchors={}, valid_order={}, confidence={:.3}",
-            reverse_evidence.num_anchors, reverse_evidence.valid_order, reverse_evidence.avg_confidence);
-
-        let should_rc = extractor.compare_evidence(&forward_evidence, &reverse_evidence);
-
-        if forward_evidence.num_anchors > 0 || reverse_evidence.num_anchors > 0 {
-            println!("should_rc = {}", should_rc);
-        }
     }
 
     #[test]
@@ -917,92 +843,5 @@ mod tests {
         // Test with empty sequences
         assert_eq!(fitting_alignment_distance(b"", b"ATCG"), 0);
         assert_eq!(fitting_alignment_distance(b"ATCG", b""), 4);
-    }
-
-    #[test]
-    fn test_barcode_locator_integration() {
-        use seqspec::{RegionType, SequenceType};
-        use seqspec::region::Region;
-        use super::super::EndRegions;
-
-        // Create test barcode region
-        let barcode_region = Arc::new(RwLock::new(Region {
-            region_id: "bc1".to_string(),
-            region_type: RegionType::Barcode,
-            name: "bc1".to_string(),
-            sequence_type: SequenceType::Onlist,
-            sequence: "".to_string(),
-            min_len: 8,
-            max_len: 8,
-            onlist: None,
-            subregions: vec![],
-        }));
-
-        // Create test outer anchor region
-        let outer_region = Arc::new(RwLock::new(Region {
-            region_id: "outer".to_string(),
-            region_type: RegionType::Linker,
-            name: "outer".to_string(),
-            sequence_type: SequenceType::Fixed,
-            sequence: "ATCG".to_string(),
-            min_len: 4,
-            max_len: 4,
-            onlist: None,
-            subregions: vec![],
-        }));
-
-        // Create test inner anchor region
-        let inner_region = Arc::new(RwLock::new(Region {
-            region_id: "inner".to_string(),
-            region_type: RegionType::Linker,
-            name: "inner".to_string(),
-            sequence_type: SequenceType::Fixed,
-            sequence: "GCTA".to_string(),
-            min_len: 4,
-            max_len: 4,
-            onlist: None,
-            subregions: vec![],
-        }));
-
-        // Create EndRegions with proper order: outer -> barcode -> inner
-        let mut end_regions = EndRegions::new(super::super::EndType::FivePrime);
-        end_regions.add_region(outer_region.clone());
-        end_regions.add_region(barcode_region.clone());
-        end_regions.add_region(inner_region.clone());
-
-        // Create alignments of fixed sequences with position set
-        let anchor1 = FixedSequenceAlignment {
-            region: outer_region,
-            query_start: 2,
-            query_end: 6,
-            score: 1.0,
-            matches: 4,
-            alignment_length: 4,
-            position: Some(1), // outer position
-        };
-
-        let anchor2 = FixedSequenceAlignment {
-            region: inner_region,
-            query_start: 20,
-            query_end: 24,
-            score: 1.0,
-            matches: 4,
-            alignment_length: 4,
-            position: Some(3), // inner position
-        };
-
-        let anchors = vec![anchor1, anchor2];
-
-        // Test locate_barcode method
-        let result = locate_barcode(&barcode_region, &anchors, &end_regions, 100);
-
-        // Should find a range between the outer anchor end (6) and inner anchor start (20)
-        assert!(result.is_some());
-        let (start, end) = result.unwrap();
-        assert!(start >= 6); // After outer anchor
-        assert!(end <= 20);  // Before inner anchor
-        assert!(end > start); // Valid range
-
-        println!("start: {}, end: {}", start, end);
     }
 }

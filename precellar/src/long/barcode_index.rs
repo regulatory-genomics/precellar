@@ -11,7 +11,7 @@ const MIN_TOP_CANDIDATES: usize = 50;
 /// Minimum confidence threshold for barcode matching
 const MIN_CONFIDENCE: f64 = 0.7;
 
-/// Index for fast barcode candidate filtering using k-mer voting.
+/// Pre-built index for fast barcode candidate filtering using k-mer voting.
 ///
 /// Instead of comparing a candidate sequence against all barcodes in the whitelist,
 /// this index uses 6-mer voting to quickly identify the most likely matches,

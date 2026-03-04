@@ -1,5 +1,4 @@
 use anyhow::{anyhow, Result};
-use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
 pub mod barcode_extractor;
@@ -7,6 +6,7 @@ pub mod barcode_index;
 pub mod sequence_aligner;
 
 use seqspec::region::{Region, LibSpec};
+use sequence_aligner::{CompositePattern, CompositeRegionSpan};
 pub use barcode_extractor::BarcodeExtractor;
 pub use barcode_index::BarcodeIndex;
 
@@ -66,16 +66,59 @@ impl EndRegions {
         }
     }
 
-    /// Get all fixed sequence regions (sequence_type == fixed and length >= 15)
-    pub fn get_fixed_regions(&self) -> Vec<Arc<RwLock<Region>>> {
-        self.regions
-            .iter()
-            .filter(|region| {
-                let r = region.read().unwrap();
-                r.sequence_type.is_fixed() && r.min_len >= 15 // fixed sequence must be at least 15bp
-            })
-            .cloned()
-            .collect()
+    /// Build a composite pattern from regions between outermost and innermost fixed regions.
+    /// Fixed regions contribute their actual sequence.
+    /// Non-fixed regions between them contribute N's of average length.
+    /// If only one fixed region exists, the composite contains just that fixed sequence.
+    pub fn build_composite_pattern(&self) -> CompositePattern {
+        // Find outermost and innermost fixed region indices
+        let first_fixed_idx = self.regions.iter().position(|r| {
+            r.read().unwrap().sequence_type.is_fixed()
+        });
+        let last_fixed_idx = self.regions.iter().rposition(|r| {
+            r.read().unwrap().sequence_type.is_fixed()
+        });
+
+        let (start_idx, end_idx) = match (first_fixed_idx, last_fixed_idx) {
+            (Some(first), Some(last)) => (first, last),
+            _ => return CompositePattern { pattern: Vec::new(), spans: Vec::new(), pos_to_span: Vec::new() },
+        };
+
+        let mut pattern = Vec::new();
+        let mut spans = Vec::new();
+
+        for idx in start_idx..=end_idx {
+            let region = &self.regions[idx];
+            let region_guard = region.read().unwrap();
+            let start = pattern.len();
+            let is_fixed = region_guard.sequence_type.is_fixed();
+
+            if is_fixed {
+                pattern.extend_from_slice(region_guard.sequence.as_bytes());
+            } else {
+                let avg_len = ((region_guard.min_len + region_guard.max_len) / 2) as usize;
+                let spacer_len = avg_len.max(if region_guard.max_len > 0 { 1 } else { 0 });
+                pattern.extend(std::iter::repeat(b'N').take(spacer_len));
+            }
+
+            let end = pattern.len();
+            spans.push(CompositeRegionSpan {
+                region: region.clone(),
+                pattern_start: start,
+                pattern_end: end,
+                is_spacer: !is_fixed,
+            });
+        }
+
+        // Build pos_to_span lookup
+        let mut pos_to_span = vec![0usize; pattern.len()];
+        for (span_idx, span) in spans.iter().enumerate() {
+            for p in span.pattern_start..span.pattern_end {
+                pos_to_span[p] = span_idx;
+            }
+        }
+
+        CompositePattern { pattern, spans, pos_to_span }
     }
 
     /// Get all barcode regions
@@ -88,16 +131,6 @@ impl EndRegions {
             })
             .cloned()
             .collect()
-    }
-
-    /// Build position map: region_id -> position (1-based, outermost is 1)
-    pub fn build_position_map(&self) -> HashMap<String, usize> {
-        let mut position_map = HashMap::new();
-        for (idx, region) in self.regions.iter().enumerate() {
-            let region_guard = region.read().unwrap();
-            position_map.insert(region_guard.region_id.clone(), idx + 1);
-        }
-        position_map
     }
 }
 
@@ -244,8 +277,46 @@ mod tests {
     }
 
     #[test]
-    fn test_find_innermost_regions() {
-        // Test structure: 
+    fn test_build_composite_pattern() {
+        let mut end_regions = EndRegions::new(EndType::FivePrime);
+
+        // fixed1(16bp) -> barcode(10bp) -> fixed2(16bp)
+        let fixed1 = Arc::new(RwLock::new(create_test_region(
+            "fixed1", RegionType::Linker, SequenceType::Fixed, 16, 16, "ACGTACGTACGTACGT",
+        )));
+        let barcode = Arc::new(RwLock::new(create_test_region(
+            "bc1", RegionType::Barcode, SequenceType::Onlist, 10, 10, "",
+        )));
+        let umi = Arc::new(RwLock::new(create_test_region(
+            "umi1", RegionType::Umi, SequenceType::Random, 4, 8, "",
+        )));
+        let fixed2 = Arc::new(RwLock::new(create_test_region(
+            "fixed2", RegionType::Linker, SequenceType::Fixed, 16, 16, "TGCATGCATGCATGCA",
+        )));
+
+        end_regions.add_region(fixed1);
+        end_regions.add_region(barcode);
+        end_regions.add_region(umi);
+        end_regions.add_region(fixed2);
+
+        let composite = end_regions.build_composite_pattern();
+        assert_eq!(composite.pattern.len(), 48); // 16 + 10 + 6 + 16
+        assert_eq!(composite.spans.len(), 4);
+        assert!(!composite.spans[0].is_spacer);
+        assert!(composite.spans[1].is_spacer);
+        assert!(composite.spans[2].is_spacer);
+        assert!(!composite.spans[3].is_spacer);
+
+        // Verify N's in spacer region
+        assert!(composite.pattern[16..32].iter().all(|&b| b == b'N'));
+
+        // Verify fixed sequences
+        assert_eq!(&composite.pattern[0..16], b"ACGTACGTACGTACGT");
+        assert_eq!(&composite.pattern[32..48], b"TGCATGCATGCATGCA");
+    }
+
+    #[test]
+    fn test_find_innermost_regions() {        // Test structure: 
         // primer (random) -> barcode1 (onlist) -> linker (fixed) -> cdna (target) -> barcode2 (onlist)
 
         let primer = Arc::new(RwLock::new(create_test_region(
