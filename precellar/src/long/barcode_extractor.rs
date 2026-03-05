@@ -306,21 +306,25 @@ impl BarcodeExtractor {
         let five_prime_composite = five_prime_regions.build_composite_pattern();
         let three_prime_composite = three_prime_regions.build_composite_pattern();
 
-        // Validate minimum total fixed sequence length (12bp) for each end
+        // Validate minimum total fixed sequence length (12bp) only for ends with barcodes
         const MIN_FIXED_LEN: usize = 12;
-        let five_prime_fixed_len = five_prime_composite.total_fixed_len();
-        if five_prime_fixed_len > 0 && five_prime_fixed_len < MIN_FIXED_LEN {
-            anyhow::bail!(
-                "5' end has insufficient total fixed sequence length ({} bp < {} bp minimum) for composite alignment",
-                five_prime_fixed_len, MIN_FIXED_LEN
-            );
+        if five_prime_regions.has_barcode {
+            let five_prime_fixed_len = five_prime_composite.total_fixed_len();
+            if five_prime_fixed_len < MIN_FIXED_LEN {
+                anyhow::bail!(
+                    "5' end has insufficient total fixed sequence length ({} bp < {} bp minimum) for composite alignment",
+                    five_prime_fixed_len, MIN_FIXED_LEN
+                );
+            }
         }
-        let three_prime_fixed_len = three_prime_composite.total_fixed_len();
-        if three_prime_fixed_len > 0 && three_prime_fixed_len < MIN_FIXED_LEN {
-            anyhow::bail!(
-                "3' end has insufficient total fixed sequence length ({} bp < {} bp minimum) for composite alignment",
-                three_prime_fixed_len, MIN_FIXED_LEN
-            );
+        if three_prime_regions.has_barcode {
+            let three_prime_fixed_len = three_prime_composite.total_fixed_len();
+            if three_prime_fixed_len < MIN_FIXED_LEN {
+                anyhow::bail!(
+                    "3' end has insufficient total fixed sequence length ({} bp < {} bp minimum) for composite alignment",
+                    three_prime_fixed_len, MIN_FIXED_LEN
+                );
+            }
         }
 
         Ok(Self {
@@ -350,12 +354,20 @@ impl BarcodeExtractor {
         let quality = record.quality_scores();
 
         // Step 1: Cut end segments and composite-align for forward orientation
-        let forward_5p = self.cut_and_analyze_segment(
-            sequence, quality, &self.five_prime_regions, &self.five_prime_composite, true, false,
-        )?;
-        let forward_3p = self.cut_and_analyze_segment(
-            sequence, quality, &self.three_prime_regions, &self.three_prime_composite, false, false,
-        )?;
+        let forward_5p = if self.five_prime_regions.has_barcode {
+            self.cut_and_analyze_segment(
+                sequence, quality, &self.five_prime_regions, &self.five_prime_composite, true, false,
+            )?
+        } else {
+            EndSegmentWithAlignment::empty()
+        };
+        let forward_3p = if self.three_prime_regions.has_barcode {
+            self.cut_and_analyze_segment(
+                sequence, quality, &self.three_prime_regions, &self.three_prime_composite, false, false,
+            )?
+        } else {
+            EndSegmentWithAlignment::empty()
+        };
 
         let forward_evidence = OrientationEvidence::from_composite(
             &forward_5p.composite_result,
@@ -369,12 +381,20 @@ impl BarcodeExtractor {
 
         // Step 3: Forward didn't meet threshold, try reverse orientation
         // Only Rc end segments, not full read.
-        let reverse_5p = self.cut_and_analyze_segment(
-            sequence, quality, &self.five_prime_regions, &self.five_prime_composite, true, true,
-        )?;
-        let reverse_3p = self.cut_and_analyze_segment(
-            sequence, quality, &self.three_prime_regions, &self.three_prime_composite, false, true,
-        )?;
+        let reverse_5p = if self.five_prime_regions.has_barcode {
+            self.cut_and_analyze_segment(
+                sequence, quality, &self.five_prime_regions, &self.five_prime_composite, true, true,
+            )?
+        } else {
+            EndSegmentWithAlignment::empty()
+        };
+        let reverse_3p = if self.three_prime_regions.has_barcode {
+            self.cut_and_analyze_segment(
+                sequence, quality, &self.three_prime_regions, &self.three_prime_composite, false, true,
+            )?
+        } else {
+            EndSegmentWithAlignment::empty()
+        };
 
         let reverse_evidence = OrientationEvidence::from_composite(
             &reverse_5p.composite_result,
