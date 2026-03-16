@@ -583,8 +583,7 @@ impl BarcodeExtractor {
     /// - Multiple entries (same barcode at both ends):
     ///   1. Intersect candidate sets
     ///   2. Non-empty intersection: pick first from intersection
-    ///   3. Empty intersection: pick from the entry with highest confidence;
-    ///      if confidence tied, pool all candidates and pick first
+    ///   3. Empty intersection: pick from the entry with highest confidence
     fn combine_barcodes(&self, barcodes: Vec<ExtractedBarcode>) -> Result<LongReadBarcodeResult> {
         if barcodes.is_empty() {
             return Ok(LongReadBarcodeResult {
@@ -659,21 +658,10 @@ impl BarcodeExtractor {
         }
 
         // Empty intersection: pick from the highest-confidence entry
-        let max_confidence = entries.iter().map(|e| e.confidence).fold(f64::NEG_INFINITY, f64::max);
-        let best_entries: Vec<&&ExtractedBarcode> = entries.iter()
-            .filter(|e| (e.confidence - max_confidence).abs() < f64::EPSILON)
-            .collect();
-
-        if best_entries.len() == 1 {
-            (best_entries[0].barcodes[0].clone(), best_entries[0].confidence)
-        } else {
-            // Confidence tied: pool all candidates from tied entries, pick first
-            let first_candidate = best_entries.iter()
-                .flat_map(|e| e.barcodes.iter())
-                .next()
-                .unwrap();
-            (first_candidate.clone(), max_confidence)
-        }
+        let best_entry = entries.iter()
+            .max_by(|a, b| a.confidence.partial_cmp(&b.confidence).unwrap())
+            .unwrap();
+        (best_entry.barcodes[0].clone(), best_entry.confidence)
     }
 }
 
