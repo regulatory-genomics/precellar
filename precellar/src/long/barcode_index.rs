@@ -51,8 +51,8 @@ impl BarcodeIndex {
 
     /// Find best barcode match using k-mer voting followed by fitting alignment.
     ///
-    /// Returns the matched barcode and confidence score, or None if no good match found.
-    pub fn find_best_match(&self, candidate: &[u8]) -> Option<(Vec<u8>, f64)> {
+    /// Returns all tied-best matched barcodes and their confidence score, or None if no good match found.
+    pub fn find_best_match(&self, candidate: &[u8]) -> Option<(Vec<Vec<u8>>, f64)> {
         if self.barcodes.is_empty() {
             return None;
         }
@@ -82,57 +82,74 @@ impl BarcodeIndex {
             return self.find_best_match_linear(candidate);
         }
 
-        // Run fitting alignment only on top candidates
-        let mut best_barcode_idx = None;
+        // Run fitting alignment only on top candidates, collecting all tied-best
+        let mut best_indices = Vec::new();
         let mut min_distance = usize::MAX;
 
         for barcode_idx in top_candidates {
             let barcode = &self.barcodes[barcode_idx];
             let distance = fitting_alignment_distance(barcode, candidate);
-            if distance < min_distance {
-                min_distance = distance;
-                best_barcode_idx = Some(barcode_idx);
+            match distance.cmp(&min_distance) {
+                std::cmp::Ordering::Less => {
+                    min_distance = distance;
+                    best_indices.clear();
+                    best_indices.push(barcode_idx);
+                }
+                std::cmp::Ordering::Equal => {
+                    best_indices.push(barcode_idx);
+                }
+                std::cmp::Ordering::Greater => {}
             }
         }
 
-        // Convert to result with confidence
-        best_barcode_idx.and_then(|idx| {
-            let barcode = &self.barcodes[idx];
-            let barcode_length = barcode.len().max(1);
-            let confidence = 1.0 - (min_distance as f64 / barcode_length as f64);
+        if best_indices.is_empty() {
+            return None;
+        }
 
-            if confidence >= MIN_CONFIDENCE {
-                Some((barcode.clone(), confidence))
-            } else {
-                None
-            }
-        })
+        let barcode_length = self.barcodes[best_indices[0]].len().max(1);
+        let confidence = 1.0 - (min_distance as f64 / barcode_length as f64);
+
+        if confidence >= MIN_CONFIDENCE {
+            let barcodes = best_indices.iter().map(|&idx| self.barcodes[idx].clone()).collect();
+            Some((barcodes, confidence))
+        } else {
+            None
+        }
     }
 
     /// Linear search fallback for small whitelists or when k-mer voting fails
-    fn find_best_match_linear(&self, candidate: &[u8]) -> Option<(Vec<u8>, f64)> {
-        let mut best_barcode_idx = None;
+    fn find_best_match_linear(&self, candidate: &[u8]) -> Option<(Vec<Vec<u8>>, f64)> {
+        let mut best_indices = Vec::new();
         let mut min_distance = usize::MAX;
 
         for (idx, barcode) in self.barcodes.iter().enumerate() {
             let distance = fitting_alignment_distance(barcode, candidate);
-            if distance < min_distance {
-                min_distance = distance;
-                best_barcode_idx = Some(idx);
+            match distance.cmp(&min_distance) {
+                std::cmp::Ordering::Less => {
+                    min_distance = distance;
+                    best_indices.clear();
+                    best_indices.push(idx);
+                }
+                std::cmp::Ordering::Equal => {
+                    best_indices.push(idx);
+                }
+                std::cmp::Ordering::Greater => {}
             }
         }
 
-        best_barcode_idx.and_then(|idx| {
-            let barcode = &self.barcodes[idx];
-            let barcode_length = barcode.len().max(1);
-            let confidence = 1.0 - (min_distance as f64 / barcode_length as f64);
+        if best_indices.is_empty() {
+            return None;
+        }
 
-            if confidence >= MIN_CONFIDENCE {
-                Some((barcode.clone(), confidence))
-            } else {
-                None
-            }
-        })
+        let barcode_length = self.barcodes[best_indices[0]].len().max(1);
+        let confidence = 1.0 - (min_distance as f64 / barcode_length as f64);
+
+        if confidence >= MIN_CONFIDENCE {
+            let barcodes = best_indices.iter().map(|&idx| self.barcodes[idx].clone()).collect();
+            Some((barcodes, confidence))
+        } else {
+            None
+        }
     }
 
     /// Select top candidates with ties.
@@ -245,15 +262,16 @@ mod tests {
         // Test exact match
         let result = index.find_best_match(b"AAAAAAAAAA");
         assert!(result.is_some());
-        let (barcode, confidence) = result.unwrap();
-        assert_eq!(barcode, b"AAAAAAAAAA".to_vec());
+        let (barcodes, confidence) = result.unwrap();
+        assert_eq!(barcodes.len(), 1);
+        assert_eq!(barcodes[0], b"AAAAAAAAAA".to_vec());
         assert_eq!(confidence, 1.0);
 
         // Test with 1 mismatch
         let result = index.find_best_match(b"AAAAAAAAAT");
         assert!(result.is_some());
-        let (barcode, confidence) = result.unwrap();
-        assert_eq!(barcode, b"AAAAAAAAAA".to_vec());
+        let (barcodes, confidence) = result.unwrap();
+        assert_eq!(barcodes[0], b"AAAAAAAAAA".to_vec());
         assert!(confidence >= 0.7);
     }
 
@@ -267,14 +285,14 @@ mod tests {
         // Test with insertion in candidate
         let result = index.find_best_match(b"ACGTAACGTAC"); // extra A
         assert!(result.is_some());
-        let (barcode, _) = result.unwrap();
-        assert_eq!(barcode, b"ACGTACGTAC".to_vec());
+        let (barcodes, _) = result.unwrap();
+        assert_eq!(barcodes[0], b"ACGTACGTAC".to_vec());
 
         // Test with deletion in candidate
         let result = index.find_best_match(b"ACGTCGTAC"); // missing A
         assert!(result.is_some());
-        let (barcode, _) = result.unwrap();
-        assert_eq!(barcode, b"ACGTACGTAC".to_vec());
+        let (barcodes, _) = result.unwrap();
+        assert_eq!(barcodes[0], b"ACGTACGTAC".to_vec());
     }
 
     #[test]

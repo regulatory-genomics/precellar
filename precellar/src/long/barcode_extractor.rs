@@ -29,12 +29,13 @@ impl LongReadBarcodeResult {
     }
 }
 
-/// Successfully extracted barcode with metadata (single barcode)
+/// Successfully extracted barcode with metadata (may contain multiple tied-best candidates)
 #[derive(Debug, Clone)]
 pub struct ExtractedBarcode {
     pub region_id: String,
-    pub barcode: Vec<u8>,  // Standardized barcode sequence from whitelist
-    pub confidence: f64,   // confidence = 1.0 - (min_edit_distance / barcode_length)
+    pub region_name: String,       // For grouping same-barcode regions across ends
+    pub barcodes: Vec<Vec<u8>>,    // All tied-best candidates from whitelist
+    pub confidence: f64,           // confidence = 1.0 - (min_edit_distance / barcode_length)
 }
 
 /// Evidence for read orientation determination using composite alignment
@@ -122,17 +123,19 @@ fn find_best_barcode_match(
 ) -> Option<ExtractedBarcode> {
     let region_guard = barcode_region.read().unwrap();
     let region_id = region_guard.region_id.clone();
+    let region_name = region_guard.name.clone();
     drop(region_guard);
 
     // Get whitelist index for this region
     let index = whitelist_indices.get(&region_id)?;
 
-    // Find best match using k-mer voting + fitting alignment
-    let (matched_barcode, confidence) = index.find_best_match(candidate_seq)?;
+    // Find all tied-best matches using k-mer voting + fitting alignment
+    let (matched_barcodes, confidence) = index.find_best_match(candidate_seq)?;
 
     Some(ExtractedBarcode {
         region_id,
-        barcode: matched_barcode,
+        region_name,
+        barcodes: matched_barcodes,
         confidence,
     })
 }
@@ -573,6 +576,15 @@ impl BarcodeExtractor {
     }
 
     /// Combine multiple extracted barcodes into final result.
+    ///
+    /// Groups by `region_name` to handle same-barcode regions appearing at both ends.
+    /// For each group:
+    /// - Single entry: pick first candidate from its tied-best list
+    /// - Multiple entries (same barcode at both ends):
+    ///   1. Intersect candidate sets
+    ///   2. Non-empty intersection: pick first from intersection
+    ///   3. Empty intersection: pick from the entry with highest confidence;
+    ///      if confidence tied, pool all candidates and pick first
     fn combine_barcodes(&self, barcodes: Vec<ExtractedBarcode>) -> Result<LongReadBarcodeResult> {
         if barcodes.is_empty() {
             return Ok(LongReadBarcodeResult {
@@ -582,31 +594,86 @@ impl BarcodeExtractor {
             });
         }
 
-        if barcodes.len() == 1 {
-            let barcode = &barcodes[0];
-            return Ok(LongReadBarcodeResult {
-                barcode: Some(barcode.barcode.clone()),
-                confidence: barcode.confidence,
-                is_reverse_complemented: false,
-            });
+        // Group by region_name, preserving first-seen order
+        let mut groups: IndexMap<String, Vec<&ExtractedBarcode>> = IndexMap::new();
+        for bc in &barcodes {
+            groups.entry(bc.region_name.clone()).or_default().push(bc);
         }
 
-        // Multiple barcodes - concatenate them
+        // Resolve each group to a single barcode
         let mut combined_barcode = Vec::new();
         let mut total_confidence = 0.0;
+        let mut num_resolved = 0usize;
 
-        for barcode in &barcodes {
-            combined_barcode.extend(&barcode.barcode);
-            total_confidence += barcode.confidence;
+        for (_region_name, entries) in &groups {
+            let (chosen_barcode, chosen_confidence) = if entries.len() == 1 {
+                // Single entry: pick first candidate
+                (entries[0].barcodes[0].clone(), entries[0].confidence)
+            } else {
+                // Multiple entries: try intersection
+                Self::resolve_multi_end_barcode(entries)
+            };
+
+            combined_barcode.extend(&chosen_barcode);
+            total_confidence += chosen_confidence;
+            num_resolved += 1;
         }
 
-        let average_confidence = total_confidence / barcodes.len() as f64;
+        let average_confidence = if num_resolved > 0 {
+            total_confidence / num_resolved as f64
+        } else {
+            0.0
+        };
 
         Ok(LongReadBarcodeResult {
             barcode: Some(combined_barcode),
             confidence: average_confidence,
             is_reverse_complemented: false,
         })
+    }
+
+    /// Resolve a barcode region that appears at multiple ends.
+    ///
+    /// Strategy:
+    /// 1. Intersect candidate sets from all entries
+    /// 2. Non-empty intersection → pick first from intersection
+    /// 3. Empty intersection → pick from entry with highest confidence;
+    ///    if tied, pool all candidates and pick first
+    fn resolve_multi_end_barcode(entries: &[&ExtractedBarcode]) -> (Vec<u8>, f64) {
+        use std::collections::HashSet;
+
+        // Build intersection of candidate sets
+        let mut intersection: HashSet<Vec<u8>> = entries[0].barcodes.iter().cloned().collect();
+        for entry in &entries[1..] {
+            let entry_set: HashSet<Vec<u8>> = entry.barcodes.iter().cloned().collect();
+            intersection = intersection.intersection(&entry_set).cloned().collect();
+        }
+
+        if !intersection.is_empty() {
+            // Pick the first one that appears in the highest-confidence entry's candidate list
+            let best_entry = entries.iter().max_by(|a, b| a.confidence.partial_cmp(&b.confidence).unwrap()).unwrap();
+            let chosen = best_entry.barcodes.iter()
+                .find(|bc| intersection.contains(*bc))
+                .unwrap_or_else(|| intersection.iter().next().unwrap());
+            return (chosen.clone(), best_entry.confidence);
+        }
+
+        // Empty intersection: pick from the highest-confidence entry
+        let max_confidence = entries.iter().map(|e| e.confidence).fold(f64::NEG_INFINITY, f64::max);
+        let best_entries: Vec<&&ExtractedBarcode> = entries.iter()
+            .filter(|e| (e.confidence - max_confidence).abs() < f64::EPSILON)
+            .collect();
+
+        if best_entries.len() == 1 {
+            (best_entries[0].barcodes[0].clone(), best_entries[0].confidence)
+        } else {
+            // Confidence tied: pool all candidates from tied entries, pick first
+            let first_candidate = best_entries.iter()
+                .flat_map(|e| e.barcodes.iter())
+                .next()
+                .unwrap();
+            (first_candidate.clone(), max_confidence)
+        }
     }
 }
 
