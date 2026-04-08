@@ -5,7 +5,8 @@ use bio::alignment::AlignmentOperation;
 
 use seqspec::region::Region;
 
-/// A composite alignment pattern built from regions between outermost fixed region and innermost one.
+/// A composite alignment pattern built from regions between the leftmost and rightmost fixed
+/// regions in forward order of the designed library structure.
 #[derive(Debug, Clone)]
 pub struct CompositePattern {
     /// The concatenated pattern bytes (fixed sequences + N-spacers)

@@ -685,25 +685,29 @@ impl FastqAnnotator {
                 } else {
                     None
                 };
-                
-                // 2. Calculate cut lengths for both ends
-                let five_prime_cut = extractor.five_prime_regions().calculate_cut_length();
-                let three_prime_cut = extractor.three_prime_regions().calculate_cut_length();
-                
+
+                // 2. Calculate sampled-window lengths for both ends
+                let five_prime_window_len = extractor.five_prime_regions().calculate_cut_length();
+                let three_prime_window_len = extractor.three_prime_regions().calculate_cut_length();
+
                 // 3. Trim EndRegions from original sequence
                 let original_seq = record.sequence();
                 let original_qual = record.quality_scores();
-                
-                if original_seq.len() < five_prime_cut + three_prime_cut {
+
+                if original_seq.len() < five_prime_window_len + three_prime_window_len {
                     return Err(anyhow::anyhow!(
-                        "Sequence too short ({} bp) for trimming {} + {} bp from ends", 
-                        original_seq.len(), five_prime_cut, three_prime_cut
+                        "Sequence too short ({} bp) for trimming {} + {} bp from ends",
+                        original_seq.len(),
+                        five_prime_window_len,
+                        three_prime_window_len
                     ));
                 }
-                
-                let target_seq = &original_seq[five_prime_cut..original_seq.len() - three_prime_cut];
-                let target_qual = &original_qual[five_prime_cut..original_qual.len() - three_prime_cut];
-                
+
+                let target_seq = &original_seq
+                    [five_prime_window_len..original_seq.len() - three_prime_window_len];
+                let target_qual = &original_qual
+                    [five_prime_window_len..original_qual.len() - three_prime_window_len];
+
                 // 4. Create target record with trimmed sequence
                 let target_record = fastq::Record::new(
                     record.definition().clone(),
