@@ -146,12 +146,13 @@ impl EndRegions {
     }
 }
 
-/// Analyze library specification and collect end regions in forward order.
+/// Collect the 5' and 3' end-region windows used for long-read barcode extraction.
 ///
-/// The 5' end contains all regions from the library start through the last fixed/barcode
-/// before the target. The 3' end contains all regions from the first fixed/barcode after the
-/// target through the library end. Both collections stay in forward order (5' -> 3').
-pub fn find_innermost_regions(
+/// Both returned collections stay in forward order of the designed library structure (5' -> 3').
+/// The 5' collection includes all regions from the library start through the last fixed/barcode
+/// before the target. The 3' collection includes all regions from the first fixed/barcode after
+/// the target through the library end.
+pub fn collect_end_regions(
     lib_spec: &LibSpec,
     modality: &seqspec::Modality,
 ) -> Result<(EndRegions, EndRegions)> {
@@ -344,7 +345,7 @@ mod tests {
     }
 
     #[test]
-    fn test_find_innermost_regions() {
+    fn test_collect_end_regions() {
         // Test structure:
         // primer (random) -> barcode1 (onlist) -> linker (fixed) -> cdna (target)
         // -> umi3 (random) -> barcode2 (onlist) -> adapter3 (fixed)
@@ -426,7 +427,7 @@ mod tests {
         };
 
         let lib_spec = LibSpec::new(vec![modality_region]).unwrap();
-        let (five_prime, three_prime) = find_innermost_regions(&lib_spec, &Modality::RNA).unwrap();
+        let (five_prime, three_prime) = collect_end_regions(&lib_spec, &Modality::RNA).unwrap();
 
         // 5' end should contain primer, barcode1, and linker (all regions through the
         // last fixed/barcode before the target).

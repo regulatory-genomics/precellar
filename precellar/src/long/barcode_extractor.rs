@@ -6,9 +6,10 @@ use seqspec::region::{LibSpec, Region};
 use seqspec::Modality;
 
 use super::{
-    find_innermost_regions, EndRegions,
-    sequence_aligner::{CompositeAlignmentResult, CompositePattern, FittingAligner},
     barcode_index::BarcodeIndex,
+    collect_end_regions,
+    sequence_aligner::{CompositeAlignmentResult, CompositePattern, FittingAligner},
+    EndRegions,
 };
 
 /// Final long-read barcode extraction result
@@ -299,7 +300,7 @@ impl BarcodeExtractor {
             whitelist_indices.insert(region_id.clone(), BarcodeIndex::new(whitelist));
         }
 
-        let (five_prime_regions, three_prime_regions) = find_innermost_regions(lib_spec, modality)?;
+        let (five_prime_regions, three_prime_regions) = collect_end_regions(lib_spec, modality)?;
         let five_prime_composite = five_prime_regions.build_composite_pattern();
         let three_prime_composite = three_prime_regions.build_composite_pattern();
 
@@ -727,7 +728,7 @@ mod tests {
         let five_prime_barcode =
             create_test_region("bc5", RegionType::Barcode, SequenceType::Onlist, 4, 4);
         let three_prime_barcode =
-            create_test_region("bc3", RegionType::Barcode, SequenceType::Onlist, 4, 4);
+            create_test_region("bc3", RegionType::Barcode, SequenceType::Onlist, 5, 5);
 
         let mut five_prime_regions = EndRegions::new(super::super::EndType::FivePrime);
         five_prime_regions.add_region(five_prime_barcode);
@@ -790,11 +791,12 @@ mod tests {
             )
             .unwrap();
 
-        // Barcode length is 4bp, so the sampled window is ceil(4 * 1.15) = 5bp.
+        // 5‘ Barcode length is 4bp, so the sampled window is ceil(4 * 1.15) = 5bp.
+        // 3’ Barcode length is 5bp, so the sampled window is ceil(5 * 1.15) = 6bp.
         assert_eq!(forward_5p.sequence, b"AGTCA");
-        assert_eq!(forward_3p.sequence, b"CGTTA");
+        assert_eq!(forward_3p.sequence, b"CCGTTA");
         assert_eq!(reverse_5p.sequence, b"TAACG");
-        assert_eq!(reverse_3p.sequence, b"TGACT");
+        assert_eq!(reverse_3p.sequence, b"TTGACT");
     }
 
     #[test]
