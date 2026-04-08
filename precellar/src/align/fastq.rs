@@ -686,27 +686,37 @@ impl FastqAnnotator {
                     None
                 };
 
-                // 2. Calculate sampled-window lengths for both ends
-                let five_prime_window_len = extractor.five_prime_regions().calculate_cut_length();
-                let three_prime_window_len = extractor.three_prime_regions().calculate_cut_length();
+                // 2. Determine trimming interval based on chosen orientation.
+                // Window lengths for the 5' and 3' sides in designed-library orientation.
+                // Reverse orientation swaps which raw-read end those windows map to.
+                // The target sequence is trimmed from the raw read without reverse-complementing it.
+                let (head_trim, tail_trim) = if barcode_result.is_reverse_complemented {
+                    (
+                        extractor.three_prime_regions().calculate_cut_length(),
+                        extractor.five_prime_regions().calculate_cut_length(),
+                    )
+                } else {
+                    (
+                        extractor.five_prime_regions().calculate_cut_length(),
+                        extractor.three_prime_regions().calculate_cut_length(),
+                    )
+                };
 
                 // 3. Trim EndRegions from original sequence
                 let original_seq = record.sequence();
                 let original_qual = record.quality_scores();
 
-                if original_seq.len() < five_prime_window_len + three_prime_window_len {
+                if original_seq.len() < head_trim + tail_trim {
                     return Err(anyhow::anyhow!(
                         "Sequence too short ({} bp) for trimming {} + {} bp from ends",
                         original_seq.len(),
-                        five_prime_window_len,
-                        three_prime_window_len
+                        head_trim,
+                        tail_trim
                     ));
                 }
 
-                let target_seq = &original_seq
-                    [five_prime_window_len..original_seq.len() - three_prime_window_len];
-                let target_qual = &original_qual
-                    [five_prime_window_len..original_qual.len() - three_prime_window_len];
+                let target_seq = &original_seq[head_trim..original_seq.len() - tail_trim];
+                let target_qual = &original_qual[head_trim..original_qual.len() - tail_trim];
 
                 // 4. Create target record with trimmed sequence
                 let target_record = fastq::Record::new(
