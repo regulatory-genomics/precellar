@@ -7,7 +7,7 @@ use seqspec::Modality;
 
 use super::{
     barcode_index::BarcodeIndex,
-    collect_end_regions,
+    collect_end_regions, collect_target_flanks,
     sequence_aligner::{CompositeAlignmentResult, CompositePattern, FittingAligner},
     EndRegions,
 };
@@ -21,6 +21,10 @@ pub struct LongReadBarcodeResult {
     pub confidence: f64,
     /// Whether the end segments were reverse-complemented during extraction
     pub is_reverse_complemented: bool,
+    /// Trim length for the 5' side in designed-library orientation
+    pub five_prime_trim: usize,
+    /// Trim length for the 3' side in designed-library orientation
+    pub three_prime_trim: usize,
 }
 
 impl LongReadBarcodeResult {
@@ -270,6 +274,8 @@ fn locate_barcode_extraction_window(
 pub struct BarcodeExtractor {
     five_prime_regions: EndRegions,
     three_prime_regions: EndRegions,
+    five_prime_trim_regions: Vec<Arc<RwLock<Region>>>,
+    three_prime_trim_regions: Vec<Arc<RwLock<Region>>>,
     /// Prebuilt composite patterns (built once, reused for all reads)
     five_prime_composite: CompositePattern,
     three_prime_composite: CompositePattern,
@@ -301,6 +307,8 @@ impl BarcodeExtractor {
         }
 
         let (five_prime_regions, three_prime_regions) = collect_end_regions(lib_spec, modality)?;
+        let (five_prime_trim_regions, three_prime_trim_regions) =
+            collect_target_flanks(lib_spec, modality)?;
         let five_prime_composite = five_prime_regions.build_composite_pattern();
         let three_prime_composite = three_prime_regions.build_composite_pattern();
 
@@ -328,6 +336,8 @@ impl BarcodeExtractor {
         Ok(Self {
             five_prime_regions,
             three_prime_regions,
+            five_prime_trim_regions,
+            three_prime_trim_regions,
             five_prime_composite,
             three_prime_composite,
             whitelist_indices,
@@ -437,6 +447,32 @@ impl BarcodeExtractor {
                 barcode: None,
                 confidence: 0.0,
                 is_reverse_complemented: should_rc,
+                five_prime_trim: if should_rc {
+                    self.calculate_trim_length(
+                        &reverse_5p,
+                        &self.five_prime_regions,
+                        &self.five_prime_trim_regions,
+                    )
+                } else {
+                    self.calculate_trim_length(
+                        &forward_5p,
+                        &self.five_prime_regions,
+                        &self.five_prime_trim_regions,
+                    )
+                },
+                three_prime_trim: if should_rc {
+                    self.calculate_trim_length(
+                        &reverse_3p,
+                        &self.three_prime_regions,
+                        &self.three_prime_trim_regions,
+                    )
+                } else {
+                    self.calculate_trim_length(
+                        &forward_3p,
+                        &self.three_prime_regions,
+                        &self.three_prime_trim_regions,
+                    )
+                },
             });
         }
 
@@ -500,6 +536,16 @@ impl BarcodeExtractor {
         is_reverse_complemented: bool,
     ) -> Result<LongReadBarcodeResult> {
         let mut extracted_barcodes = Vec::new();
+        let five_prime_trim = self.calculate_trim_length(
+            &five_prime,
+            &self.five_prime_regions,
+            &self.five_prime_trim_regions,
+        );
+        let three_prime_trim = self.calculate_trim_length(
+            &three_prime,
+            &self.three_prime_regions,
+            &self.three_prime_trim_regions,
+        );
 
         if !five_prime.is_empty() {
             let barcode_results = self.extract_barcodes_from_composite(
@@ -517,7 +563,90 @@ impl BarcodeExtractor {
 
         let mut result = self.combine_barcodes(extracted_barcodes)?;
         result.is_reverse_complemented = is_reverse_complemented;
+        result.five_prime_trim = five_prime_trim;
+        result.three_prime_trim = three_prime_trim;
         Ok(result)
+    }
+
+    fn calculate_trim_length(
+        &self,
+        segment: &EndSegmentWithAlignment,
+        end_regions: &EndRegions,
+        trim_regions: &[Arc<RwLock<Region>>],
+    ) -> usize {
+        if trim_regions.is_empty() {
+            return 0;
+        }
+
+        let fallback = Self::sum_average_lengths(trim_regions);
+        let anchor = match Self::find_trim_anchor(end_regions) {
+            Some(anchor) => anchor,
+            None => return fallback,
+        };
+        let composite_result = match &segment.composite_result {
+            Some(result) => result,
+            None => return fallback,
+        };
+        let mapping = match composite_result
+            .region_mappings
+            .iter()
+            .find(|m| Arc::ptr_eq(&m.region, &anchor) && !m.is_spacer)
+        {
+            Some(mapping) => mapping,
+            None => return fallback,
+        };
+        let base = match end_regions.end_type {
+            super::EndType::FivePrime => mapping.read_end,
+            super::EndType::ThreePrime => segment.sequence.len().saturating_sub(mapping.read_start),
+        };
+        let offset = Self::sum_average_lengths(Self::trim_offset_regions(
+            trim_regions,
+            &anchor,
+            end_regions.end_type,
+        ));
+        base + offset
+    }
+
+    fn find_trim_anchor(end_regions: &EndRegions) -> Option<Arc<RwLock<Region>>> {
+        match end_regions.end_type {
+            super::EndType::FivePrime => end_regions
+                .regions
+                .iter()
+                .rfind(|region| region.read().unwrap().sequence_type.is_fixed())
+                .cloned(),
+            super::EndType::ThreePrime => end_regions
+                .regions
+                .iter()
+                .find(|region| region.read().unwrap().sequence_type.is_fixed())
+                .cloned(),
+        }
+    }
+
+    fn trim_offset_regions<'a>(
+        trim_regions: &'a [Arc<RwLock<Region>>],
+        anchor: &Arc<RwLock<Region>>,
+        end_type: super::EndType,
+    ) -> &'a [Arc<RwLock<Region>>] {
+        match trim_regions
+            .iter()
+            .position(|region| Arc::ptr_eq(region, anchor))
+        {
+            Some(anchor_idx) => match end_type {
+                super::EndType::FivePrime => &trim_regions[anchor_idx + 1..],
+                super::EndType::ThreePrime => &trim_regions[..anchor_idx],
+            },
+            None => &[],
+        }
+    }
+
+    fn sum_average_lengths(regions: &[Arc<RwLock<Region>>]) -> usize {
+        regions
+            .iter()
+            .map(|region| {
+                let region = region.read().unwrap();
+                ((region.min_len + region.max_len) / 2) as usize
+            })
+            .sum()
     }
 
     /// Extract barcodes using composite alignment result.
@@ -601,6 +730,8 @@ impl BarcodeExtractor {
                 barcode: None,
                 confidence: 0.0,
                 is_reverse_complemented: false,
+                five_prime_trim: 0,
+                three_prime_trim: 0,
             });
         }
 
@@ -639,6 +770,8 @@ impl BarcodeExtractor {
             barcode: Some(combined_barcode),
             confidence: average_confidence,
             is_reverse_complemented: false,
+            five_prime_trim: 0,
+            three_prime_trim: 0,
         })
     }
 
@@ -661,15 +794,21 @@ impl BarcodeExtractor {
 
         if !intersection.is_empty() {
             // Pick the first one that appears in the highest-confidence entry's candidate list
-            let best_entry = entries.iter().max_by(|a, b| a.confidence.partial_cmp(&b.confidence).unwrap()).unwrap();
-            let chosen = best_entry.barcodes.iter()
+            let best_entry = entries
+                .iter()
+                .max_by(|a, b| a.confidence.partial_cmp(&b.confidence).unwrap())
+                .unwrap();
+            let chosen = best_entry
+                .barcodes
+                .iter()
                 .find(|bc| intersection.contains(*bc))
                 .unwrap_or_else(|| intersection.iter().next().unwrap());
             return (chosen.clone(), best_entry.confidence);
         }
 
         // Empty intersection: pick from the highest-confidence entry
-        let best_entry = entries.iter()
+        let best_entry = entries
+            .iter()
             .max_by(|a, b| a.confidence.partial_cmp(&b.confidence).unwrap())
             .unwrap();
         (best_entry.barcodes[0].clone(), best_entry.confidence)
@@ -739,6 +878,8 @@ mod tests {
         let extractor = BarcodeExtractor {
             five_prime_regions: five_prime_regions.clone(),
             three_prime_regions: three_prime_regions.clone(),
+            five_prime_trim_regions: Vec::new(),
+            three_prime_trim_regions: Vec::new(),
             five_prime_composite: CompositePattern {
                 pattern: Vec::new(),
                 spans: Vec::new(),
@@ -797,6 +938,177 @@ mod tests {
         assert_eq!(forward_3p.sequence, b"CCGTTA");
         assert_eq!(reverse_5p.sequence, b"TAACG");
         assert_eq!(reverse_3p.sequence, b"TTGACT");
+    }
+
+    #[test]
+    fn test_calculate_five_prime_trim_from_anchor() {
+        let primer = create_test_region(
+            "primer",
+            RegionType::IlluminaP5,
+            SequenceType::Random,
+            10,
+            10,
+        );
+        let fixed = create_test_region("fixed5", RegionType::Linker, SequenceType::Fixed, 6, 6);
+        let barcode = create_test_region("bc5", RegionType::Barcode, SequenceType::Onlist, 8, 8);
+        let umi = create_test_region("umi5", RegionType::Umi, SequenceType::Random, 4, 4);
+
+        let mut end_regions = EndRegions::new(super::super::EndType::FivePrime);
+        end_regions.add_region(primer.clone());
+        end_regions.add_region(fixed.clone());
+        end_regions.add_region(barcode.clone());
+        end_regions.add_region(umi.clone());
+
+        let extractor = BarcodeExtractor {
+            five_prime_regions: end_regions.clone(),
+            three_prime_regions: EndRegions::new(super::super::EndType::ThreePrime),
+            five_prime_trim_regions: vec![
+                primer.clone(),
+                fixed.clone(),
+                barcode.clone(),
+                umi.clone(),
+            ],
+            three_prime_trim_regions: Vec::new(),
+            five_prime_composite: CompositePattern {
+                pattern: Vec::new(),
+                spans: Vec::new(),
+                pos_to_span: Vec::new(),
+            },
+            three_prime_composite: CompositePattern {
+                pattern: Vec::new(),
+                spans: Vec::new(),
+                pos_to_span: Vec::new(),
+            },
+            whitelist_indices: IndexMap::new(),
+        };
+        let segment = EndSegmentWithAlignment {
+            sequence: vec![b'A'; 40],
+            composite_result: Some(CompositeAlignmentResult {
+                score: 40,
+                region_mappings: vec![
+                    make_fixed_mapping(&fixed, 12, 18),
+                    make_spacer_mapping(&barcode, 18, 26),
+                    make_spacer_mapping(&umi, 26, 30),
+                ],
+            }),
+        };
+
+        assert_eq!(
+            extractor.calculate_trim_length(
+                &segment,
+                &end_regions,
+                &extractor.five_prime_trim_regions
+            ),
+            30
+        );
+    }
+
+    #[test]
+    fn test_calculate_three_prime_trim_from_anchor() {
+        let umi = create_test_region("umi3", RegionType::Umi, SequenceType::Random, 4, 4);
+        let barcode = create_test_region("bc3", RegionType::Barcode, SequenceType::Onlist, 8, 8);
+        let fixed = create_test_region("fixed3", RegionType::Linker, SequenceType::Fixed, 6, 6);
+        let adapter = create_test_region("adapter3", RegionType::Umi, SequenceType::Random, 10, 10);
+
+        let mut end_regions = EndRegions::new(super::super::EndType::ThreePrime);
+        end_regions.add_region(barcode.clone());
+        end_regions.add_region(fixed.clone());
+        end_regions.add_region(adapter.clone());
+
+        let extractor = BarcodeExtractor {
+            five_prime_regions: EndRegions::new(super::super::EndType::FivePrime),
+            three_prime_regions: end_regions.clone(),
+            five_prime_trim_regions: Vec::new(),
+            three_prime_trim_regions: vec![
+                umi.clone(),
+                barcode.clone(),
+                fixed.clone(),
+                adapter.clone(),
+            ],
+            five_prime_composite: CompositePattern {
+                pattern: Vec::new(),
+                spans: Vec::new(),
+                pos_to_span: Vec::new(),
+            },
+            three_prime_composite: CompositePattern {
+                pattern: Vec::new(),
+                spans: Vec::new(),
+                pos_to_span: Vec::new(),
+            },
+            whitelist_indices: IndexMap::new(),
+        };
+        let segment = EndSegmentWithAlignment {
+            sequence: vec![b'A'; 40],
+            composite_result: Some(CompositeAlignmentResult {
+                score: 40,
+                region_mappings: vec![
+                    make_spacer_mapping(&barcode, 4, 12),
+                    make_fixed_mapping(&fixed, 12, 18),
+                    make_spacer_mapping(&adapter, 18, 28),
+                ],
+            }),
+        };
+
+        assert_eq!(
+            extractor.calculate_trim_length(
+                &segment,
+                &end_regions,
+                &extractor.three_prime_trim_regions
+            ),
+            40
+        );
+    }
+
+    #[test]
+    fn test_calculate_trim_falls_back_to_average_lengths() {
+        let primer = create_test_region(
+            "primer",
+            RegionType::IlluminaP5,
+            SequenceType::Random,
+            10,
+            10,
+        );
+        let fixed = create_test_region("fixed5", RegionType::Linker, SequenceType::Fixed, 6, 6);
+        let barcode = create_test_region("bc5", RegionType::Barcode, SequenceType::Onlist, 8, 8);
+
+        let mut end_regions = EndRegions::new(super::super::EndType::FivePrime);
+        end_regions.add_region(primer.clone());
+        end_regions.add_region(fixed.clone());
+        end_regions.add_region(barcode.clone());
+
+        let extractor = BarcodeExtractor {
+            five_prime_regions: end_regions.clone(),
+            three_prime_regions: EndRegions::new(super::super::EndType::ThreePrime),
+            five_prime_trim_regions: vec![primer.clone(), fixed.clone(), barcode.clone()],
+            three_prime_trim_regions: Vec::new(),
+            five_prime_composite: CompositePattern {
+                pattern: Vec::new(),
+                spans: Vec::new(),
+                pos_to_span: Vec::new(),
+            },
+            three_prime_composite: CompositePattern {
+                pattern: Vec::new(),
+                spans: Vec::new(),
+                pos_to_span: Vec::new(),
+            },
+            whitelist_indices: IndexMap::new(),
+        };
+        let segment = EndSegmentWithAlignment {
+            sequence: vec![b'A'; 20],
+            composite_result: Some(CompositeAlignmentResult {
+                score: 10,
+                region_mappings: vec![make_spacer_mapping(&barcode, 8, 16)],
+            }),
+        };
+
+        assert_eq!(
+            extractor.calculate_trim_length(
+                &segment,
+                &end_regions,
+                &extractor.five_prime_trim_regions
+            ),
+            24
+        );
     }
 
     #[test]

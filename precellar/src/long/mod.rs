@@ -236,6 +236,41 @@ pub fn collect_end_regions(
     Ok((five_prime_regions, three_prime_regions))
 }
 
+pub(crate) fn collect_target_flanks(
+    lib_spec: &LibSpec,
+    modality: &seqspec::Modality,
+) -> Result<(Vec<Arc<RwLock<Region>>>, Vec<Arc<RwLock<Region>>>)> {
+    let modality_region = lib_spec
+        .get_modality(modality)
+        .ok_or_else(|| anyhow!("Cannot find specified modality: {:?}", modality))?;
+
+    let modality_guard = modality_region.read().unwrap();
+    let subregions = &modality_guard.subregions;
+
+    if subregions.is_empty() {
+        return Err(anyhow!("Modality region has no subregions"));
+    }
+
+    let mut five_prime_flank = Vec::new();
+    let mut three_prime_flank = Vec::new();
+    let mut seen_target = false;
+
+    for region in subregions {
+        let region_type = region.read().unwrap().region_type.clone();
+        if region_type.is_target() {
+            seen_target = true;
+            continue;
+        }
+        if seen_target {
+            three_prime_flank.push(region.clone());
+        } else {
+            five_prime_flank.push(region.clone());
+        }
+    }
+
+    Ok((five_prime_flank, three_prime_flank))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

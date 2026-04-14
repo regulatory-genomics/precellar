@@ -692,13 +692,13 @@ impl FastqAnnotator {
                 // The target sequence is trimmed from the raw read without reverse-complementing it.
                 let (head_trim, tail_trim) = if barcode_result.is_reverse_complemented {
                     (
-                        extractor.three_prime_regions().calculate_cut_length(),
-                        extractor.five_prime_regions().calculate_cut_length(),
+                        barcode_result.three_prime_trim,
+                        barcode_result.five_prime_trim,
                     )
                 } else {
                     (
-                        extractor.five_prime_regions().calculate_cut_length(),
-                        extractor.three_prime_regions().calculate_cut_length(),
+                        barcode_result.five_prime_trim,
+                        barcode_result.three_prime_trim,
                     )
                 };
 
