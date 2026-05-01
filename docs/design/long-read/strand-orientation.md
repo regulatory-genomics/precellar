@@ -70,23 +70,53 @@ If the chosen orientation falls below this threshold:
 
 This prevents weak anchor evidence from driving spurious barcode extraction.
 
-## End-Segment Handling
+## End-Window Sampling And Coordinate Handling
 
-The orientation logic operates on the same bounded end segments used by barcode extraction.
+The orientation logic uses the same bounded windows that are later reused for barcode extraction.
 
-- The segment length for each end is `alignment_window_length()` from the corresponding `EndRegions` collection.
-- For reverse orientation, only the selected end segment is reverse-complemented.
-- For the 3' end in non-reverse-complement mode, the segment is reversed before alignment so the segment ordering matches the composite pattern's outer-to-inner layout.
-- After alignment, region coordinates are converted back into the original segment coordinate system.
+- Window length for each end is `ceil(sum(max_len of end regions) * 1.15)`.
+- End windows are normalized into forward order of the designed library structure before alignment.
+- In that coordinate system, `left = 5' side` and `right = 3' side`.
+- If `should_rc` is true, only the bounded end window is reverse-complemented.
 
-This design keeps orientation detection localized and allows the same cached anchors to be reused immediately by barcode extraction.
+This keeps orientation detection localized and allows the same cached anchors to be reused immediately by barcode extraction.
 
-## Relationship To Trimming
+## Reuse For Trimming
 
-The same composite-alignment results used for orientation are also reused to estimate trimming boundaries.
+The same composite-alignment results are reused to compute precise trimming boundaries, so that orientation detection, barcode extraction, and trimming all share a single end-region interpretation.
 
-- For the 5' end, trimming anchors to the innermost fixed region's `read_end`.
-- For the 3' end, trimming anchors to the innermost fixed region's `read_start` after coordinate normalization.
-- Heuristic trailing-region length and intermediate-gap estimates are added on top of the aligned anchor position.
+### Trim Regions vs End Regions
 
-This reuse keeps orientation, barcode extraction, and target trimming consistent with the same end-region interpretation.
+Trimming uses a broader set of flanking regions than barcode extraction. The extractor collects two region sets from the library specification:
+
+- **End regions** contain only the regions from the first (or last) fixed/barcode anchor to the target boundary, used for composite alignment and barcode extraction.
+- **Trim regions** contain all non-target regions on each side of the target, including any outer regions (e.g., primers, adapters) that fall outside the end-region window.
+
+This distinction matters because trimming must remove the entire non-target portion of the read, not just the barcode-adjacent portion.
+
+### Anchor-Based Precise Trimming
+
+For each end, the extractor computes the trim length as follows:
+
+1. Find the **trim anchor** from the end regions:
+   - For the 5' end: the last (rightmost) fixed region in the end-region collection.
+   - For the 3' end: the first (leftmost) fixed region in the end-region collection.
+2. Look up the anchor's aligned position in the composite alignment result.
+3. Compute a **base length** from the anchor position:
+   - For the 5' end: the anchor's aligned `read_end`.
+   - For the 3' end: `segment_length - anchor.read_start`.
+4. Compute an **offset**: sum of average lengths (`(min_len + max_len) / 2`) of trim regions that lie between the anchor and the target.
+5. Total trim length = base + offset.
+
+### Fallback
+
+If no trim anchor is found in the composite alignment (e.g., because the anchor region was not matched, or no composite alignment was performed for that end), the extractor falls back to the sum of average lengths of all trim regions for that end.
+
+### Orientation-Aware Application
+
+Trim lengths are reported as `five_prime_trim` and `three_prime_trim` in designed-library orientation. When applying trims to the raw read:
+
+- If the read is in forward orientation: `head_trim = five_prime_trim`, `tail_trim = three_prime_trim`.
+- If the read is reverse-complemented: `head_trim = three_prime_trim`, `tail_trim = five_prime_trim`.
+
+The target sequence is then `original_seq[head_trim .. len - tail_trim]`, without reverse-complementing the raw read itself.

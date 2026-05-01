@@ -16,12 +16,28 @@ The long-read barcode workflow is designed for assays where barcode regions are 
 
 The extractor first derives a 5' and 3' `EndRegions` collection from the library specification.
 
-- Traversal starts from each end of the modality layout.
-- Collection stops before the target region such as cDNA or gDNA.
-- Each end keeps all regions from the outside inward through the innermost fixed or barcode region.
+- Region order always follows the forward order of the designed library structure (`5' -> 3'`).
+- In end-segment coordinates, `left = 5' side` and `right = 3' side`.
+- The 5' collection keeps all regions from the library 5' side through the last fixed/barcode before the target.
+- The 3' collection keeps all regions from the first fixed/barcode after the target through the library 3' side.
 - Ends without barcode regions are skipped by the extractor.
 
 This means the barcode workflow only reasons over the structured end regions that can anchor extraction, not the full library layout.
+
+## Trim Region Discovery
+
+In addition to end regions, the extractor collects **trim regions** for each side of the target. Trim regions include all non-target regions on each side, not just the anchor-adjacent subset used for barcode extraction. For example, given a layout:
+
+```
+primer -> barcode -> linker -> cDNA(target) -> UMI -> adapter
+```
+
+- 5' end regions: `[barcode, linker]` (from first anchor to target)
+- 5' trim regions: `[primer, barcode, linker]` (all non-target regions on the 5' side)
+- 3' end regions: `[adapter]` (from first anchor after target to end, if adapter is fixed)
+- 3' trim regions: `[UMI, adapter]` (all non-target regions on the 3' side)
+
+The trim regions are used to compute how much sequence to remove from each end of the raw read before alignment. The trimming algorithm and its fallback behavior are described in [Strand Orientation — Reuse For Trimming](strand-orientation.md#reuse-for-trimming).
 
 ## Composite Alignment Pattern
 
@@ -44,7 +60,7 @@ The composite scoring model is:
 
 This scoring intentionally tolerates indels and variable-length regions that are common in long-read data.
 
-## Segment Cutting
+## End-Window Sampling
 
 Barcode extraction never aligns the full read for anchor detection.
 
@@ -52,7 +68,7 @@ Barcode extraction never aligns the full read for anchor detection.
 - Segment length is `sum(max_len of end regions) * 1.15`, rounded up.
 - The 15% buffer allows moderate indel drift during long-read sequencing.
 
-For the 3' end in forward orientation, the physical segment order is opposite from the composite pattern's outer-to-inner order. The implementation reverses the segment for alignment and then maps coordinates back into segment space.
+Each end segment is normalized into the same forward order as its `EndRegions` collection before composite alignment. The extractor only reverse-complements bounded end windows when evaluating the reverse-orientation hypothesis.
 
 ## Barcode Extraction Workflow
 
@@ -70,27 +86,27 @@ The barcode extractor only proceeds when the chosen orientation has average fixe
 
 Barcode windows are not taken from fixed offsets. They are derived from alignment anchors using a strict topological hierarchy.
 
-### 1. Outer-Adjacent Anchoring
+### 1. Left-Adjacent Anchoring
 
-If the barcode's immediate outer neighbor is a fixed region:
+If the barcode's immediate left neighbor is a fixed region:
 
 - start at that fixed region's aligned `read_end`
-- extend inward by up to `1.2 * barcode_length`
-- cap the end at the next inner fixed region if present
+- extend right by up to `1.2 * barcode_length`
+- cap the end at the next right fixed region if present
 
-### 2. Inner-Adjacent Anchoring
+### 2. Right-Adjacent Anchoring
 
-If the barcode's immediate inner neighbor is a fixed region:
+If the barcode's immediate right neighbor is a fixed region:
 
 - end at that fixed region's aligned `read_start`
-- extend outward by up to `1.2 * barcode_length`
-- cap the start at the nearest outer fixed region if present
+- extend left by up to `1.2 * barcode_length`
+- cap the start at the nearest left fixed region if present
 
 ### 3. Sandwiched Non-Adjacent Anchoring
 
 If neither immediate neighbor is fixed, but fixed regions exist on both sides:
 
-- use the full gap between the nearest outer and inner fixed anchors
+- use the full gap between the nearest left and right fixed anchors
 
 ### 4. Terminal Edge Extraction
 
@@ -166,4 +182,4 @@ Long-read barcode extraction returns no barcode when any of the following blocks
 - no valid extraction window can be located, for example because no usable anchor topology is found or the candidate window is shorter than `floor(0.8 * barcode_length)`
 - whitelist matching fails, meaning no tied-best barcode candidate reaches confidence `0.7`, where confidence is `1 - min_edit_distance / barcode_length`
 
-In those cases, the extractor still preserves orientation and composite-alignment metadata when available, which can be used for trimming or debugging. For read-length failures, an end may remain empty because no composite alignment is attempted for that end.
+In those cases, the extractor still preserves orientation metadata and computes trim lengths when composite-alignment results are available. Even when no barcode is returned, the trim values allow the pipeline to remove non-target regions from the read. For read-length failures, an end may remain empty because no composite alignment is attempted for that end; the trim length then falls back to the sum of average region lengths.

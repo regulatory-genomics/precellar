@@ -236,6 +236,7 @@ pub fn collect_end_regions(
     Ok((five_prime_regions, three_prime_regions))
 }
 
+/// Collect the flanking non-target regions for 5' and 3' ends, used for read trimming.
 pub(crate) fn collect_target_flanks(
     lib_spec: &LibSpec,
     modality: &seqspec::Modality,

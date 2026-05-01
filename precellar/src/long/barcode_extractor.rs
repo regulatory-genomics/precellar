@@ -274,8 +274,8 @@ fn locate_barcode_extraction_window(
 pub struct BarcodeExtractor {
     five_prime_regions: EndRegions,
     three_prime_regions: EndRegions,
-    five_prime_trim_regions: Vec<Arc<RwLock<Region>>>,
-    three_prime_trim_regions: Vec<Arc<RwLock<Region>>>,
+    five_prime_trim_regions: Vec<Arc<RwLock<Region>>>,  // Flanking non-target regions for 5' end
+    three_prime_trim_regions: Vec<Arc<RwLock<Region>>>, // Flanking non-target regions for 3' end
     /// Prebuilt composite patterns (built once, reused for all reads)
     five_prime_composite: CompositePattern,
     three_prime_composite: CompositePattern,
@@ -987,8 +987,8 @@ mod tests {
                 score: 40,
                 region_mappings: vec![
                     make_fixed_mapping(&fixed, 12, 18),
-                    make_spacer_mapping(&barcode, 18, 26),
-                    make_spacer_mapping(&umi, 26, 30),
+                    make_spacer_mapping(&barcode, 18, 25),
+                    make_spacer_mapping(&umi, 25, 28),
                 ],
             }),
         };
@@ -1010,6 +1010,7 @@ mod tests {
         let fixed = create_test_region("fixed3", RegionType::Linker, SequenceType::Fixed, 6, 6);
         let adapter = create_test_region("adapter3", RegionType::Umi, SequenceType::Random, 10, 10);
 
+        // The length of sampled end segment is (8 + 6 + 10) * 1.15 = 27.6 -> 28bp.
         let mut end_regions = EndRegions::new(super::super::EndType::ThreePrime);
         end_regions.add_region(barcode.clone());
         end_regions.add_region(fixed.clone());
@@ -1038,11 +1039,11 @@ mod tests {
             whitelist_indices: IndexMap::new(),
         };
         let segment = EndSegmentWithAlignment {
-            sequence: vec![b'A'; 40],
+            sequence: vec![b'A'; 28],
             composite_result: Some(CompositeAlignmentResult {
                 score: 40,
                 region_mappings: vec![
-                    make_spacer_mapping(&barcode, 4, 12),
+                    make_spacer_mapping(&barcode, 3, 12),
                     make_fixed_mapping(&fixed, 12, 18),
                     make_spacer_mapping(&adapter, 18, 28),
                 ],
@@ -1055,7 +1056,7 @@ mod tests {
                 &end_regions,
                 &extractor.three_prime_trim_regions
             ),
-            40
+            28
         );
     }
 
