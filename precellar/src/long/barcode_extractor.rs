@@ -1,5 +1,6 @@
 use anyhow::Result;
 use indexmap::{IndexMap, IndexSet};
+use std::collections::HashSet;
 use std::sync::{Arc, RwLock};
 
 use seqspec::region::{LibSpec, Region};
@@ -281,6 +282,8 @@ pub struct BarcodeExtractor {
     three_prime_composite: CompositePattern,
     /// Barcode whitelist indices: region_id -> BarcodeIndex
     whitelist_indices: IndexMap<String, BarcodeIndex>,
+    /// Region IDs whose extracted candidate should be reverse-complemented before whitelist matching
+    rc_regions: HashSet<String>,
 }
 
 impl BarcodeExtractor {
@@ -333,6 +336,23 @@ impl BarcodeExtractor {
             }
         }
 
+        // Collect region IDs that require reverse-complementing before whitelist matching
+        let mut rc_regions = HashSet::new();
+        for region in five_prime_regions
+            .regions
+            .iter()
+            .chain(three_prime_regions.regions.iter())
+        {
+            let guard = region.read().unwrap();
+            if guard.region_type.is_barcode() {
+                if let Some(onlist) = &guard.onlist {
+                    if onlist.rc {
+                        rc_regions.insert(guard.region_id.clone());
+                    }
+                }
+            }
+        }
+
         Ok(Self {
             five_prime_regions,
             three_prime_regions,
@@ -341,6 +361,7 @@ impl BarcodeExtractor {
             five_prime_composite,
             three_prime_composite,
             whitelist_indices,
+            rc_regions,
         })
     }
 
@@ -671,7 +692,16 @@ impl BarcodeExtractor {
             );
 
             if let Some((start, end)) = window {
-                let candidate_seq = &segment.sequence[start..end];
+                let raw_seq = &segment.sequence[start..end];
+                let rc_seq;
+                let candidate_seq = if self.rc_regions.contains(
+                    &barcode_region.read().unwrap().region_id,
+                ) {
+                    rc_seq = seqspec::utils::rev_compl(raw_seq);
+                    rc_seq.as_slice()
+                } else {
+                    raw_seq
+                };
 
                 if let Some(matched) = find_best_barcode_match(
                     candidate_seq,
@@ -891,6 +921,7 @@ mod tests {
                 pos_to_span: Vec::new(),
             },
             whitelist_indices: IndexMap::new(),
+            rc_regions: HashSet::new(),
         };
 
         let sequence = b"AGTCAAAACCCCGTTA";
@@ -980,6 +1011,7 @@ mod tests {
                 pos_to_span: Vec::new(),
             },
             whitelist_indices: IndexMap::new(),
+            rc_regions: HashSet::new(),
         };
         let segment = EndSegmentWithAlignment {
             sequence: vec![b'A'; 40],
@@ -1037,6 +1069,7 @@ mod tests {
                 pos_to_span: Vec::new(),
             },
             whitelist_indices: IndexMap::new(),
+            rc_regions: HashSet::new(),
         };
         let segment = EndSegmentWithAlignment {
             sequence: vec![b'A'; 28],
@@ -1093,6 +1126,7 @@ mod tests {
                 pos_to_span: Vec::new(),
             },
             whitelist_indices: IndexMap::new(),
+            rc_regions: HashSet::new(),
         };
         let segment = EndSegmentWithAlignment {
             sequence: vec![b'A'; 20],

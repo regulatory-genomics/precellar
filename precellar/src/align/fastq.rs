@@ -622,8 +622,15 @@ impl FastqAnnotator {
                     if segment.is_barcode() || segment.is_umi() {
                         let mut fq = segment.into_fq(record.definition());
 
-                        // If the Read is reverse, reverse the sequence and quality of barcode/UMI segments
-                        if self.segment_info.is_reverse() {
+                        // Determine if this segment needs RC to match the whitelist orientation.
+                        // For barcode segments, XOR Read.strand direction with onlist.rc;
+                        // for UMI segments, only Read.strand matters.
+                        let should_rc = if segment.is_barcode() {
+                            self.segment_info.is_reverse() ^ analyzer.should_rc(segment.region_id())
+                        } else {
+                            self.segment_info.is_reverse()
+                        };
+                        if should_rc {
                             fq = rev_compl_fastq_record(fq);
                         }
 
