@@ -10,17 +10,17 @@ modalities:
 lib_struct: https://static-content.springer.com/esm/art%3A10.1038%2Fs41422-022-00730-x/MediaObjects/41422_2022_730_MOESM1_ESM.pdf
 library_protocol: Custom
 library_kit: Custom
-sequence_protocol: Oxfold Nanopore
+sequence_protocol: Oxford Nanopore
 sequence_kit: Custom
 sequence_spec:
 - !Read
   read_id: R1
   name: Read 1
   modality: atac
-  primer_id: mix_seq
+  primer_id: start_linker
   min_len: 1000
   max_len: 2147483647
-  strand: pos
+  strand: unstranded
   files:
   - file_id: SRR17666426.fastq
     filename: SRR17666426.fastq
@@ -35,43 +35,51 @@ library_spec:
   region_type: atac
   name: ATAC
   sequence_type: joined
-  sequence: 
+  sequence: ""
   min_len: 1000
   max_len: 2147483647
   onlist: null
   regions:
   - !Region
-    region_id: mix_seq
+    region_id: start_linker
     region_type: custom_primer
-    name: mixture sequence
-    sequence_type: random
-    sequence: XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
-    min_len: 150
-    max_len: 150
-    onlist: null
-    regions: null
-  - !Region
-    region_id: gdna
-    region_type: gdna
-    name: gdna
-    sequence_type: random
-    sequence: XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
-    min_len: 1000
-    max_len: 2147483647
-    onlist: null
-    regions: null
-  - !Region
-    region_id: adapter
-    region_type: named
-    name: adapter
+    name: start
     sequence_type: fixed
-    sequence: CTGTCTCTTATACACATCTGACGCTGCCGACGA
-    min_len: 33
-    max_len: 33
+    sequence: ATCT
+    min_len: 4
+    max_len: 4
     onlist: null
     regions: null
   - !Region
-    region_id: inner barcode
+    region_id: outer_barcode_5p
+    region_type: barcode
+    name: outer barcode
+    sequence_type: onlist
+    sequence: NNNNNNNNNNNNNNNNNNNNNNNN
+    min_len: 24
+    max_len: 24
+    onlist: !Onlist
+      file_id: 96_barcode.txt
+      filename: 96_barcode.txt
+      filetype: txt
+      filesize: 0
+      url: /data/scNanoATAC/96_barcode.txt
+      urltype: local
+      md5: ""
+      location: local
+    regions: null
+  - !Region
+    region_id: linker_5p
+    region_type: linker
+    name: linker
+    sequence_type: fixed
+    sequence: CTACACGACGCTCTTCCGATCT
+    min_len: 22
+    max_len: 22
+    onlist: null
+    regions: null
+  - !Region
+    region_id: inner_barcode_5p
     region_type: barcode
     name: inner barcode
     sequence_type: onlist
@@ -89,7 +97,56 @@ library_spec:
       location: local
     regions: null
   - !Region
-    region_id: linker
+    region_id: adapter_5p
+    region_type: named
+    name: adapter
+    sequence_type: fixed
+    sequence: TCGTCGGCAGCGTCAGATGTGTATAAGAGACAG
+    min_len: 33
+    max_len: 33
+    onlist: null
+    regions: null
+  - !Region
+    region_id: gdna
+    region_type: gdna
+    name: gdna
+    sequence_type: random
+    sequence: ""
+    min_len: 1000
+    max_len: 2147483647
+    onlist: null
+    regions: null
+  - !Region
+    region_id: adapter_3p
+    region_type: named
+    name: adapter
+    sequence_type: fixed
+    sequence: CTGTCTCTTATACACATCTGACGCTGCCGACGA
+    min_len: 33
+    max_len: 33
+    onlist: null
+    regions: null
+  - !Region
+    region_id: inner_barcode_3p
+    region_type: barcode
+    name: inner barcode
+    sequence_type: onlist
+    sequence: NNNNNNNNNNNNNNNNNNNNNNNN
+    min_len: 24
+    max_len: 24
+    onlist: !Onlist
+      file_id: 96_barcode.txt
+      filename: 96_barcode.txt
+      filetype: txt
+      filesize: 0
+      url: /data/scNanoATAC/96_barcode.txt
+      urltype: local
+      md5: ""
+      location: local
+      reverse_complement: true
+    regions: null
+  - !Region
+    region_id: linker_3p
     region_type: linker
     name: linker
     sequence_type: fixed
@@ -99,7 +156,7 @@ library_spec:
     onlist: null
     regions: null
   - !Region
-    region_id: outer barcode
+    region_id: outer_barcode_3p
     region_type: barcode
     name: outer barcode
     sequence_type: onlist
@@ -115,6 +172,7 @@ library_spec:
       urltype: local
       md5: ""
       location: local
+      reverse_complement: true
     regions: null
   - !Region
     region_id: end_linker
