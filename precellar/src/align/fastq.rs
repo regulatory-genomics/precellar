@@ -1,8 +1,8 @@
 use super::aligners::{Aligner, MultiMap, MultiMapR};
 
 use crate::barcode::{BarcodeAnalyzer, BarcodeCorrectOptions};
-use crate::long::BarcodeExtractor;
-use crate::qc::{QcAlign, QcFastq};
+use crate::long::{BarcodeExtractor, LrBarcodeExtractionStats};
+use crate::qc::{QcAlign, QcFastq, QcLongRead};
 use crate::utils::{rev_compl_fastq_record, PrefetchIterator};
 use anyhow::Result;
 use bstr::BString;
@@ -37,6 +37,7 @@ pub struct FastqProcessor {
     mismatch_in_barcode: usize, // The number of mismatches allowed in barcode
     qc_align: HashMap<Modality, Arc<Mutex<QcAlign>>>,
     qc_fastq: HashMap<Modality, Arc<Mutex<QcFastq>>>,
+    qc_longread: HashMap<Modality, Arc<Mutex<QcLongRead>>>,
 }
 
 impl FastqProcessor {
@@ -50,6 +51,7 @@ impl FastqProcessor {
             mismatch_in_barcode: 1,
             qc_align: HashMap::new(),
             qc_fastq: HashMap::new(),
+            qc_longread: HashMap::new(),
         }
     }
 
@@ -82,6 +84,11 @@ impl FastqProcessor {
         self.qc_align
             .get(&self.modality())
             .expect("align qc not found")
+    }
+
+    /// Get long-read QC metrics. Returns None if the current modality is not long-read.
+    pub fn get_longread_qc(&self) -> Option<&Arc<Mutex<QcLongRead>>> {
+        self.qc_longread.get(&self.modality())
     }
 
     /// Align reads and return the alignments.
@@ -127,6 +134,12 @@ impl FastqProcessor {
         self.qc_fastq
             .insert(modality.clone(), Arc::new(Mutex::new(QcFastq::default())));
 
+        let qc_fastq = self.get_fastq_qc().clone();
+        // Initialize long-read QC for this modality
+        let qc_longread = self.qc_longread
+            .entry(modality.clone())
+            .or_insert_with(|| Arc::new(Mutex::new(QcLongRead::default())))
+            .clone();
         let num_assays = self.assay.len();
         let result: Vec<_> =
             self.assay
@@ -172,9 +185,10 @@ impl FastqProcessor {
                                 },
                             );
                             Some(AnnotatedFastqReader::new(
-                                readers, 
-                                self.get_fastq_qc().clone(), 
-                                BarcodeProcessor::ShortRead(barcode_analyzer), 
+                                readers,
+                                qc_fastq.clone(),
+                                None,
+                                BarcodeProcessor::ShortRead(barcode_analyzer),
                                 chunk_size
                             ))
                         }
@@ -213,6 +227,9 @@ impl FastqProcessor {
                                 }
                             };
 
+                            // Initialize long-read QC
+                            let qc_lr = qc_longread.clone();
+
                             let readers = assay.get_segments_by_modality(modality).filter_map(
                                 |(read, segment_info)| {
                                     let annotator = FastqAnnotator::new(
@@ -224,9 +241,10 @@ impl FastqProcessor {
                                 },
                             );
                             Some(AnnotatedFastqReader::new(
-                                readers, 
-                                self.get_fastq_qc().clone(), 
-                                BarcodeProcessor::LongRead(barcode_extractor), 
+                                readers,
+                                qc_fastq.clone(),
+                                Some(qc_lr),
+                                BarcodeProcessor::LongRead(barcode_extractor),
                                 chunk_size
                             ))
                         }
@@ -384,6 +402,7 @@ struct AnnotatedFastqReader {
     readers: PrefetchIterator<Vec<SmallVec<[fastq::Record; 4]>>>,
     barcode_processor: BarcodeProcessor,
     qc: Arc<Mutex<QcFastq>>,
+    qc_longread: Option<Arc<Mutex<QcLongRead>>>,
     thread_pool: rayon::ThreadPool,
     annotation_duration: Duration,
 }
@@ -392,6 +411,7 @@ impl AnnotatedFastqReader {
     fn new<T: IntoIterator<Item = (FastqAnnotator, FastqReader)>>(
         iter: T,
         qc: Arc<Mutex<QcFastq>>,
+        qc_longread: Option<Arc<Mutex<QcLongRead>>>,
         barcode_processor: BarcodeProcessor,
         chunk_size: usize,
     ) -> Self {
@@ -412,6 +432,7 @@ impl AnnotatedFastqReader {
             trim_poly_a: false,
             barcode_processor,
             qc,
+            qc_longread,
             thread_pool,
             annotation_duration: Duration::ZERO,
         }
@@ -461,8 +482,11 @@ impl Iterator for AnnotatedFastqReader {
             chunk
                 .par_chunks(n / 128)
                 .flat_map_iter(|chunk| {
-                    let (fq, qc) = process_chunk(&self.barcode_processor, &annotators, chunk);
+                    let (fq, qc, qc_lr) = process_chunk(&self.barcode_processor, &annotators, chunk);
                     self.qc.lock().unwrap().extend(std::iter::once(qc));
+                    if let Some(ref lr_qc) = self.qc_longread {
+                        lr_qc.lock().unwrap().extend(std::iter::once(qc_lr));
+                    }
                     fq
                 })
                 .collect()
@@ -487,8 +511,9 @@ fn process_chunk<'a, I: IntoIterator<Item = &'a SmallVec<[fastq::Record; 4]>>>(
     barcode_processor: &BarcodeProcessor,
     annotators: &[FastqAnnotator],
     chunk: I,
-) -> (Vec<AnnotatedFastq>, QcFastq) {
+) -> (Vec<AnnotatedFastq>, QcFastq, QcLongRead) {
     let mut qc = QcFastq::default();
+    let mut qc_lr = QcLongRead::default();
     let annotated = chunk
         .into_iter()
         .flat_map(|records| {
@@ -499,11 +524,22 @@ fn process_chunk<'a, I: IntoIterator<Item = &'a SmallVec<[fastq::Record; 4]>>>(
                     let annotator = &annotators[i];
                     let id = &annotator.read_id;
                     *qc.num_reads.entry(id.clone()).or_insert(0) += 1;
-                    if let Ok(anno) = annotator.annotate(record, barcode_processor) {
-                        Some(anno)
-                    } else {
-                        *qc.num_defect.entry(id.clone()).or_insert(0) += 1;
-                        None
+                    match annotator.annotate(record, barcode_processor) {
+                        Ok((anno, lr_stats)) => {
+                            if let Some(stats) = lr_stats {
+                                qc_lr.record_orientation(stats.is_reverse, !stats.composite_pass);
+                                qc_lr.record_composite_alignment(stats.composite_pass);
+                                qc_lr.record_barcode_extraction(anno.barcode.is_some());
+                                for (group_name, intersection_hit) in &stats.consensus_results {
+                                    qc_lr.record_consensus(group_name, *intersection_hit);
+                                }
+                            }
+                            Some(anno)
+                        }
+                        Err(_) => {
+                            *qc.num_defect.entry(id.clone()).or_insert(0) += 1;
+                            None
+                        }
                     }
                 })
                 .reduce(|mut this, other| {
@@ -518,7 +554,7 @@ fn process_chunk<'a, I: IntoIterator<Item = &'a SmallVec<[fastq::Record; 4]>>>(
             }
         })
         .collect();
-    (annotated, qc)
+    (annotated, qc, qc_lr)
 }
 
 /// A batched FASTQ reader that reads multiple FASTQ files in batches.
@@ -608,7 +644,7 @@ impl FastqAnnotator {
         &self,
         record: &fastq::Record,
         barcode_processor: &BarcodeProcessor,
-    ) -> Result<AnnotatedFastq, anyhow::Error> {
+    ) -> Result<(AnnotatedFastq, Option<LrBarcodeExtractionStats>), anyhow::Error> {
         match barcode_processor {
 
             BarcodeProcessor::ShortRead(analyzer) => {
@@ -662,20 +698,21 @@ impl FastqAnnotator {
                     }
                 });
 
-                Ok(AnnotatedFastq {
+                Ok((AnnotatedFastq {
                     barcode,
                     umi,
                     read1,
                     read2,
-                })
+                }, None))
             }
             BarcodeProcessor::LongRead(extractor) => {
                 // For long reads: extract barcode and trim EndRegions from sequence
 
                 // 1. Extract barcode
-                let barcode_result = extractor.extract_barcode(record)?;
+                let (barcode_result, extraction_stats) = extractor.extract_barcode(record)?;
+
                 let barcode = if barcode_result.is_success() {
-                    if let Some(extracted_bc) = barcode_result.barcode {
+                    if let Some(extracted_bc) = barcode_result.barcode.clone() {
                         let bc_record = fastq::Record::new(
                             record.definition().clone(),
                             extracted_bc.clone(),
@@ -745,12 +782,12 @@ impl FastqAnnotator {
                     (Some(target_record), None)
                 };
 
-                Ok(AnnotatedFastq {
+                Ok((AnnotatedFastq {
                     barcode,
                     umi: None, // Long reads typically don't have UMIs
                     read1,
                     read2,
-                })
+                }, Some(extraction_stats)))
             }
         }
     }

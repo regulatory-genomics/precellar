@@ -464,3 +464,139 @@ impl From<QcGeneQuant> for Value {
         })
     }
 }
+
+// Long-Read QC
+/// Per-barcode-group consensus resolution statistics.
+#[derive(Debug, Default, Clone)]
+pub struct ConsensusStats {
+    /// Number of reads where this group had entries from multiple ends
+    pub attempted: u64,
+    /// Number of times the candidate intersection was non-empty
+    pub intersection_hit: u64,
+    /// Number of times the candidate intersection was empty (fallback to best)
+    pub intersection_miss: u64,
+}
+
+impl ConsensusStats {
+    pub fn combine(&mut self, other: &Self) {
+        self.attempted += other.attempted;
+        self.intersection_hit += other.intersection_hit;
+        self.intersection_miss += other.intersection_miss;
+    }
+}
+
+/// QC metrics specific to long-read barcode extraction.
+#[derive(Debug, Default)]
+pub struct QcLongRead {
+    // Orientation detection
+    pub orientation_forward: u64,
+    pub orientation_reverse: u64,
+    pub orientation_undetermined: u64,
+
+    // Composite alignment quality gate
+    pub composite_alignment_pass: u64,
+    pub composite_alignment_fail: u64,
+
+    // Barcode extraction outcome
+    pub barcode_extracted: u64,
+    pub barcode_failed: u64,
+
+    // Consensus resolution (keyed by barcode group name)
+    pub consensus_stats: HashMap<String, ConsensusStats>,
+}
+
+impl QcLongRead {
+    pub fn record_orientation(&mut self, is_reverse: bool, is_undetermined: bool) {
+        if is_undetermined {
+            self.orientation_undetermined += 1;
+        } else if is_reverse {
+            self.orientation_reverse += 1;
+        } else {
+            self.orientation_forward += 1;
+        }
+    }
+
+    pub fn record_composite_alignment(&mut self, pass: bool) {
+        if pass {
+            self.composite_alignment_pass += 1;
+        } else {
+            self.composite_alignment_fail += 1;
+        }
+    }
+
+    pub fn record_barcode_extraction(&mut self, success: bool) {
+        if success {
+            self.barcode_extracted += 1;
+        } else {
+            self.barcode_failed += 1;
+        }
+    }
+
+    pub fn record_consensus(&mut self, group_name: &str, intersection_hit: bool) {
+        let stats = self.consensus_stats.entry(group_name.to_string()).or_default();
+        stats.attempted += 1;
+        if intersection_hit {
+            stats.intersection_hit += 1;
+        } else {
+            stats.intersection_miss += 1;
+        }
+    }
+}
+
+impl Extend<Self> for QcLongRead {
+    fn extend<T: IntoIterator<Item = Self>>(&mut self, iter: T) {
+        for other in iter {
+            self.orientation_forward += other.orientation_forward;
+            self.orientation_reverse += other.orientation_reverse;
+            self.orientation_undetermined += other.orientation_undetermined;
+            self.composite_alignment_pass += other.composite_alignment_pass;
+            self.composite_alignment_fail += other.composite_alignment_fail;
+            self.barcode_extracted += other.barcode_extracted;
+            self.barcode_failed += other.barcode_failed;
+            for (k, v) in other.consensus_stats {
+                self.consensus_stats.entry(k).or_default().combine(&v);
+            }
+        }
+    }
+}
+
+impl Metric for QcLongRead {
+    fn to_json(&self) -> Value {
+        let total_reads = self.orientation_forward
+            + self.orientation_reverse
+            + self.orientation_undetermined;
+
+        let consensus: serde_json::Map<String, Value> = self
+            .consensus_stats
+            .iter()
+            .map(|(name, stats)| {
+                (
+                    name.clone(),
+                    json!({
+                        "attempted": stats.attempted,
+                        "intersection_hit": stats.intersection_hit,
+                        "intersection_miss": stats.intersection_miss,
+                    }),
+                )
+            })
+            .collect();
+
+        json!({
+            "total_reads": total_reads,
+            "orientation": {
+                "forward": self.orientation_forward,
+                "reverse": self.orientation_reverse,
+                "undetermined": self.orientation_undetermined,
+            },
+            "composite_alignment": {
+                "pass": self.composite_alignment_pass,
+                "fail": self.composite_alignment_fail,
+            },
+            "barcode_extraction": {
+                "success": self.barcode_extracted,
+                "fail": self.barcode_failed,
+            },
+            "consensus": consensus,
+        })
+    }
+}

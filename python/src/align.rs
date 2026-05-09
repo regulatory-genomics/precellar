@@ -374,6 +374,12 @@ pub fn align<'py>(
         "alignment".to_owned(),
         processor.get_align_qc().lock().unwrap().to_json(),
     );
+    if let Some(lr_qc) = processor.get_longread_qc() {
+        qc_metrics.insert(
+            "long_read".to_owned(),
+            lr_qc.lock().unwrap().to_json(),
+        );
+    }
 
     Ok(value_into_pyobject(qc_metrics.into(), py))
 }

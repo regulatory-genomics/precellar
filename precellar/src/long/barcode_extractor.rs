@@ -35,6 +35,17 @@ impl LongReadBarcodeResult {
     }
 }
 
+/// Per-read statistics from the long-read barcode extraction process, used for QC accumulation.
+#[derive(Debug, Clone, Default)]
+pub struct LrBarcodeExtractionStats {
+    /// Whether the chosen orientation was forward (false) or reverse (true)
+    pub is_reverse: bool,
+    /// Whether composite alignment passed the quality gate
+    pub composite_pass: bool,
+    /// Per barcode-group consensus results: (group_name, intersection_hit)
+    pub consensus_results: Vec<(String, bool)>,
+}
+
 /// Successfully extracted barcode with metadata (may contain multiple tied-best candidates)
 #[derive(Debug, Clone)]
 pub struct ExtractedBarcode {
@@ -378,7 +389,7 @@ impl BarcodeExtractor {
     pub fn extract_barcode(
         &self,
         record: &noodles::fastq::Record,
-    ) -> Result<LongReadBarcodeResult> {
+    ) -> Result<(LongReadBarcodeResult, LrBarcodeExtractionStats)> {
         let sequence = record.sequence();
         let quality = record.quality_scores();
 
@@ -413,7 +424,13 @@ impl BarcodeExtractor {
 
         // Step 2: If forward meets threshold, use it directly (fast path)
         if forward_evidence.meets_threshold() {
-            return self.extract_barcodes_from_segments(forward_5p, forward_3p, false);
+            let (result, consensus_results) = self.extract_barcodes_from_segments(forward_5p, forward_3p, false)?;
+            let stats = LrBarcodeExtractionStats {
+                is_reverse: false,
+                composite_pass: true,
+                consensus_results,
+            };
+            return Ok((result, stats));
         }
 
         // Step 3: Forward didn't meet threshold, try reverse orientation
@@ -464,7 +481,7 @@ impl BarcodeExtractor {
                     forward_evidence.avg_fixed_match_rate, reverse_evidence.avg_fixed_match_rate,
                 );
             }
-            return Ok(LongReadBarcodeResult {
+            return Ok((LongReadBarcodeResult {
                 barcode: None,
                 confidence: 0.0,
                 is_reverse_complemented: should_rc,
@@ -494,15 +511,25 @@ impl BarcodeExtractor {
                         &self.three_prime_trim_regions,
                     )
                 },
-            });
+            }, LrBarcodeExtractionStats {
+                is_reverse: should_rc,
+                composite_pass: false,
+                consensus_results: Vec::new(),
+            }));
         }
 
         // Step 6: Extract barcodes using cached anchors from the chosen orientation
-        if should_rc {
-            self.extract_barcodes_from_segments(reverse_5p, reverse_3p, true)
+        let (result, consensus_results) = if should_rc {
+            self.extract_barcodes_from_segments(reverse_5p, reverse_3p, true)?
         } else {
-            self.extract_barcodes_from_segments(forward_5p, forward_3p, false)
-        }
+            self.extract_barcodes_from_segments(forward_5p, forward_3p, false)?
+        };
+        let stats = LrBarcodeExtractionStats {
+            is_reverse: should_rc,
+            composite_pass: true,
+            consensus_results,
+        };
+        Ok((result, stats))
     }
 
     /// Sample an end window and find fixed-region alignment in one pass.
@@ -549,13 +576,15 @@ impl BarcodeExtractor {
         })
     }
 
-    /// Extract barcodes from precomputed segments with composite alignment
+    /// Extract barcodes from precomputed segments with composite alignment.
+    /// Returns (LongReadBarcodeResult, consensus_results) where consensus_results
+    /// contains (group_name, intersection_hit) for each multi-end barcode group.
     fn extract_barcodes_from_segments(
         &self,
         five_prime: EndSegmentWithAlignment,
         three_prime: EndSegmentWithAlignment,
         is_reverse_complemented: bool,
-    ) -> Result<LongReadBarcodeResult> {
+    ) -> Result<(LongReadBarcodeResult, Vec<(String, bool)>)> {
         let mut extracted_barcodes = Vec::new();
         let five_prime_trim = self.calculate_trim_length(
             &five_prime,
@@ -582,11 +611,11 @@ impl BarcodeExtractor {
             extracted_barcodes.extend(barcode_results);
         }
 
-        let mut result = self.combine_barcodes(extracted_barcodes)?;
+        let (mut result, consensus_results) = self.combine_barcodes(extracted_barcodes)?;
         result.is_reverse_complemented = is_reverse_complemented;
         result.five_prime_trim = five_prime_trim;
         result.three_prime_trim = three_prime_trim;
-        Ok(result)
+        Ok((result, consensus_results))
     }
 
     fn calculate_trim_length(
@@ -754,15 +783,15 @@ impl BarcodeExtractor {
     ///   1. Intersect candidate sets
     ///   2. Non-empty intersection: pick first from intersection
     ///   3. Empty intersection: pick from the entry with highest confidence
-    fn combine_barcodes(&self, barcodes: Vec<ExtractedBarcode>) -> Result<LongReadBarcodeResult> {
+    fn combine_barcodes(&self, barcodes: Vec<ExtractedBarcode>) -> Result<(LongReadBarcodeResult, Vec<(String, bool)>)> {
         if barcodes.is_empty() {
-            return Ok(LongReadBarcodeResult {
+            return Ok((LongReadBarcodeResult {
                 barcode: None,
                 confidence: 0.0,
                 is_reverse_complemented: false,
                 five_prime_trim: 0,
                 three_prime_trim: 0,
-            });
+            }, Vec::new()));
         }
 
         // Group by region_name, preserving first-seen order
@@ -775,14 +804,17 @@ impl BarcodeExtractor {
         let mut combined_barcode = Vec::new();
         let mut total_confidence = 0.0;
         let mut num_resolved = 0usize;
+        let mut consensus_results = Vec::new();
 
-        for (_region_name, entries) in &groups {
+        for (region_name, entries) in &groups {
             let (chosen_barcode, chosen_confidence) = if entries.len() == 1 {
                 // Single entry: pick first candidate
                 (entries[0].barcodes[0].clone(), entries[0].confidence)
             } else {
                 // Multiple entries: try intersection
-                Self::resolve_multi_end_barcode(entries)
+                let (bc, conf, hit) = Self::resolve_multi_end_barcode(entries);
+                consensus_results.push((region_name.clone(), hit));
+                (bc, conf)
             };
 
             combined_barcode.extend(&chosen_barcode);
@@ -796,13 +828,13 @@ impl BarcodeExtractor {
             0.0
         };
 
-        Ok(LongReadBarcodeResult {
+        Ok((LongReadBarcodeResult {
             barcode: Some(combined_barcode),
             confidence: average_confidence,
             is_reverse_complemented: false,
             five_prime_trim: 0,
             three_prime_trim: 0,
-        })
+        }, consensus_results))
     }
 
     /// Resolve a barcode region that appears at multiple ends.
@@ -812,7 +844,7 @@ impl BarcodeExtractor {
     /// 2. Non-empty intersection → pick first from intersection
     /// 3. Empty intersection → pick from entry with highest confidence;
     ///    if tied, pool all candidates and pick first
-    fn resolve_multi_end_barcode(entries: &[&ExtractedBarcode]) -> (Vec<u8>, f64) {
+    fn resolve_multi_end_barcode(entries: &[&ExtractedBarcode]) -> (Vec<u8>, f64, bool) {
         use std::collections::HashSet;
 
         // Build intersection of candidate sets
@@ -833,7 +865,7 @@ impl BarcodeExtractor {
                 .iter()
                 .find(|bc| intersection.contains(*bc))
                 .unwrap_or_else(|| intersection.iter().next().unwrap());
-            return (chosen.clone(), best_entry.confidence);
+            return (chosen.clone(), best_entry.confidence, true);
         }
 
         // Empty intersection: pick from the highest-confidence entry
@@ -841,7 +873,7 @@ impl BarcodeExtractor {
             .iter()
             .max_by(|a, b| a.confidence.partial_cmp(&b.confidence).unwrap())
             .unwrap();
-        (best_entry.barcodes[0].clone(), best_entry.confidence)
+        (best_entry.barcodes[0].clone(), best_entry.confidence, false)
     }
 }
 

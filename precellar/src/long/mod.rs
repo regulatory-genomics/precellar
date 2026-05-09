@@ -6,6 +6,7 @@ pub mod barcode_index;
 pub mod sequence_aligner;
 
 pub use barcode_extractor::BarcodeExtractor;
+pub use barcode_extractor::LrBarcodeExtractionStats;
 pub use barcode_index::BarcodeIndex;
 use seqspec::region::{LibSpec, Region};
 use sequence_aligner::{CompositePattern, CompositeRegionSpan};
@@ -608,10 +609,10 @@ mod tests {
         );
 
         // Test barcode extraction
-        let result1 = extractor.extract_barcode(&record1).unwrap();
-        let result2 = extractor.extract_barcode(&record2).unwrap();
-        let result3 = extractor.extract_barcode(&record3).unwrap();
-        let result4 = extractor.extract_barcode(&record4).unwrap();
+        let (result1, _) = extractor.extract_barcode(&record1).unwrap();
+        let (result2, _) = extractor.extract_barcode(&record2).unwrap();
+        let (result3, _) = extractor.extract_barcode(&record3).unwrap();
+        let (result4, _) = extractor.extract_barcode(&record4).unwrap();
 
         // Verify results
         // Record 1 should successfully extract barcode1
