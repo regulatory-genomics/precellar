@@ -81,22 +81,24 @@ impl OrientationEvidence {
         three_prime: &Option<CompositeAlignmentResult>,
     ) -> Self {
         let mut total_score = 0i32;
-        let mut fixed_rates = Vec::new();
+        let mut fixed_rates: Vec<(f64, usize)> = Vec::new(); // (match_rate, region_length)
 
         for result in [five_prime, three_prime].into_iter().flatten() {
             total_score += result.score;
             for mapping in &result.region_mappings {
                 if !mapping.is_spacer {
-                    fixed_rates.push(mapping.match_rate);
+                    let len = mapping.read_end.saturating_sub(mapping.read_start);
+                    fixed_rates.push((mapping.match_rate, len));
                 }
             }
         }
 
-        let num_good = fixed_rates.iter().filter(|&&r| r >= 0.8).count();
-        let avg_rate = if fixed_rates.is_empty() {
+        let num_good = fixed_rates.iter().filter(|&&(r, _)| r >= 0.8).count();
+        let total_len: usize = fixed_rates.iter().map(|(_, len)| len).sum();
+        let avg_rate = if total_len == 0 {
             0.0
         } else {
-            fixed_rates.iter().sum::<f64>() / fixed_rates.len() as f64
+            fixed_rates.iter().map(|(r, len)| r * *len as f64).sum::<f64>() / total_len as f64
         };
 
         OrientationEvidence {
