@@ -147,7 +147,9 @@ Each modality listed here must have a corresponding top-level Region in `library
   regions: null                 # Must be null for leaf regions
 ```
 
-**`region_id` must be unique** within the entire `library_spec` (across all modalities). It is used as the key for whitelist index lookup and `primer_id` resolution. Duplicate `region_id` values cause a hard error at load time (`"Duplicate region id: ..."`). 
+**`region_id` must be unique** within the entire `library_spec` (across all modalities). It is used as the key for whitelist index lookup and `primer_id` resolution. Duplicate `region_id` values cause a hard error at load time (`"Duplicate region id: ..."`).
+
+**`sequence` must be written in 5'→3' forward orientation**, matching the region order in `library_spec`.
 
 **`name` is used for barcode consensus grouping** in long-read processing. When the same barcode appears at both ends of the library, give both copies the same `name` but different `region_id` values (e.g., `inner_barcode_5p` / `inner_barcode_3p` with `name: "inner barcode"` on both). The extractor groups extracted barcodes by `name` and runs multi-end consensus resolution on groups with more than one entry.
 
@@ -286,6 +288,18 @@ onlist: !Onlist
 | `md5` | yes | MD5 checksum or empty string. |
 | `reverse_complement` | optional | Default `false`. When `true`, the extracted barcode candidate is reverse-complemented before matching against this whitelist. |
 
+### Whitelist File Format
+
+The whitelist file must contain **one barcode sequence per line**, with no headers, indices, or extra columns. Each line is read as-is and used as a whitelist entry.
+
+```
+AAGAAAGTTGTCGGTGTCTTTGTG
+TCGATTCCGTTTGTAGTCGTCTGT
+GAGTCTTGTGTCCCAGTTACCAGG
+```
+
+Files with additional columns (e.g., `1\tAAGAAAGTT...`) will cause errors because the entire line — including the index and tab character — is treated as the barcode sequence. If your whitelist has extra columns, preprocess it with `cut -f2 input.txt > whitelist.txt` or equivalent.
+
 ### When to Use `reverse_complement: true`
 
 In some library designs (e.g., plate-based scATAC-seq with long-read sequencing), the same cell barcode appears at both ends of the library, but the 3' copy is the reverse complement of the 5' copy in the forward library orientation. Setting `reverse_complement: true` on the 3' barcode's onlist ensures that:
@@ -295,11 +309,11 @@ In some library designs (e.g., plate-based scATAC-seq with long-read sequencing)
 
 **Short-read behavior:** The `reverse_complement` flag is XOR'd with the Read's `strand` direction to determine whether to RC the extracted barcode before whitelist comparison.
 
-**Long-read behavior:** The extracted candidate sequence is reverse-complemented before whitelist matching, independent of per-read orientation detection.
+**Long-read behavior:** The extracted candidate sequence is reverse-complemented before whitelist matching, independent of per-read orientation detection, as it was normalized to forward strand before.
 
 ## 7. `sequence_spec` — Read Definitions
 
-Each entry in `sequence_spec` describes one sequencing read (one FASTQ file or file pair).
+Each entry in `sequence_spec` describes one sequencing read (one FASTQ file).
 
 ```yaml
 - !Read
@@ -326,10 +340,10 @@ Each entry in `sequence_spec` describes one sequencing read (one FASTQ file or f
 | `name` | optional | Human-readable name. |
 | `modality` | yes | Which modality this read belongs to (`rna`, `atac`, etc.). |
 | `primer_id` | yes | `region_id` of the sequencing primer region in `library_spec` where this read starts. Must be a direct child of the modality region and must have a sequencing primer `region_type`. |
-| `min_len` | yes | Minimum read length in bp. |
-| `max_len` | yes | Maximum read length in bp. For long reads, use a large value (e.g., `2147483647`). |
+| `min_len` | yes | Minimum read length in bp. Records shorter than this are discarded. |
+| `max_len` | yes | Maximum read length in bp. For long reads, use `2147483647` (`i32::MAX`, meaning no upper limit). |
 | `strand` | yes | Orientation of the read relative to the library structure. See below. |
-| `files` | optional | List of FASTQ file entries. Can be populated later. |
+| `files` | optional | List of FASTQ file entries. Can be left empty and set later via the Python API (`assay.update_read(read_id, fastq=...)`). |
 
 ### `strand`
 
@@ -376,7 +390,7 @@ The processing path is determined by the `strand` field and read lengths.
 
 - **`strand: unstranded`** — long-read path.
 - Typically only one Read entry in `sequence_spec` (the full-length nanopore read).
-- `primer_id` points to the outermost region on one end (e.g., `illumina_p5`).
+- `primer_id` points to the outermost region on one end.
 - `precellar` derives **end regions** from `library_spec`:
   - **5' end regions:** All regions from the library start through the last fixed/barcode region before the target.
   - **3' end regions:** All regions from the first fixed/barcode region after the target through the library end.
@@ -439,7 +453,7 @@ library_spec:
 **Tips:**
 - Use prefixed `region_id` values (e.g., `rna-barcode`, `atac-barcode`) to avoid collisions.
 - Each Read's `modality` field determines which library branch it is associated with.
-- `chemistry_strandedness` is global — it applies to all modalities but is primarily consumed by the RNA alignment path.
+- `chemistry_strandedness` is only used by the RNA alignment path. It has no effect on non-RNA modalities (ATAC, DNA, etc.).
 
 ## 10. Common Patterns
 
@@ -495,133 +509,126 @@ library_spec:
 R1 reads barcode + UMI (`primer_id: truseq_read1`, `strand: pos`).
 R2 reads cDNA in reverse (`primer_id: truseq_read2`, `strand: neg`).
 
-### Long-Read scRNA-seq (Nanopore, e.g., BLAZE-style)
+### scNanoATAC-seq (Long-Read, Dual Barcode at Both Ends)
+
+This example demonstrates multi-barcode extraction with consensus resolution and `reverse_complement` onlist handling.
+
+Library structure (5'→3'):
+```
+start_linker → outer_barcode → linker → inner_barcode → adapter → gDNA → adapter → inner_barcode(RC) → linker → outer_barcode(RC) → end_linker
+```
 
 ```yaml
-chemistry_strandedness: reverse
 sequence_spec:
 - !Read
   read_id: R1
-  modality: rna
-  primer_id: illumina_p5
-  min_len: 100
+  modality: atac
+  primer_id: start_linker
+  min_len: 100                    # Low threshold
   max_len: 2147483647
-  strand: unstranded          # Per-record orientation detection
-library_spec:
-- !Region
-  region_id: rna
-  region_type: rna
-  sequence_type: joined
-  regions:
-  - region_id: illumina_p5
-    region_type: illumina_p5
-    sequence_type: random     # Primer region, sequence unknown
-    min_len: 30
-    max_len: 60
-  - region_id: adapter
-    region_type: named
-    sequence_type: fixed
-    sequence: CTACACGACGCTCTTCCGATCT    # Fixed anchor for alignment
-    min_len: 22
-    max_len: 22
-  - region_id: barcode
-    region_type: barcode
-    sequence_type: onlist
-    sequence: NNNNNNNNNNNNNNNN
-    min_len: 16
-    max_len: 16
-    onlist: !Onlist
-      file_id: whitelist.txt.gz
-      ...
-  - region_id: umi
-    region_type: umi
-    sequence_type: random
-    min_len: 12
-    max_len: 12
-  - region_id: poly_t
-    region_type: poly_t
-    sequence_type: random
-    min_len: 4
-    max_len: 20
-  - region_id: cdna
-    region_type: cdna
-    sequence_type: random
-    min_len: 100
-    max_len: 2147483647
-```
+  strand: unstranded              # Per-record orientation detection
 
-Key differences from short-read:
-- Single Read with `strand: unstranded`.
-- `primer_id` points to the outermost region (`illumina_p5`).
-- Fixed-sequence regions (e.g., `adapter`) are essential for composite alignment anchoring.
-- Only one FASTQ file (full-length reads).
-
-### Plate-Based Long-Read scATAC-seq (Same Barcode at Both Ends)
-
-```yaml
 library_spec:
 - !Region
   region_id: atac
   region_type: atac
   sequence_type: joined
   regions:
-  - region_id: primer_5p
+  - region_id: start_linker
     region_type: custom_primer
-    sequence_type: random
-    min_len: 30
-    max_len: 60
-  - region_id: adapter_5p
-    region_type: named
     sequence_type: fixed
-    sequence: CTGTCTCTTATACACATCTGACGCTGCCGACGA
-    min_len: 33
-    max_len: 33
-  - region_id: barcode_5p
+    sequence: ATCT
+    min_len: 4
+    max_len: 4
+  - region_id: outer_barcode_5p
     region_type: barcode
+    name: outer barcode           # Same name on both ends → triggers consensus
     sequence_type: onlist
     sequence: NNNNNNNNNNNNNNNNNNNNNNNN
     min_len: 24
     max_len: 24
     onlist: !Onlist
-      file_id: barcodes.txt
+      file_id: 96_barcode.txt
+      url: /path/to/96_barcode.txt
+      urltype: local
       ...
-      reverse_complement: false     # 5' copy matches whitelist directly
   - region_id: linker_5p
     region_type: linker
     sequence_type: fixed
-    sequence: AGATCGGAAGAGCGTCGTGTAG
+    sequence: CTACACGACGCTCTTCCGATCT
     min_len: 22
     max_len: 22
+  - region_id: inner_barcode_5p
+    region_type: barcode
+    name: inner barcode           # Same name on both ends → triggers consensus
+    sequence_type: onlist
+    min_len: 24
+    max_len: 24
+    onlist: !Onlist
+      file_id: 96_barcode.txt
+      url: /path/to/96_barcode.txt
+      urltype: local
+      ...
+  - region_id: adapter_5p
+    region_type: named
+    sequence_type: fixed
+    sequence: TCGTCGGCAGCGTCAGATGTGTATAAGAGACAG
+    min_len: 33
+    max_len: 33
   - region_id: gdna
     region_type: gdna
     sequence_type: random
     min_len: 1000
     max_len: 2147483647
+  - region_id: adapter_3p
+    region_type: named
+    sequence_type: fixed
+    sequence: CTGTCTCTTATACACATCTGACGCTGCCGACGA
+    min_len: 33
+    max_len: 33
+  - region_id: inner_barcode_3p
+    region_type: barcode
+    name: inner barcode           # Same name as 5' copy
+    sequence_type: onlist
+    min_len: 24
+    max_len: 24
+    onlist: !Onlist
+      file_id: 96_barcode.txt
+      url: /path/to/96_barcode.txt
+      urltype: local
+      reverse_complement: true    # 3' copy is RC of whitelist
+      ...
   - region_id: linker_3p
     region_type: linker
     sequence_type: fixed
     sequence: AGATCGGAAGAGCGTCGTGTAG
     min_len: 22
     max_len: 22
-  - region_id: barcode_3p
+  - region_id: outer_barcode_3p
     region_type: barcode
+    name: outer barcode           # Same name as 5' copy
     sequence_type: onlist
-    sequence: NNNNNNNNNNNNNNNNNNNNNNNN
     min_len: 24
     max_len: 24
     onlist: !Onlist
-      file_id: barcodes.txt           # Same whitelist file
+      file_id: 96_barcode.txt
+      url: /path/to/96_barcode.txt
+      urltype: local
+      reverse_complement: true    # 3' copy is RC of whitelist
       ...
-      reverse_complement: true        # 3' copy is RC of whitelist; RC before matching
-  - region_id: adapter_3p
-    region_type: named
+  - region_id: end_linker
+    region_type: linker
     sequence_type: fixed
     sequence: AGAT
     min_len: 4
     max_len: 4
 ```
 
-Here `barcode_5p` and `barcode_3p` use the same whitelist, but `barcode_3p` sets `reverse_complement: true` because its sequence in forward library orientation is the reverse complement of the whitelist entries.
+Key points:
+- `outer_barcode_5p` and `outer_barcode_3p` share `name: "outer barcode"` → multi-end consensus resolution.
+- `inner_barcode_5p` and `inner_barcode_3p` share `name: "inner barcode"` → multi-end consensus resolution.
+- 3' barcodes set `reverse_complement: true` because they appear as RC of the whitelist in forward library orientation.
+- All barcode groups must be resolved for a valid barcode output (CB tag = outer_barcode + inner_barcode = 48bp).
 
 ## 11. Validation Checklist
 
@@ -660,7 +667,7 @@ Use this checklist to verify a seqspec YAML before running `precellar`. Each ite
 ### Long-Read Specific
 
 - [ ] Total fixed-sequence length ≥ 12 bp in each end-region collection that contains a barcode. (**error** — `BarcodeExtractor::new()`)
-- [ ] Fixed regions have their actual nucleotide sequence in the `sequence` field. (**not checked** — wrong sequences silently break alignment)
+- [ ] Fixed regions have their actual nucleotide sequence in the `sequence` field, written in 5'→3' forward orientation. (**not checked** — wrong sequences or orientation silently break composite alignment)
 - [ ] `min_len` and `max_len` are accurate — they determine end-window size and composite alignment spacer lengths. (**not checked**)
 
 ### RNA Modality

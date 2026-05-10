@@ -18,15 +18,15 @@ sequence_spec:
   name: Read 1
   modality: atac
   primer_id: start_linker
-  min_len: 1000
+  min_len: 100
   max_len: 2147483647
   strand: unstranded
   files:
-  - file_id: SRR17666426.fastq
-    filename: SRR17666426.fastq
+  - file_id: 2112_TAG_test_2.pass.fastq.gz
+    filename: 2112_TAG_test_2.pass.fastq.gz
     filetype: fastq
     filesize: 0
-    url: /data/scNanoATAC/K562/SRR17666426.fastq
+    url: /data2/xurui/data/scNanoATAC-seq2/technical/2112_TAG_test_2.pass.fastq.gz
     urltype: local
     md5: ""
 library_spec:
@@ -63,7 +63,7 @@ library_spec:
       filename: 96_barcode.txt
       filetype: txt
       filesize: 0
-      url: /data/scNanoATAC/96_barcode.txt
+      url: /data2/xurui/data/scNanoATAC-seq2/96_barcode_seq_only.txt
       urltype: local
       md5: ""
       location: local
@@ -91,7 +91,7 @@ library_spec:
       filename: 96_barcode.txt
       filetype: txt
       filesize: 0
-      url: /data/scNanoATAC/96_barcode.txt
+      url: /data2/xurui/data/scNanoATAC-seq2/96_barcode_seq_only.txt
       urltype: local
       md5: ""
       location: local
@@ -139,7 +139,7 @@ library_spec:
       filename: 96_barcode.txt
       filetype: txt
       filesize: 0
-      url: /data/scNanoATAC/96_barcode.txt
+      url: /data2/xurui/data/scNanoATAC-seq2/96_barcode_seq_only.txt
       urltype: local
       md5: ""
       location: local
@@ -168,7 +168,7 @@ library_spec:
       filename: 96_barcode.txt
       filetype: txt
       filesize: 0
-      url: /data/scNanoATAC/96_barcode.txt
+      url: /data2/xurui/data/scNanoATAC-seq2/96_barcode_seq_only.txt
       urltype: local
       md5: ""
       location: local
