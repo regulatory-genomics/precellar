@@ -297,6 +297,8 @@ pub struct BarcodeExtractor {
     whitelist_indices: IndexMap<String, BarcodeIndex>,
     /// Region IDs whose extracted candidate should be reverse-complemented before whitelist matching
     rc_regions: HashSet<String>,
+    /// All barcode group names that must be resolved for a valid barcode (deduplicated, first-seen order)
+    required_barcode_groups: IndexSet<String>,
 }
 
 impl BarcodeExtractor {
@@ -350,7 +352,9 @@ impl BarcodeExtractor {
         }
 
         // Collect region IDs that require reverse-complementing before whitelist matching
+        // and collect all barcode group names (deduplicated)
         let mut rc_regions = HashSet::new();
+        let mut required_barcode_groups = IndexSet::new();
         for region in five_prime_regions
             .regions
             .iter()
@@ -358,6 +362,7 @@ impl BarcodeExtractor {
         {
             let guard = region.read().unwrap();
             if guard.region_type.is_barcode() {
+                required_barcode_groups.insert(guard.name.clone());
                 if let Some(onlist) = &guard.onlist {
                     if onlist.rc {
                         rc_regions.insert(guard.region_id.clone());
@@ -375,6 +380,7 @@ impl BarcodeExtractor {
             three_prime_composite,
             whitelist_indices,
             rc_regions,
+            required_barcode_groups,
         })
     }
 
@@ -802,6 +808,17 @@ impl BarcodeExtractor {
             groups.entry(bc.region_name.clone()).or_default().push(bc);
         }
 
+        // All required barcode groups must be resolved
+        if !self.required_barcode_groups.iter().all(|name| groups.contains_key(name)) {
+            return Ok((LongReadBarcodeResult {
+                barcode: None,
+                confidence: 0.0,
+                is_reverse_complemented: false,
+                five_prime_trim: 0,
+                three_prime_trim: 0,
+            }, Vec::new()));
+        }
+
         // Resolve each group to a single barcode
         let mut combined_barcode = Vec::new();
         let mut total_confidence = 0.0;
@@ -956,6 +973,7 @@ mod tests {
             },
             whitelist_indices: IndexMap::new(),
             rc_regions: HashSet::new(),
+            required_barcode_groups: IndexSet::new(),
         };
 
         let sequence = b"AGTCAAAACCCCGTTA";
@@ -1046,6 +1064,7 @@ mod tests {
             },
             whitelist_indices: IndexMap::new(),
             rc_regions: HashSet::new(),
+            required_barcode_groups: IndexSet::new(),
         };
         let segment = EndSegmentWithAlignment {
             sequence: vec![b'A'; 40],
@@ -1104,6 +1123,7 @@ mod tests {
             },
             whitelist_indices: IndexMap::new(),
             rc_regions: HashSet::new(),
+            required_barcode_groups: IndexSet::new(),
         };
         let segment = EndSegmentWithAlignment {
             sequence: vec![b'A'; 28],
@@ -1161,6 +1181,7 @@ mod tests {
             },
             whitelist_indices: IndexMap::new(),
             rc_regions: HashSet::new(),
+            required_barcode_groups: IndexSet::new(),
         };
         let segment = EndSegmentWithAlignment {
             sequence: vec![b'A'; 20],
