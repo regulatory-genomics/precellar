@@ -111,14 +111,16 @@ impl FastqProcessor {
         chunk_size: usize,
     ) -> AlignmentResult<'a, A> {
         let fq_reader = self.gen_barcoded_fastq(true, chunk_size);
-        let n_reads: String = itertools::Itertools::intersperse(
-            fq_reader
-                .readers
-                .iter()
-                .map(|r| indicatif::HumanCount(r.num_reads() as u64).to_string()),
-            " + ".to_string()
-        ).collect();
-        info!("Aligning {} reads to reference genome ...", n_reads);
+        let counts: Vec<usize> = fq_reader.readers.iter().map(|r| r.num_reads()).collect();
+        if !counts.is_empty() && counts.iter().all(|&n| n > 0) {
+            let n_reads: String = itertools::Itertools::intersperse(
+                counts.iter().map(|&n| indicatif::HumanCount(n as u64).to_string()),
+                " + ".to_string(),
+            ).collect();
+            info!("Aligning {} reads to reference genome ...", n_reads);
+        } else {
+            info!("Aligning reads to reference genome ...");
+        }
         let result = AlignmentResult::new(aligner, fq_reader, &self.mito_dna, num_threads);
         self.qc_align.insert(self.modality(), result.qc.clone());
         result
