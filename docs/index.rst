@@ -6,5 +6,7 @@ precellar: Single-cell genomics data preprocessing tools
    :hidden:
 
    install
+   seqspec-guide
+   design/index
    tutorials/index
    api
