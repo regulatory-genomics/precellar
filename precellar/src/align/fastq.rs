@@ -771,16 +771,13 @@ impl FastqAnnotator {
                     target_qual.to_vec(),
                 );
                 
-                // 5. Determine read1/read2 based on segment_info
-                let has_target = self.segment_info.iter().any(|x| x.region_type.is_target());
-                let (read1, read2) = if has_target {
-                    if self.segment_info.is_reverse() {
-                        (None, Some(target_record))
-                    } else {
-                        (Some(target_record), None)
-                    }
+                // 5. Determine read1/read2 based on detected orientation.
+                // is_reverse_complemented is the per-read equivalent of Read.strand:
+                // false → library-forward (same as strand: pos) → read1
+                // true  → library-reverse (same as strand: neg) → read2
+                let (read1, read2) = if barcode_result.is_reverse_complemented {
+                    (None, Some(target_record))
                 } else {
-                    // Default to read1 for long reads without explicit target regions
                     (Some(target_record), None)
                 };
 
