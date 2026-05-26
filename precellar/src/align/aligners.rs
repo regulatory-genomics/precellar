@@ -281,48 +281,62 @@ impl Aligner for Minimap2Aligner {
     ) -> Vec<(Option<MultiMapR>, Option<MultiMapR>)> {
         let chunk_size = get_chunk_size(records.len(), num_threads as usize);
 
-        // Use local thread pool for parallel processing with chunks
         thread_pool.install(|| {
             records
                 .par_chunks(chunk_size)
                 .flat_map_iter(|chunk| {
-                    // Clone aligner for this thread (efficient: only clones Arc pointers to shared index)
                     let mut thread_aligner = self.clone();
 
                     chunk.iter().map(move |rec| {
                         let bc = rec.barcode.as_ref().expect("Barcode is missing");
+                        let read1 = rec.read1.as_ref();
+                        let read2 = rec.read2.as_ref();
 
-                        // Align Read 1 independently
-                        let read1_result = if let Some(read1_record) = rec.read1.as_ref() {
-                            let mut alignments = thread_aligner.align_read(read1_record).unwrap_or_default();
-
-                            if !alignments.is_empty() {
-                                // Add Barcode and UMI information to all alignment results
-                                for aln in &mut alignments {
+                        if read1.is_some() && read2.is_some() {
+                            let (mut ali1, mut ali2) =
+                                thread_aligner.align_read_pair(&read1.unwrap(), &read2.unwrap()).unwrap();
+                            ali1.iter_mut()
+                                .chain(ali2.iter_mut())
+                                .for_each(|alignment| {
                                     add_cell_barcode(
-                                        aln,
+                                        alignment,
                                         bc.raw.sequence(),
                                         bc.raw.quality_scores(),
                                         bc.corrected.as_deref(),
                                     );
                                     if let Some(umi) = &rec.umi {
-                                        add_umi(aln, umi.sequence(), umi.quality_scores());
-                                    }
-                                }
-                                // Convert alignment results Vec<RecordBuf> to MultiMapR
-                                Some(alignments.try_into().expect("Failed to convert Vec<RecordBuf> to MultiMap"))
+                                        add_umi(alignment, umi.sequence(), umi.quality_scores());
+                                    };
+                                });
+                            (Some(ali1.try_into().unwrap()), Some(ali2.try_into().unwrap()))
+                        } else if let Some(read) = read1.or(read2) {
+                            let mut ali = thread_aligner.align_read(read).unwrap_or_default();
+                            if ali.is_empty() {
+                                (None, None)
                             } else {
-                                None // No alignment found
+                                ali.iter_mut().for_each(|alignment| {
+                                    add_cell_barcode(
+                                        alignment,
+                                        bc.raw.sequence(),
+                                        bc.raw.quality_scores(),
+                                        bc.corrected.as_deref(),
+                                    );
+                                    if let Some(umi) = &rec.umi {
+                                        add_umi(alignment, umi.sequence(), umi.quality_scores());
+                                    };
+                                });
+                                if read1.is_some() {
+                                    (Some(ali.try_into().unwrap()), None)
+                                } else {
+                                    (None, Some(ali.try_into().unwrap()))
+                                }
                             }
                         } else {
-                            None // Read 1 does not exist
-                        };
-
-                        // No pair-alignment for long-read data
-                        let read2_result = None;
-
-                        (read1_result, read2_result)
-                    }).collect::<Vec<_>>()
+                            log::warn!("Found record with no reads (read1 and read2 are both None). Barcode: {:?}",
+                                      String::from_utf8_lossy(bc.raw.sequence()));
+                            (None, None)
+                        }
+                    })
                 })
                 .collect()
         })
