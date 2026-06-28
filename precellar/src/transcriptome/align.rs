@@ -256,12 +256,33 @@ impl SplicedRecord {
                 AlignType::Discordant
             }
         } else if n_ex > n_segment {
-            // There are more exons than segments. Possibly spanning.
-            if exons[n_ex - 1].start >= segments[n_segment - 1].start
-                && exons[0].end > segments[0].start
-                && exons[1..n_ex - 1].iter().all(|_| true)
-            // FIXME: this is a bit hacky
-            {
+            // There are more exons than segments. This is only compatible when
+            // every observed splice junction lands on adjacent exon boundaries.
+            let is_compatible = segments.windows(2).all(|junction| {
+                let left_segment = &junction[0];
+                let right_segment = &junction[1];
+
+                let left_exons = find_exons(exons, left_segment.start, left_segment.end - 1);
+                let right_exons = find_exons(exons, right_segment.start, right_segment.end - 1);
+                let (Some(left_exon), Some(right_exon)) =
+                    (left_exons.last(), right_exons.first())
+                else {
+                    return false;
+                };
+
+                let Some(left_idx) = exons.iter().position(|exon| exon == left_exon) else {
+                    return false;
+                };
+                let Some(right_idx) = exons.iter().position(|exon| exon == right_exon) else {
+                    return false;
+                };
+
+                left_segment.end == left_exon.end
+                    && right_segment.start == right_exon.start
+                    && right_idx == left_idx + 1
+            });
+
+            if is_compatible {
                 AlignType::Spanning
             } else {
                 AlignType::Discordant
