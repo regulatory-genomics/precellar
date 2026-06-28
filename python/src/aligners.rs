@@ -1,6 +1,7 @@
 use anyhow::{bail, Result};
 use bwa_mem2::{AlignerOpts, BurrowsWheelerAligner, FMIndex};
 use log::warn;
+use minibwa::{Index as MiniBwaIndex, MiniBwaSR, Options as MiniBwaOptions};
 use noodles::sam::Header;
 use precellar::align::{Minimap2Aligner, Minimap2Opts};
 use precellar::{
@@ -18,6 +19,7 @@ use std::{
 pub enum AlignerRef<'py> {
     STAR(PyRefMut<'py, STAR>),
     BWA(PyRefMut<'py, BWAMEM2>),
+    MiniBwa(PyRefMut<'py, MINIBWA>),
     Minimap2(PyRefMut<'py, MINIMAP2>),
 }
 
@@ -26,6 +28,7 @@ impl AlignerRef<'_> {
         match self {
             AlignerRef::STAR(aligner) => aligner.header(),
             AlignerRef::BWA(aligner) => aligner.header(),
+            AlignerRef::MiniBwa(aligner) => aligner.header(),
             AlignerRef::Minimap2(aligner) => aligner.header(),
         }
     }
@@ -45,6 +48,7 @@ impl AlignerRef<'_> {
                 Some(TxAligner::new(transcriptome, self.header(), strandness))
             }
             AlignerRef::BWA(_) => None,
+            AlignerRef::MiniBwa(_) => None,
             AlignerRef::Minimap2(_) => None,
         }
     }
@@ -58,11 +62,13 @@ impl<'py> TryFrom<Bound<'py, PyAny>> for AlignerRef<'py> {
             Ok(AlignerRef::STAR(aligner))
         } else if let Ok(aligner) = value.extract::<PyRefMut<'_, BWAMEM2>>() {
             Ok(AlignerRef::BWA(aligner))
+        } else if let Ok(aligner) = value.extract::<PyRefMut<'_, MINIBWA>>() {
+            Ok(AlignerRef::MiniBwa(aligner))
         } else if let Ok(aligner) = value.extract::<PyRefMut<'_, MINIMAP2>>() {
             Ok(AlignerRef::Minimap2(aligner))
         } else {
             Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
-                "Expected a STAR, BWA, or MINIMAP2 aligner",
+                "Expected a STAR, BWAMEM2, MINIBWA, or MINIMAP2 aligner",
             ))
         }
     }
@@ -86,6 +92,9 @@ impl Aligner for AlignerRef<'_> {
                 Aligner::align_reads(aligner.deref_mut().deref_mut(), num_threads, records)
             }
             AlignerRef::BWA(aligner) => {
+                Aligner::align_reads(aligner.deref_mut().deref_mut(), num_threads, records)
+            }
+            AlignerRef::MiniBwa(aligner) => {
                 Aligner::align_reads(aligner.deref_mut().deref_mut(), num_threads, records)
             }
             AlignerRef::Minimap2(aligner) => {
@@ -214,6 +223,55 @@ impl BWAMEM2 {
     }
 }
 
+/** The MiniBWA aligner.
+
+    MiniBWA is a fast short-read aligner and successor to BWA-MEM. It is used to
+    align reads to a minibwa index built from a reference genome.
+
+    Parameters
+    ----------
+    index_prefix : str
+        The path prefix for the MiniBWA index files, without the .l2b or .mbw extension.
+    preset : str | None
+        Optional minibwa preset. Available presets are 'sr', 'lr', and 'adap'.
+    methylation : bool
+        Whether to load an index built for methylation-aware mapping.
+*/
+#[pyclass]
+#[repr(transparent)]
+pub struct MINIBWA(MiniBwaSR);
+
+impl Deref for MINIBWA {
+    type Target = MiniBwaSR;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl DerefMut for MINIBWA {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+
+#[pymethods]
+impl MINIBWA {
+    #[new]
+    #[pyo3(
+        signature = (index_prefix, *, preset=None, methylation=false),
+        text_signature = "(index_prefix, *, preset=None, methylation=False)",
+    )]
+    pub fn new(index_prefix: PathBuf, preset: Option<&str>, methylation: bool) -> Result<Self> {
+        let index = MiniBwaIndex::load(index_prefix, methylation)?;
+        let options = match preset {
+            Some(preset) => MiniBwaOptions::preset(preset)?,
+            None => MiniBwaOptions::default(),
+        };
+        Ok(MINIBWA(MiniBwaSR::new(index, options)?))
+    }
+}
+
 /** The Minimap2 aligner.
 
     Minimap2 is a versatile aligner for long reads (Oxford Nanopore, PacBio),
@@ -248,7 +306,7 @@ impl BWAMEM2 {
 #[pyclass]
 pub struct MINIMAP2 {
     aligner: Minimap2Aligner,
-    _temp_index: Option<tempfile::TempPath>,  // To hold temporary index if created from FASTA
+    _temp_index: Option<tempfile::TempPath>, // To hold temporary index if created from FASTA
 }
 
 impl Deref for MINIMAP2 {
@@ -302,8 +360,11 @@ impl MINIMAP2 {
 
         let _temp_index = if is_fasta_file(&index_path) {
             let tmp = tempfile::NamedTempFile::new()?.into_temp_path();
-            warn!("Provided index path is a FASTA file. Creating temporary minimap2 index at {:?}.", tmp);
-            warn!("This may take a few minutes. To save time in the future, consider pre-building the minimap2 index."); 
+            warn!(
+                "Provided index path is a FASTA file. Creating temporary minimap2 index at {:?}.",
+                tmp
+            );
+            warn!("This may take a few minutes. To save time in the future, consider pre-building the minimap2 index.");
             minimap2::Aligner::builder()
                 .preset(preset.clone())
                 .with_index(&index_path, Some(tmp.to_path_buf().to_str().unwrap()))
@@ -314,7 +375,7 @@ impl MINIMAP2 {
         };
         let index = _temp_index.as_ref().map_or(index_path, |x| x.to_path_buf());
         let opts = Minimap2Opts::new(index).with_preset(preset);
-        
+
         Ok(Self {
             aligner: Minimap2Aligner::new(opts)?,
             _temp_index,
@@ -360,6 +421,7 @@ pub(crate) fn register_aligners(parent_module: &Bound<'_, PyModule>) -> PyResult
 
     m.add_class::<STAR>()?;
     m.add_class::<BWAMEM2>()?;
+    m.add_class::<MINIBWA>()?;
     m.add_class::<MINIMAP2>()?;
 
     parent_module.add_submodule(&m)

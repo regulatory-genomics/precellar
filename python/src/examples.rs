@@ -36,7 +36,6 @@ fn dnbelabc4_atac_v1(py: Python<'_>) -> Result<HashMap<&str, PathBuf>> {
     Ok(HashMap::from([("R1", atac_r1), ("R2", atac_r2)]))
 }
 
-
 #[pyfunction]
 fn txg_rna_v3(py: Python<'_>) -> Result<HashMap<&str, PathBuf>> {
     let rna_r1 = retrieve_file(
@@ -91,7 +90,11 @@ fn txg_atac(py: Python<'_>) -> Result<HashMap<&str, PathBuf>> {
         "md5:c9257abf04f5f9af7d0e2bd21de761c0",
         "10x_atac_R2.fq.zst",
     )?;
-    Ok(HashMap::from([("I2", atac_i2), ("R1", atac_r1), ("R2", atac_r2)]))
+    Ok(HashMap::from([
+        ("I2", atac_i2),
+        ("R1", atac_r1),
+        ("R2", atac_r2),
+    ]))
 }
 
 #[pyfunction]
@@ -114,7 +117,11 @@ fn scifi_atac(py: Python<'_>) -> Result<HashMap<&str, PathBuf>> {
         "md5:ed78ba24348a6f2ae949acba9c013e1b",
         "10x_atac_R2.fq.zst",
     )?;
-    Ok(HashMap::from([("I2", atac_i2), ("R1", atac_r1), ("R2", atac_r2)]))
+    Ok(HashMap::from([
+        ("I2", atac_i2),
+        ("R1", atac_r1),
+        ("R2", atac_r2),
+    ]))
 }
 
 #[pyfunction]

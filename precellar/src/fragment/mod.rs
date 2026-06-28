@@ -55,7 +55,7 @@ impl ExtendedFields {
 pub struct ReadInfo {
     pub read_start: u32,
     pub read_end: u32,
-    pub snps: Option<Vec<SNVs>>,  // We use Option because most reads will not have SNPs
+    pub snps: Option<Vec<SNVs>>, // We use Option because most reads will not have SNPs
 }
 
 impl ReadInfo {
@@ -104,10 +104,10 @@ impl ReadInfo {
         let mut count = BTreeMap::new();
         if let Some(snps) = self.snps.as_ref() {
             snps.iter().for_each(|snp| {
-                let key = snp.to_string(self.read_start, self.read_start + self.len()).unwrap();
-                count.entry(key)
-                    .and_modify(|e| *e += 1u32)
-                    .or_insert(1);
+                let key = snp
+                    .to_string(self.read_start, self.read_start + self.len())
+                    .unwrap();
+                count.entry(key).and_modify(|e| *e += 1u32).or_insert(1);
             });
         }
         count
@@ -122,7 +122,8 @@ impl ReadInfo {
             count.insert(self.len().to_string(), n_match);
         }
 
-        let snps = count.into_iter()
+        let snps = count
+            .into_iter()
             .map(|(snv, c)| {
                 if c == n {
                     snv
@@ -338,7 +339,12 @@ pub trait IntoFragments: Iterator {
                     let r1 = r1.unwrap();
                     let r2 = r2.unwrap();
                     if filter_read_pair((&r1.primary, &r2.primary), opts.min_mapq) {
-                        AlignmentInfo::from_read_pair((&r1.primary, &r2.primary), header, opts.compute_snv).unwrap()
+                        AlignmentInfo::from_read_pair(
+                            (&r1.primary, &r2.primary),
+                            header,
+                            opts.compute_snv,
+                        )
+                        .unwrap()
                     } else {
                         None
                     }

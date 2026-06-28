@@ -2,7 +2,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use async_compression::tokio::bufread::GzipDecoder;
 use async_compression::tokio::bufread::ZstdDecoder;
 use futures::StreamExt;
-use md5::{Md5, Digest};
+use md5::{Digest, Md5};
 use std::io::Read;
 use std::{
     fs::File,
@@ -278,11 +278,7 @@ pub fn hamming_distance(seq1: &[u8], seq2: &[u8]) -> Result<usize> {
             seq2.len()
         );
     }
-    Ok(seq1
-        .iter()
-        .zip(seq2.iter())
-        .filter(|(a, b)| a != b)
-        .count())
+    Ok(seq1.iter().zip(seq2.iter()).filter(|(a, b)| a != b).count())
 }
 
 #[cfg(test)]

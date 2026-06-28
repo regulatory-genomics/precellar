@@ -91,7 +91,8 @@ impl Quantifier {
             });
 
             // Sort alignments by cell barcodes
-            let sorted_aln = sort_alignments(tx_alignments, self.chunk_size, self.temp_dir.as_ref());
+            let sorted_aln =
+                sort_alignments(tx_alignments, self.chunk_size, self.temp_dir.as_ref());
 
             let sty = ProgressStyle::with_template(
                 "{percent}%|{wide_bar:.cyan/blue}| {human_pos:>}/{human_len:} [{elapsed}<{eta}, {per_sec}]",

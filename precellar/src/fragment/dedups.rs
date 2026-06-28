@@ -325,11 +325,11 @@ impl<T> RemoveDuplicates for T where T: Iterator<Item = AlignmentInfo> + Sized {
 mod tests {
     use super::*;
     use bstr::BString;
-    use std::num::NonZeroUsize;
     use noodles::sam::{
         self as sam,
         header::record::value::{map::ReferenceSequence, Map},
     };
+    use std::num::NonZeroUsize;
 
     #[test]
     fn test_convert() -> Result<()> {

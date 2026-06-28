@@ -59,6 +59,33 @@ pub fn make_bwa_index(fasta: PathBuf, genome_prefix: PathBuf) -> Result<()> {
     Ok(())
 }
 
+/// Create a minibwa index from a fasta file.
+///
+/// Parameters
+/// ----------
+/// fasta: Path
+///    File path to the fasta file.
+/// index_prefix: Path
+///   File path prefix for the minibwa index files.
+/// num_threads: int
+///   The number of threads to use when building the index.
+/// methylation: bool
+///   Whether to build a methylation-aware index.
+#[pyfunction]
+#[pyo3(
+    signature = (fasta, index_prefix, *, num_threads=8, methylation=false),
+    text_signature = "(fasta, index_prefix, *, num_threads=8, methylation=False)",
+)]
+pub fn make_minibwa_index(
+    fasta: PathBuf,
+    index_prefix: PathBuf,
+    num_threads: i32,
+    methylation: bool,
+) -> Result<()> {
+    minibwa::build_index(fasta, index_prefix, num_threads, methylation)?;
+    Ok(())
+}
+
 /// Create a minimap2 index from a FASTA file.
 ///
 /// This function creates a `.mmi` index file that can be used with the MINIMAP2 aligner.
@@ -160,7 +187,7 @@ pub fn make_minimap2_index(fasta: PathBuf, output_index: PathBuf, preset: &str) 
 ///     https://github.com/pachterlab/seqspec. The assay can also be a list of
 ///     Assay objects or file paths. In this case, the results will be
 ///     concatenated into a single output file.
-/// aligner: STAR | BWAMEM2 | MINIMAP2
+/// aligner: STAR | BWAMEM2 | MINIBWA | MINIMAP2
 ///     The aligner to use for the alignment. Available aligners can be found at
 ///     `precellar.aligners` submodule.
 /// output: Path
@@ -213,6 +240,7 @@ pub fn make_minimap2_index(fasta: PathBuf, output_index: PathBuf, preset: &str) 
 /// See Also
 /// --------
 /// aligners.BWAMEM2
+/// aligners.MINIBWA
 /// aligners.STAR
 /// aligners.MINIMAP2
 #[pyfunction]

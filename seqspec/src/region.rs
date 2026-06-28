@@ -1,8 +1,8 @@
 use crate::read::UrlType;
 use crate::Modality;
 
-use file_download::download::Downloader;
 use anyhow::Result;
+use file_download::download::Downloader;
 use indexmap::{IndexMap, IndexSet};
 use itertools::Itertools;
 use serde::{Deserialize, Serialize};

@@ -4,6 +4,12 @@ mod aligners;
 mod fastq;
 mod snv;
 
-pub use aligners::{Aligner, BurrowsWheelerAligner, MultiMap, MultiMapR, StarAligner, Minimap2Aligner, Minimap2Opts};
-pub use fastq::{extend_fastq_record, AnnotatedFastq, Barcode, FastqProcessor, AlignmentResult, NameCollatedRecords};
-pub use snv::{SNV, SNVs};
+pub use aligners::{
+    Aligner, BurrowsWheelerAligner, MiniBwaIndex, MiniBwaOptions, MiniBwaSR, Minimap2Aligner,
+    Minimap2Opts, MultiMap, MultiMapR, StarAligner,
+};
+pub use fastq::{
+    extend_fastq_record, AlignmentResult, AnnotatedFastq, Barcode, FastqProcessor,
+    NameCollatedRecords,
+};
+pub use snv::{SNVs, SNV};

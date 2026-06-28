@@ -38,33 +38,39 @@ impl QcFastq {
                     .count() as u64;
         }
         if let Some(barcode) = &fq.barcode {
-            *self.num_total_bases.entry("barcode".to_string()).or_insert(0) +=
-                barcode.raw.sequence().len() as u64;
-            *self.num_q30_bases.entry("barcode".to_string()).or_insert(0) +=
-                barcode.raw.quality_scores()
-                    .iter()
-                    .filter(|s| **s - 33 >= 30)
-                    .count() as u64;
+            *self
+                .num_total_bases
+                .entry("barcode".to_string())
+                .or_insert(0) += barcode.raw.sequence().len() as u64;
+            *self.num_q30_bases.entry("barcode".to_string()).or_insert(0) += barcode
+                .raw
+                .quality_scores()
+                .iter()
+                .filter(|s| **s - 33 >= 30)
+                .count()
+                as u64;
         }
         if let Some(read1) = &fq.read1 {
             *self.num_reads.entry("read1".to_string()).or_insert(0) += 1;
             *self.num_total_bases.entry("read1".to_string()).or_insert(0) +=
                 read1.sequence().len() as u64;
-            *self.num_q30_bases.entry("read1".to_string()).or_insert(0) +=
-                read1.quality_scores()
-                    .iter()
-                    .filter(|s| **s - 33 >= 30)
-                    .count() as u64;
+            *self.num_q30_bases.entry("read1".to_string()).or_insert(0) += read1
+                .quality_scores()
+                .iter()
+                .filter(|s| **s - 33 >= 30)
+                .count()
+                as u64;
         }
         if let Some(read2) = &fq.read2 {
             *self.num_reads.entry("read2".to_string()).or_insert(0) += 1;
             *self.num_total_bases.entry("read2".to_string()).or_insert(0) +=
                 read2.sequence().len() as u64;
-            *self.num_q30_bases.entry("read2".to_string()).or_insert(0) +=
-                read2.quality_scores()
-                    .iter()
-                    .filter(|s| **s - 33 >= 30)
-                    .count() as u64;
+            *self.num_q30_bases.entry("read2".to_string()).or_insert(0) += read2
+                .quality_scores()
+                .iter()
+                .filter(|s| **s - 33 >= 30)
+                .count()
+                as u64;
         }
     }
 }
@@ -419,7 +425,7 @@ impl QcGeneQuant {
     pub fn update(&mut self, alignment: Option<&TxAlignment>) {
         self.total_raw_count += 1;
         match alignment {
-            None => {},
+            None => {}
             Some(TxAlignment::Antisense) => self.num_antisense += 1,
             Some(TxAlignment::Discordant) => self.num_discordant += 1,
             Some(TxAlignment::Intergenic) => self.num_intergenic += 1,
@@ -434,7 +440,7 @@ impl QcGeneQuant {
                 } else {
                     self.num_mix += 1;
                 }
-            },
+            }
         }
     }
 }

@@ -1,8 +1,8 @@
-pub mod barcode;
-pub mod align;
-pub mod transcriptome;
-pub mod genome;
-pub mod fragment;
-pub mod qc;
-pub mod utils;
 pub mod adapter;
+pub mod align;
+pub mod barcode;
+pub mod fragment;
+pub mod genome;
+pub mod qc;
+pub mod transcriptome;
+pub mod utils;

@@ -2,7 +2,10 @@ use std::ops::Range;
 
 use noodles::fastq::{self, record::Definition};
 
-use crate::{utils::{hamming_distance, rev_compl}, Region, RegionType, SequenceType};
+use crate::{
+    utils::{hamming_distance, rev_compl},
+    Region, RegionType, SequenceType,
+};
 
 #[derive(Debug, Clone)]
 pub enum SegmentType<'a> {
@@ -262,8 +265,7 @@ impl SegmentInfo {
                         } else {
                             find_best_pattern_match(seq, segment.sequence.as_bytes())
                         };
-                        if let (Some(pos), mis) = match_result
-                        {
+                        if let (Some(pos), mis) = match_result {
                             if mis as f64 <= anchor_tolerance * segment.sequence.len() as f64 {
                                 // [offset_left, offset_right] is the region of the read that
                                 // contains segments prior to the matched pattern
@@ -707,13 +709,7 @@ mod tests {
 
     #[test]
     fn test_truncate() {
-        let info = [
-            bc(4),
-            var(2, 4),
-            bc(2),
-            linker("GGGG"),
-            cdna(1, 1000),
-        ];
+        let info = [bc(4), var(2, 4), bc(2), linker("GGGG"), cdna(1, 1000)];
         let info = SegmentInfo::new(info, false);
         println!("{:?}", info.truncate_max(50));
     }

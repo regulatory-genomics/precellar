@@ -179,7 +179,11 @@ impl Read {
         }
     }
 
-    pub(crate) fn get_segments<'a>(&'a self, region: &'a Region, truncate_by_length: bool) -> Option<SegmentInfo> {
+    pub(crate) fn get_segments<'a>(
+        &'a self,
+        region: &'a Region,
+        truncate_by_length: bool,
+    ) -> Option<SegmentInfo> {
         if !region.sequence_type.is_joined() {
             return None;
         }
@@ -280,7 +284,8 @@ impl File {
             _ => {
                 let cache_dir = home::home_dir().unwrap().join(".cache/seqspec");
                 let downloader = Downloader::new(Some(cache_dir))?;
-                let file_path = downloader.retrieve(&self.url, Some(&self.filename), None, false)?;
+                let file_path =
+                    downloader.retrieve(&self.url, Some(&self.filename), None, false)?;
                 Ok(Box::new(crate::utils::open_file(file_path)?))
             }
         }

@@ -71,7 +71,8 @@ impl SNVs {
             Ok(())
         })?;
 
-        let last_pos = self.0.last().unwrap().position + self.0.last().unwrap().ty.alignment_len() as u32;
+        let last_pos =
+            self.0.last().unwrap().position + self.0.last().unwrap().ty.alignment_len() as u32;
         if last_pos < end {
             let remaining_length = end - last_pos;
             if remaining_length > 0 {
@@ -138,7 +139,7 @@ impl TryFrom<&RecordBuf> for SNVs {
                 }
             });
 
-        let mut query_pos = 0;  // This is used to track the position in the query sequence
+        let mut query_pos = 0; // This is used to track the position in the query sequence
         let mut ref_pos = rec.alignment_start().unwrap().get() - 1; // track the position in the reference sequence
         rec.cigar()
             .iter()
@@ -167,8 +168,10 @@ impl TryFrom<&RecordBuf> for SNVs {
                                     }
                                 }
                                 Some(MDKind::Substitution(_)) => {
-                                    if rec.quality_scores().as_ref()[query_pos + n_soft_clip] >= 30 {
-                                        let alt_base = rec.sequence().as_ref()[query_pos + n_soft_clip];
+                                    if rec.quality_scores().as_ref()[query_pos + n_soft_clip] >= 30
+                                    {
+                                        let alt_base =
+                                            rec.sequence().as_ref()[query_pos + n_soft_clip];
                                         snv.push(SNV {
                                             position: u32::try_from(ref_pos)?,
                                             ty: Mutation::Substitution(alt_base),

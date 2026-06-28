@@ -1,5 +1,5 @@
-mod fastq;
 mod bam;
+mod fastq;
 
 use pyo3::prelude::*;
 

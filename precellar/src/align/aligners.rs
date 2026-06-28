@@ -7,6 +7,7 @@ use crate::barcode::{get_barcode, get_umi};
 
 use anyhow::{bail, ensure, Result};
 pub use bwa_mem2::BurrowsWheelerAligner;
+pub use minibwa::{Index as MiniBwaIndex, MiniBwaSR, Options as MiniBwaOptions};
 use noodles::sam::alignment::Record;
 pub use star_aligner::StarAligner;
 
@@ -196,6 +197,78 @@ impl Aligner for BurrowsWheelerAligner {
     }
 }
 
+impl Aligner for MiniBwaSR {
+    fn header(&self) -> sam::Header {
+        self.get_sam_header()
+    }
+
+    fn align_reads(
+        &mut self,
+        num_threads: u16,
+        records: Vec<AnnotatedFastq>,
+    ) -> Vec<(Option<MultiMapR>, Option<MultiMapR>)> {
+        if records[0].read2.is_some() {
+            let (info, mut reads): (Vec<_>, Vec<_>) = records
+                .into_iter()
+                .map(|rec| {
+                    (
+                        (rec.barcode.unwrap(), rec.umi),
+                        (rec.read1.unwrap(), rec.read2.unwrap()),
+                    )
+                })
+                .unzip();
+
+            self.align_read_pairs(num_threads, &mut reads)
+                .unwrap()
+                .enumerate()
+                .map(|(i, (mut ali1, mut ali2))| {
+                    let (bc, umi) = info.get(i).unwrap();
+                    add_cell_barcode(
+                        &mut ali1,
+                        bc.raw.sequence(),
+                        bc.raw.quality_scores(),
+                        bc.corrected.as_deref(),
+                    );
+                    add_cell_barcode(
+                        &mut ali2,
+                        bc.raw.sequence(),
+                        bc.raw.quality_scores(),
+                        bc.corrected.as_deref(),
+                    );
+                    if let Some(umi) = umi {
+                        add_umi(&mut ali1, umi.sequence(), umi.quality_scores());
+                        add_umi(&mut ali2, umi.sequence(), umi.quality_scores());
+                    }
+                    (Some(ali1.into()), Some(ali2.into()))
+                })
+                .collect()
+        } else {
+            let (info, mut reads): (Vec<_>, Vec<_>) = records
+                .into_iter()
+                .map(|rec| ((rec.barcode.unwrap(), rec.umi), rec.read1.unwrap()))
+                .unzip();
+
+            self.align_reads(num_threads, reads.as_mut_slice())
+                .unwrap()
+                .enumerate()
+                .map(|(i, mut alignment)| {
+                    let (bc, umi) = info.get(i).unwrap();
+                    add_cell_barcode(
+                        &mut alignment,
+                        bc.raw.sequence(),
+                        bc.raw.quality_scores(),
+                        bc.corrected.as_deref(),
+                    );
+                    if let Some(umi) = umi {
+                        add_umi(&mut alignment, umi.sequence(), umi.quality_scores());
+                    }
+                    (Some(alignment.into()), None)
+                })
+                .collect()
+        }
+    }
+}
+
 impl Aligner for StarAligner {
     fn header(&self) -> sam::Header {
         self.get_header().clone()
@@ -332,7 +405,6 @@ impl Aligner for Minimap2Aligner {
             .collect()
     }
 }
-
 
 fn get_chunk_size(total_length: usize, num_threads: usize) -> usize {
     let chunk_size = total_length / num_threads;

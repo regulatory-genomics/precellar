@@ -22,7 +22,6 @@ pub fn trim_poly_nucleotide(nucl: u8, seq: impl Iterator<Item = u8>) -> Option<u
     best_index.map(|i| i + 1)
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -39,9 +38,6 @@ mod tests {
             Some(1),
         );
 
-        assert_eq!(
-            trim_poly_nucleotide(b'A', b"CTCGAA".iter().copied()),
-            None,
-        );
+        assert_eq!(trim_poly_nucleotide(b'A', b"CTCGAA".iter().copied()), None,);
     }
 }

@@ -138,15 +138,17 @@ impl FastqProcessor {
 
                     let readers = assay.get_segments_by_modality(modality).filter_map(
                         |(read, segment_info)| {
-                            let annotator = FastqAnnotator::new(
-                                &read.read_id,
-                                segment_info,
-                            )?;
+                            let annotator = FastqAnnotator::new(&read.read_id, segment_info)?;
                             let reader = read.open()?;
                             Some((annotator, reader))
                         },
                     );
-                    AnnotatedFastqReader::new(readers, self.get_fastq_qc().clone(), barcode_analyzer, chunk_size)
+                    AnnotatedFastqReader::new(
+                        readers,
+                        self.get_fastq_qc().clone(),
+                        barcode_analyzer,
+                        chunk_size,
+                    )
                 })
                 .collect();
         MultiAnnotatedFqReader::new(result)
@@ -263,7 +265,10 @@ impl MultiAnnotatedFqReader {
     }
 
     pub fn num_records(&self) -> usize {
-        self.readers.iter().map(|x| x.barcode_analyzer.num_reads()).sum()
+        self.readers
+            .iter()
+            .map(|x| x.barcode_analyzer.num_reads())
+            .sum()
     }
 
     pub fn is_paired_end(&self) -> Result<bool> {
@@ -366,7 +371,8 @@ fn process_chunk<'a, I: IntoIterator<Item = &'a SmallVec<[fastq::Record; 4]>>>(
                     let annotator = &annotators[i];
                     let id = &annotator.read_id;
                     *qc.num_reads.entry(id.clone()).or_insert(0) += 1;
-                    if let Ok(anno) = annotator.annotate(record, barcode_analyzer) { // annotate the read
+                    if let Ok(anno) = annotator.annotate(record, barcode_analyzer) {
+                        // annotate the read
                         Some(anno)
                     } else {
                         *qc.num_defect.entry(id.clone()).or_insert(0) += 1;
@@ -492,7 +498,8 @@ impl FastqAnnotator {
                 if segment.is_barcode() {
                     let corrected = barcode_analyzer
                         .correct_barcode(segment.region_id(), fq.sequence(), fq.quality_scores())
-                        .ok().map(|x| x.to_vec());
+                        .ok()
+                        .map(|x| x.to_vec());
                     if let Some(bc) = &mut barcode {
                         bc.extend(&Barcode { raw: fq, corrected });
                     } else {

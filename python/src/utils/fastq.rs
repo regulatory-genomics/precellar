@@ -269,23 +269,17 @@ pub fn extract_barcode_from_name(
         let compression = compression
             .map(|x| Compression::from_str(x).unwrap())
             .or((&fq).try_into().ok());
-        Writer::new(BufWriter::new(create_file(
-            fq,
-            compression,
-            compression_level,
-            num_threads,
-        ).unwrap()))
+        Writer::new(BufWriter::new(
+            create_file(fq, compression, compression_level, num_threads).unwrap(),
+        ))
     });
     let mut barcode_writer = barcode_fq.map(|fq| {
         let compression = compression
             .map(|x| Compression::from_str(x).unwrap())
             .or((&fq).try_into().ok());
-        Writer::new(BufWriter::new(create_file(
-            fq,
-            compression,
-            compression_level,
-            num_threads,
-        ).unwrap()))
+        Writer::new(BufWriter::new(
+            create_file(fq, compression, compression_level, num_threads).unwrap(),
+        ))
     });
 
     let reader = open_file(in_fq)?;
@@ -301,11 +295,7 @@ pub fn extract_barcode_from_name(
         let text = record.name().to_string() + " " + &record.definition().description().to_string();
 
         let new_name: String = if let Some(ref rename) = rename {
-            rename
-                .call1((&text,))
-                .unwrap()
-                .extract()
-                .unwrap()
+            rename.call1((&text,)).unwrap().extract().unwrap()
         } else {
             text.clone()
         };
@@ -316,7 +306,9 @@ pub fn extract_barcode_from_name(
         }
 
         if let Some(ref mut barcode_writer) = barcode_writer {
-            let barcode: String = get_barcode.as_ref().unwrap()
+            let barcode: String = get_barcode
+                .as_ref()
+                .unwrap()
                 .call1((text,))
                 .unwrap()
                 .extract()

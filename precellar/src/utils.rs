@@ -1,11 +1,11 @@
 use std::ops::Range;
 
-use std::sync::mpsc::{sync_channel, Receiver};
-use std::thread::JoinHandle;
+use anyhow::{anyhow, Result};
+use bstr::ByteSlice;
 use noodles::fastq;
 use regex::Regex;
-use anyhow::{Result, anyhow};
-use bstr::ByteSlice;
+use std::sync::mpsc::{sync_channel, Receiver};
+use std::thread::JoinHandle;
 
 /// PrefetchIterator allows for prefetching items from an iterator into a buffer.
 pub struct PrefetchIterator<T> {
@@ -28,7 +28,10 @@ impl<T: Send + 'static> PrefetchIterator<T> {
                 }
             }
         });
-        Self { rx: receiver, handle: Some(handle) }
+        Self {
+            rx: receiver,
+            handle: Some(handle),
+        }
     }
 }
 
@@ -80,7 +83,6 @@ where
         f(it) // consumes inside the scope; no `'static` needed
     })
 }
-
 
 #[derive(Debug, Clone)]
 pub enum GroupIndex {
@@ -153,13 +155,19 @@ fn strip_from(
     regex: &Regex,
     group_indices: Option<&[GroupIndex]>,
 ) -> Result<(String, Option<Vec<String>>)> {
-    let caps = regex.captures(txt).ok_or(anyhow!("No match found for: {}", txt))?;
+    let caps = regex
+        .captures(txt)
+        .ok_or(anyhow!("No match found for: {}", txt))?;
     let new_name = remove_substrings(txt, caps.iter().skip(1).map(|m| m.unwrap().range()));
     let matches = if let Some(indices) = group_indices {
-        let matches = indices.iter().map(|idx| match idx {
-            GroupIndex::Position(i) => caps.get(*i+1).map(|m| m.as_str().to_string()),
-            GroupIndex::Named(name) => caps.name(name).map(|m| m.as_str().to_string()),
-        }).collect::<Option<Vec<_>>>().ok_or(anyhow!("Failed to extract barcodes"))?;
+        let matches = indices
+            .iter()
+            .map(|idx| match idx {
+                GroupIndex::Position(i) => caps.get(*i + 1).map(|m| m.as_str().to_string()),
+                GroupIndex::Named(name) => caps.name(name).map(|m| m.as_str().to_string()),
+            })
+            .collect::<Option<Vec<_>>>()
+            .ok_or(anyhow!("Failed to extract barcodes"))?;
         Some(matches)
     } else {
         None
@@ -174,7 +182,7 @@ where
     let mut result = String::with_capacity(s.len());
     let mut last_index = 0;
 
-    for Range {start, end} in ranges.into_iter() {
+    for Range { start, end } in ranges.into_iter() {
         // Ensure valid ranges and skip invalid ones
         if start < end && end <= s.len() {
             result.push_str(&s[last_index..start]); // Append part before the range

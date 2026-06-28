@@ -38,11 +38,7 @@ pub fn bam_to_fastq(
     fn bam_to_fq(bam: &bam::Record) -> fastq::Record {
         let name = bam.name().unwrap();
         let seq: Vec<u8> = bam.sequence().iter().collect();
-        let qual: Vec<u8> = bam
-            .quality_scores()
-            .iter()
-            .map(|x| x + 33)
-            .collect();
+        let qual: Vec<u8> = bam.quality_scores().iter().map(|x| x + 33).collect();
         let fq = fastq::Record::new(fastq::record::Definition::new(name, ""), seq, qual);
         if bam.flags().is_reverse_complemented() {
             rev_compl_fastq_record(fq)

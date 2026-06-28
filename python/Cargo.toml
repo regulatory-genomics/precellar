@@ -12,6 +12,7 @@ crate-type = ["cdylib"]
 anyhow = "1.0"
 bstr = "1.12"
 bwa-mem2 = { git = "https://github.com/regulatory-genomics/bwa-mem2-rust.git", rev = "27a375ec2239c79e8b3dafc504c1e197832a27bf" }
+minibwa = { git = "https://github.com/regulatory-genomics/minibwa-rs.git", rev = "ace99edf95e6894ee05de7605ce2f8e974ef0099" }
 star-aligner = { git = "https://github.com/regulatory-genomics/star-aligner", rev = "ff62b1d7d6ccbade4396398960ffcb1eb3d629e7" }
 minimap2 = { git = "https://github.com/PPSherry/minimap2-rs.git", branch = "feature/paired-end-support" }
 glob = "0.3"
