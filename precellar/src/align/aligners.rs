@@ -221,7 +221,10 @@ impl Aligner for MiniBwaSR {
             self.align_read_pairs(num_threads, &mut reads)
                 .unwrap()
                 .enumerate()
-                .map(|(i, (mut ali1, mut ali2))| {
+                .map(|(i, (ali1, ali2))| {
+                    // Extract the primary alignment and discard the rest
+                    let mut ali1 = ali1.into_iter().next().unwrap();
+                    let mut ali2 = ali2.into_iter().next().unwrap();
                     let (bc, umi) = info.get(i).unwrap();
                     add_cell_barcode(
                         &mut ali1,
@@ -251,7 +254,9 @@ impl Aligner for MiniBwaSR {
             self.align_reads(num_threads, reads.as_mut_slice())
                 .unwrap()
                 .enumerate()
-                .map(|(i, mut alignment)| {
+                .map(|(i, alignment)| {
+                    // Extract the primary alignment and discard the rest
+                    let mut alignment = alignment.into_iter().next().unwrap();
                     let (bc, umi) = info.get(i).unwrap();
                     add_cell_barcode(
                         &mut alignment,
