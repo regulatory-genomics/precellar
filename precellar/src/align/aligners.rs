@@ -55,11 +55,6 @@ impl<R: Record> MultiMap<R> {
         get_umi(&self.primary)
     }
 
-    /// Consumes the `MultiMap` and returns the primary alignment.
-    pub fn into_primary(self) -> R {
-        self.primary
-    }
-
     /// Whether the read is confidently mapped. A read is confidently mapped if it
     /// is mapped to a single location.
     pub fn is_confidently_mapped(&self) -> bool {

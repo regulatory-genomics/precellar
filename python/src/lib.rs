@@ -25,93 +25,6 @@ use tikv_jemallocator::Jemalloc;
 #[global_allocator]
 static GLOBAL: Jemalloc = Jemalloc;
 
-/*
-#[pyfunction]
-#[pyo3(
-    signature = (
-        input,
-        output,
-        *,
-        mito_dna=vec!["chrM".to_owned(), "M".to_owned()],
-        chunk_size=50000000,
-        compression=None,
-        compression_level=None,
-        temp_dir=None,
-        num_threads=8,
-    ),
-    text_signature = "(input, output, *,
-        mito_dna=['chrM', 'M'],
-        chunk_size=50000000,
-        compression=None, compression_level=None,
-        temp_dir=None, num_threads=8)",
-)]
-fn make_fragment(
-    py: Python<'_>,
-    input: PathBuf,
-    output: PathBuf,
-    mito_dna: Vec<String>,
-    chunk_size: usize,
-    compression: Option<&str>,
-    compression_level: Option<u32>,
-    temp_dir: Option<PathBuf>,
-    num_threads: u32,
-) -> Result<HashMap<String, f64>> {
-    let file = std::fs::File::open(input)?;
-    let decoder = bgzf::MultithreadedReader::with_worker_count(
-        (num_threads as usize).try_into().unwrap(),
-        file,
-    );
-    let mut reader = bam::io::Reader::from(decoder);
-    let header = reader.read_header()?;
-
-    let mut fragment_qc = FragmentQC::default();
-    let mut align_qc = AlignQC::default();
-    mito_dna.into_iter().for_each(|mito| {
-        fragment_qc.add_mito_dna(&mito);
-        header
-            .reference_sequences()
-            .get_index_of(&bstr::BString::from(mito))
-            .map(|x| align_qc.add_mito_dna(x));
-    });
-
-    let chunks = NameCollatedRecords::new(reader.records())
-        .map(|x| {
-            align_qc.add(&header, &x.0, Some(&x.1)).unwrap();
-            x
-        })
-        .chunks(chunk_size);
-    let alignments = chunks
-        .into_iter()
-        .map(|chunk| Either::Right(chunk.collect_vec()));
-
-    let compression = compression
-        .map(|x| Compression::from_str(x).unwrap())
-        .or((&output).try_into().ok());
-    let mut writer = create_file(output, compression, compression_level, num_threads)?;
-
-    let mut fragment_generator = FragmentGenerator::default();
-    if let Some(dir) = temp_dir {
-        fragment_generator.set_temp_dir(dir)
-    };
-
-    fragment_generator
-        .gen_unique_fragments(&header, alignments)
-        .into_iter()
-        .for_each(|fragments| {
-            py.check_signals().unwrap();
-            fragments.into_iter().for_each(|frag| {
-                fragment_qc.update(&frag);
-                writeln!(writer.as_mut(), "{}", frag).unwrap();
-            })
-        });
-
-    let mut report = Metrics::default();
-    align_qc.report(&mut report);
-    fragment_qc.report(&mut report);
-    Ok(report.into())
-}
-    */
-
 /// Generate consolidated fastq files from the sequencing specification.
 /// The barcodes and UMIs are concatenated to the read 1 sequence.
 /// Fixed sequences and linkers are removed.
@@ -203,7 +116,6 @@ fn precellar(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(align::make_minibwa_index, m)?)?;
     m.add_function(wrap_pyfunction!(align::make_minimap2_index, m)?)?;
     m.add_function(wrap_pyfunction!(align::align, m)?)?;
-    //m.add_function(wrap_pyfunction!(make_fragment, m)?)?;
     m.add_function(wrap_pyfunction!(make_fastq, m)?)?;
 
     utils::register_utils(m)?;

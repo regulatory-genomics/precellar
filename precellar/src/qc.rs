@@ -12,10 +12,6 @@ use std::collections::{HashMap, HashSet};
 /// The trait for quality control metrics.
 pub trait Metric: Sized + Extend<Self> {
     fn to_json(&self) -> Value;
-
-    fn into_json(self) -> Value {
-        self.to_json()
-    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -255,10 +251,6 @@ impl Metric for QcAlign {
 }
 
 impl QcAlign {
-    pub fn add_mito_dna(&mut self, mito_dna: usize) {
-        self.mito_dna.insert(mito_dna);
-    }
-
     pub fn add_pair<R: Record>(
         &mut self,
         header: &sam::Header,

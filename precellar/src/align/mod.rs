@@ -10,7 +10,7 @@ pub use aligners::{
 };
 pub use fastq::{
     extend_fastq_record, AlignmentBatch, AlignmentInput, AlignmentResult, AlignmentRunner,
-    AlignmentStream, AnnotatedFastq, Barcode, BarcodeCorrectionConfig, FastqExecution, FastqPlan,
-    FastqReport, MultiAnnotatedFqReader, NameCollatedRecords, ReadMetadata, RunReport,
+    AnnotatedFastq, Barcode, BarcodeCorrectionConfig, FastqExecution, FastqPlan, FastqReport,
+    ReadMetadata, RunReport,
 };
 pub use snv::{SNVs, SNV};

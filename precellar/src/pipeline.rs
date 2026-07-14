@@ -64,8 +64,4 @@ impl FastqStagePipeline {
             .filter_map(|stage| stage.report())
             .collect()
     }
-
-    pub fn is_empty(&self) -> bool {
-        self.stages.is_empty()
-    }
 }

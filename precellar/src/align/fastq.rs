@@ -1,4 +1,4 @@
-use super::aligners::{Aligner, MultiMap, MultiMapR};
+use super::aligners::{Aligner, MultiMapR};
 
 use crate::barcode::{BarcodeAnalyzer, BarcodeCorrectOptions};
 use crate::pipeline::{FastqStage, FastqStagePipeline, MiddlewareQcReport};
@@ -8,7 +8,7 @@ use anyhow::Result;
 use bstr::BString;
 use itertools::Itertools;
 use log::{debug, info};
-use noodles::{bam, fastq};
+use noodles::fastq;
 use rayon::iter::ParallelIterator;
 use rayon::slice::ParallelSlice;
 use seqspec::{Assay, FastqReader, Modality, SegmentInfo, SplitError};
@@ -222,8 +222,6 @@ impl<'a, A: Aligner> AlignmentRunner<'a, A> {
 }
 
 pub type AlignmentBatch = Vec<(Option<MultiMapR>, Option<MultiMapR>)>;
-pub type AlignmentStream<'a, A> = AlignmentResult<'a, A>;
-
 #[derive(Debug)]
 pub struct RunReport {
     pub fastq: FastqReport,
@@ -342,7 +340,7 @@ impl<'a, A: Aligner> Iterator for AlignmentResult<'a, A> {
 }
 
 /// AnnotatedFastqReaders is formed by concatenating multiple AnnotatedFastqReader instances.
-pub struct MultiAnnotatedFqReader {
+struct MultiAnnotatedFqReader {
     readers: Vec<AnnotatedFastqReader>,
     current: usize,
 }
@@ -383,7 +381,6 @@ impl MultiAnnotatedFqReader {
 }
 
 struct AnnotatedFastqReader {
-    trim_poly_a: bool,
     readers: PrefetchIterator<Vec<SmallVec<[fastq::Record; 4]>>>,
     annotation: AnnotationStage,
 }
@@ -446,13 +443,7 @@ impl AnnotatedFastqReader {
                 },
                 1,
             ),
-            trim_poly_a: false,
         }
-    }
-
-    pub fn with_polya_trimmed(mut self) -> Self {
-        self.trim_poly_a = true;
-        self
     }
 
     fn is_paired_end(&self) -> bool {
@@ -721,17 +712,6 @@ impl From<AnnotatedFastq> for AlignmentInput {
 }
 
 impl AnnotatedFastq {
-    /// The total number of bases, including read1 and read2, in the record.
-    pub fn len(&self) -> usize {
-        self.read1.as_ref().map_or(0, |x| x.sequence().len())
-            + self.read2.as_ref().map_or(0, |x| x.sequence().len())
-    }
-    pub fn is_empty(&self) -> bool {
-        self.read1.is_none() && self.read2.is_none()
-    }
-}
-
-impl AnnotatedFastq {
     /// Join another AnnotatedFastq from the same insert into self.
     pub fn join(&mut self, other: Self) {
         if let Some(bc) = &mut self.barcode {
@@ -781,53 +761,6 @@ fn strip_fq_suffix(record: &mut fastq::Record) {
         let suffix = &read_name[n - 2..];
         if suffix == b"/1" || suffix == b"/2" {
             record.name_mut().truncate(n - 2);
-        }
-    }
-}
-
-pub struct NameCollatedRecords<'a, R> {
-    records: bam::io::reader::Records<'a, R>,
-    prev_record: Option<(BString, bam::Record)>,
-    checker: HashSet<BString>,
-}
-
-impl<'a, R: std::io::Read> NameCollatedRecords<'a, R> {
-    pub fn new(records: bam::io::reader::Records<'a, R>) -> Self {
-        Self {
-            records,
-            prev_record: None,
-            checker: HashSet::new(),
-        }
-    }
-
-    fn check(&mut self, name: &BString) {
-        assert!(
-            !self.checker.contains(name),
-            "bam file must be name collated or name sorted"
-        );
-        self.checker.insert(name.to_owned());
-    }
-}
-
-impl<'a, R: std::io::Read> Iterator for NameCollatedRecords<'a, R> {
-    type Item = (MultiMap<bam::Record>, MultiMap<bam::Record>);
-
-    fn next(&mut self) -> Option<Self::Item> {
-        let record = self.records.next()?.unwrap();
-        let name = record.name().unwrap().to_owned();
-        if let Some((prev_name, prev_record)) = self.prev_record.take() {
-            if name == prev_name {
-                Some((prev_record.into(), record.into()))
-            } else {
-                panic!(
-                    "Expecting paired end reads with the same name, found {} and {}",
-                    prev_name, name
-                );
-            }
-        } else {
-            self.check(&name);
-            self.prev_record = Some((name, record));
-            self.next()
         }
     }
 }
