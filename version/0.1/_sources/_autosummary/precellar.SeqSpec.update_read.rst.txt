@@ -1,0 +1,6 @@
+precellar.SeqSpec.update\_read
+==============================
+
+.. currentmodule:: precellar
+
+.. automethod:: SeqSpec.update_read

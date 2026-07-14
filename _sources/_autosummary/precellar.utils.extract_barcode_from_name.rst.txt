@@ -1,0 +1,6 @@
+﻿precellar.utils.extract\_barcode\_from\_name
+============================================
+
+.. currentmodule:: precellar.utils
+
+.. autofunction:: extract_barcode_from_name

@@ -1,0 +1,42 @@
+﻿precellar.Assay
+===============
+
+.. currentmodule:: precellar
+
+.. autoclass:: Assay
+
+   
+   
+   .. rubric:: Attributes
+
+   .. autosummary::
+      :toctree: .
+   
+      ~Assay.chemistry_strandedness
+      ~Assay.description
+      ~Assay.doi
+      ~Assay.filename
+      ~Assay.id
+      ~Assay.name
+      ~Assay.sequence_kit
+      ~Assay.sequence_protocol
+   
+   
+
+   
+   
+   .. rubric:: Methods
+
+   .. autosummary::
+      :toctree: .
+   
+      ~Assay.add_illumina_reads
+      ~Assay.delete_read
+      ~Assay.delete_region
+      ~Assay.modalities
+      ~Assay.save
+      ~Assay.to_yaml
+      ~Assay.update_read
+      ~Assay.whitelist
+   
+   

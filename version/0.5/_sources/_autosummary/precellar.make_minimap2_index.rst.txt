@@ -1,0 +1,6 @@
+﻿precellar.make\_minimap2\_index
+===============================
+
+.. currentmodule:: precellar
+
+.. autofunction:: make_minimap2_index

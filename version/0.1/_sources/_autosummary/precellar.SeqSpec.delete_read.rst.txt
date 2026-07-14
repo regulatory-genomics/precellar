@@ -1,0 +1,6 @@
+precellar.SeqSpec.delete\_read
+==============================
+
+.. currentmodule:: precellar
+
+.. automethod:: SeqSpec.delete_read
