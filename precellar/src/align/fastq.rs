@@ -1,3 +1,34 @@
+//! FASTQ annotation, middleware execution, and alignment streaming.
+//!
+//! This module implements the path from assay-defined FASTQ inputs to batches
+//! of alignments:
+//!
+//! 1. [`FastqPlan`] selects a modality, barcode-correction settings, and
+//!    optional [`FastqStage`] middleware.
+//! 2. [`FastqPlan::build`] opens the assay inputs and creates a one-shot
+//!    [`FastqExecution`].
+//! 3. [`FastqExecution::next_batch`] reads synchronized FASTQ records,
+//!    annotates barcode, UMI, and target segments, accumulates FASTQ QC, and
+//!    applies middleware in registration order.
+//! 4. [`AlignmentRunner::stream`] converts the execution into an
+//!    [`AlignmentResult`] iterator that aligns each surviving batch and
+//!    accumulates alignment QC.
+//! 5. The execution must be drained to end-of-input and explicitly finalized
+//!    with [`FastqExecution::finish`] or [`AlignmentResult::finish`] to obtain
+//!    its owned report.
+//!
+//! Assays are processed sequentially, while annotation within each input batch
+//! is parallelized with Rayon. Corresponding records from all FASTQ files in an
+//! assay are synchronized by position and normalized read name. The low-level
+//! reader assumes equal record counts and matching names; violations currently
+//! panic rather than being returned as recoverable errors.
+//!
+//! Alignment iteration uses deferred error reporting because [`Iterator`]
+//! cannot yield `Result` without changing downstream iterator interfaces. A
+//! processing error ends the current iteration and is returned by
+//! [`AlignmentResult::finish`]. Callers must therefore always call `finish`
+//! after consuming the stream.
+
 use super::aligners::{Aligner, MultiMapR};
 
 use crate::barcode::{BarcodeAnalyzer, BarcodeCorrectOptions};
@@ -16,10 +47,17 @@ use smallvec::SmallVec;
 use std::collections::HashSet;
 use std::sync::Arc;
 
-/// Configuration for standard barcode correction during annotation.
+/// Configuration for standard barcode correction during FASTQ annotation.
+///
+/// This configuration is installed on each assay's [`BarcodeAnalyzer`] only
+/// when barcode correction is enabled in [`FastqPlan::build`]. Annotation still
+/// preserves the raw barcode when correction fails; the corrected sequence is
+/// represented by [`Barcode::corrected`] and remains `None` in that case.
 #[derive(Debug, Clone)]
 pub struct BarcodeCorrectionConfig {
+    /// Minimum posterior confidence required to accept a correction.
     pub confidence_threshold: f64,
+    /// Maximum number of barcode mismatches considered by correction.
     pub max_mismatch: usize,
 }
 
@@ -32,7 +70,13 @@ impl Default for BarcodeCorrectionConfig {
     }
 }
 
-/// Immutable configuration used to construct annotated FASTQ streams.
+/// Consuming builder for a single annotated FASTQ execution.
+///
+/// A plan owns the configured middleware stages. Calling [`Self::build`]
+/// consumes the plan and moves those stateful stages into the resulting
+/// [`FastqExecution`], so a plan is intentionally one-shot rather than reusable.
+/// The assays themselves are retained behind an `Arc` only to provide cheap,
+/// immutable shared ownership while constructing assay-level readers.
 pub struct FastqPlan {
     assays: Arc<[Assay]>,
     modality: Modality,
@@ -41,6 +85,11 @@ pub struct FastqPlan {
 }
 
 impl FastqPlan {
+    /// Creates a plan for `modality` across the supplied assays.
+    ///
+    /// Assays are consumed in vector order. The default barcode-correction
+    /// configuration is installed, but correction is not enabled until
+    /// [`Self::build`] is called with `correct_barcode = true`.
     pub fn new(assays: Vec<Assay>, modality: Modality) -> Self {
         Self {
             assays: assays.into(),
@@ -50,11 +99,20 @@ impl FastqPlan {
         }
     }
 
+    /// Replaces the standard barcode-correction configuration.
+    ///
+    /// This has no effect when [`Self::build`] is called with barcode
+    /// correction disabled.
     pub fn with_barcode_config(mut self, config: BarcodeCorrectionConfig) -> Self {
         self.barcode_config = config;
         self
     }
 
+    /// Appends a stateful middleware stage to the annotated FASTQ pipeline.
+    ///
+    /// Stages run in registration order. A stage may transform, filter, or
+    /// buffer records. Its [`FastqStage::finish`] method is called only after
+    /// the FASTQ source reaches end-of-input.
     pub fn with_stage<S>(mut self, stage: S) -> Self
     where
         S: FastqStage + 'static,
@@ -63,6 +121,29 @@ impl FastqPlan {
         self
     }
 
+    /// Opens the configured assay inputs and creates a one-shot execution.
+    ///
+    /// `chunk_size` is an approximate aggregate sequence-length target, in
+    /// bases, for each synchronized input batch. It is not a record count. A
+    /// batch may exceed the target by one complete synchronized group of FASTQ
+    /// records.
+    ///
+    /// `correct_barcode` controls whether the configured correction options are
+    /// installed on the assay barcode analyzers. Raw barcodes are annotated in
+    /// either mode.
+    ///
+    /// # Requirements
+    ///
+    /// `chunk_size` must be greater than zero. A zero value cannot advance the
+    /// current low-level batch reader.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the assay-level readers do not agree on whether
+    /// the selected modality is paired-end.
+    ///
+    /// FASTQ opening and low-level reading currently follow `seqspec`'s
+    /// optional/panic behavior rather than returning every I/O failure here.
     pub fn build(self, correct_barcode: bool, chunk_size: usize) -> Result<FastqExecution> {
         let reader = self.build_reader(correct_barcode, chunk_size);
         let num_records = reader.num_records();
@@ -120,13 +201,28 @@ impl FastqPlan {
     }
 }
 
+/// Completed FASTQ-side quality-control report.
+///
+/// The report is available only after the source has reached end-of-input and
+/// every middleware stage has finalized successfully.
 #[derive(Debug)]
 pub struct FastqReport {
+    /// Aggregated annotation and base-quality metrics from all assays.
     pub fastq: QcFastq,
+    /// Stage-specific reports in middleware registration order.
     pub middleware: Vec<MiddlewareQcReport>,
 }
 
-/// One execution of a prepared FASTQ plan.
+/// Stateful, one-shot execution of a prepared [`FastqPlan`].
+///
+/// The execution owns the input readers, middleware stages, and FASTQ QC
+/// accumulator. Repeated calls to [`Self::next_batch`] advance all of that
+/// state. Empty batches produced by filtering middleware are skipped internally
+/// and are never returned to the caller.
+///
+/// Callers must drain the execution until `next_batch` returns `Ok(None)` before
+/// calling [`Self::finish`]. Reaching EOF finalizes middleware exactly once.
+/// Dropping an execution does not finalize middleware or produce a report.
 pub struct FastqExecution {
     source: MultiAnnotatedFqReader,
     stages: FastqStagePipeline,
@@ -138,18 +234,41 @@ pub struct FastqExecution {
 }
 
 impl FastqExecution {
+    /// Returns the estimated total number of logical records across all assays.
+    ///
+    /// This value is used for progress reporting and comes from the assay
+    /// barcode analyzers rather than from records already consumed.
     pub fn num_records(&self) -> usize {
         self.num_records
     }
 
+    /// Returns a human-readable per-assay read-count summary.
+    ///
+    /// Multiple assay counts are separated by `" + "`.
     pub fn read_summary(&self) -> &str {
         &self.read_summary
     }
 
+    /// Returns whether every assay reader was classified as paired-end.
     pub fn is_paired_end(&self) -> bool {
         self.paired_end
     }
 
+    /// Advances annotation and middleware processing by one non-empty batch.
+    ///
+    /// The method reads and annotates source records, merges their local FASTQ
+    /// QC contribution, and passes the resulting batch through every configured
+    /// middleware stage. If middleware removes the entire batch, processing
+    /// continues until a non-empty batch or EOF is reached.
+    ///
+    /// At EOF, middleware is finalized before `Ok(None)` is returned. Subsequent
+    /// calls also return `Ok(None)`.
+    ///
+    /// # Errors
+    ///
+    /// Returns errors raised by middleware processing or finalization. If
+    /// finalization fails, the execution is not marked finished and a later
+    /// call retries finalization.
     pub fn next_batch(&mut self) -> Result<Option<Vec<AnnotatedFastq>>> {
         if self.finished {
             return Ok(None);
@@ -169,6 +288,12 @@ impl FastqExecution {
         }
     }
 
+    /// Consumes a drained execution and returns its completed FASTQ report.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if [`Self::next_batch`] has not yet observed and
+    /// successfully finalized end-of-input.
     pub fn finish(self) -> Result<FastqReport> {
         if !self.finished {
             anyhow::bail!("FASTQ execution has not reached end-of-input");
@@ -180,7 +305,12 @@ impl FastqExecution {
     }
 }
 
-/// Alignment execution configuration and stream construction.
+/// Configuration used to construct the canonical alignment stream.
+///
+/// The runner borrows an aligner for the lifetime of the stream and owns the
+/// execution settings that apply uniformly to each batch. Calling
+/// [`Self::stream`] consumes the runner and moves a [`FastqExecution`] into the
+/// returned [`AlignmentResult`].
 pub struct AlignmentRunner<'a, A> {
     aligner: &'a mut A,
     num_threads: u16,
@@ -188,6 +318,11 @@ pub struct AlignmentRunner<'a, A> {
 }
 
 impl<'a, A: Aligner> AlignmentRunner<'a, A> {
+    /// Creates a runner that uses `num_threads` for each aligner batch call.
+    ///
+    /// No mitochondrial references are configured initially. The accepted
+    /// thread-count range is determined by the concrete [`Aligner`]
+    /// implementation.
     pub fn new(aligner: &'a mut A, num_threads: u16) -> Self {
         Self {
             aligner,
@@ -196,6 +331,11 @@ impl<'a, A: Aligner> AlignmentRunner<'a, A> {
         }
     }
 
+    /// Adds reference names that should contribute to mitochondrial QC.
+    ///
+    /// Names are deduplicated. When the stream is created, each name is resolved
+    /// against the aligner's SAM header. Names absent from that header are
+    /// ignored.
     pub fn with_mito_dna<I, S>(mut self, mito_dna: I) -> Self
     where
         I: IntoIterator<Item = S>,
@@ -205,30 +345,49 @@ impl<'a, A: Aligner> AlignmentRunner<'a, A> {
         self
     }
 
+    /// Creates the alignment iterator for `execution`.
+    ///
+    /// The stream owns the FASTQ execution and alignment QC state while
+    /// borrowing the aligner. It must be consumed to EOF and finalized with
+    /// [`AlignmentResult::finish`] to surface deferred errors and obtain the
+    /// final [`RunReport`].
     pub fn stream(self, execution: FastqExecution) -> AlignmentResult<'a, A> {
         AlignmentResult::new(self.aligner, execution, &self.mito_dna, self.num_threads)
     }
-
-    pub fn run<F>(self, execution: FastqExecution, mut consume: F) -> Result<RunReport>
-    where
-        F: FnMut(&AlignmentBatch) -> Result<()>,
-    {
-        let mut stream = self.stream(execution);
-        while let Some(batch) = stream.next() {
-            consume(&batch)?;
-        }
-        stream.finish()
-    }
 }
 
+/// Alignment results for one annotated FASTQ batch.
+///
+/// Each vector element corresponds to one [`AlignmentInput`]. The tuple stores
+/// read-1 and read-2 results respectively. Either side may be `None` for
+/// single-end input, missing target reads, or a backend that produced no
+/// alignment. Each present value contains one primary alignment and any
+/// secondary alignments reported by the backend.
 pub type AlignmentBatch = Vec<(Option<MultiMapR>, Option<MultiMapR>)>;
+
+/// Completed report for an alignment stream.
+///
+/// FASTQ and middleware metrics are finalized together with the accumulated
+/// alignment metrics, preserving one ownership boundary for the complete run.
 #[derive(Debug)]
 pub struct RunReport {
+    /// Annotation and middleware QC from the owned FASTQ execution.
     pub fastq: FastqReport,
+    /// QC accumulated from every alignment batch yielded by the stream.
     pub alignment: QcAlign,
 }
 
-/// Iterator that yields alignment results from annotated FASTQ reads with QC metrics.
+/// Stateful alignment iterator with owned QC and deferred error reporting.
+///
+/// Each call to [`Iterator::next`] obtains one annotated FASTQ batch, converts
+/// it to backend-neutral [`AlignmentInput`] values, invokes the aligner, updates
+/// alignment QC, and yields an [`AlignmentBatch`]. QC is not exposed while the
+/// stream is running; it is returned by [`Self::finish`] after EOF.
+///
+/// FASTQ, middleware, and QC errors cannot be represented by this iterator's
+/// item type. Such an error causes `next` to return `None` and is retained for
+/// [`Self::finish`] to return. Consumers must stop after the first `None` and
+/// always call `finish`; this type does not implement `FusedIterator`.
 pub struct AlignmentResult<'a, A> {
     aligner: &'a mut A,
     execution: FastqExecution,
@@ -273,14 +432,27 @@ impl<'a, A: Aligner> AlignmentResult<'a, A> {
 }
 
 impl<'a, A> AlignmentResult<'a, A> {
+    /// Returns the estimated total logical-record count for progress reporting.
     pub fn num_records(&self) -> usize {
         self.num_records
     }
 
+    /// Returns the number of annotated records submitted to the aligner so far.
+    ///
+    /// Records removed by middleware are not counted as batches are processed.
+    /// On successful EOF this value is set to [`Self::num_records`] so progress
+    /// displays finish at the configured total.
     pub fn num_processed(&self) -> usize {
         self.num_processed
     }
 
+    /// Consumes a completed stream and returns its owned run report.
+    ///
+    /// # Errors
+    ///
+    /// Returns the processing error retained by the iterator, if any. Returns
+    /// an error when the stream has not yet reached EOF. Successful completion
+    /// also requires the underlying [`FastqExecution`] to finalize successfully.
     pub fn finish(self) -> Result<RunReport> {
         if let Some(error) = self.error {
             return Err(error);
@@ -295,9 +467,7 @@ impl<'a, A> AlignmentResult<'a, A> {
     }
 }
 
-/// Implement the Iterator trait for AlignmentResult.
-/// The alignment results are yielded as a tuple of two MultiMapR.
-/// If the read is unpaired, the second element is None.
+/// Advances FASTQ processing, alignment, and alignment QC by one batch.
 impl<'a, A: Aligner> Iterator for AlignmentResult<'a, A> {
     type Item = AlignmentBatch;
     fn next(&mut self) -> Option<Self::Item> {
@@ -339,7 +509,10 @@ impl<'a, A: Aligner> Iterator for AlignmentResult<'a, A> {
     }
 }
 
-/// AnnotatedFastqReaders is formed by concatenating multiple AnnotatedFastqReader instances.
+/// Concatenates assay-level readers without interleaving their batches.
+///
+/// The first reader is exhausted before the next reader is advanced. This
+/// preserves assay order in both record output and QC accumulation.
 struct MultiAnnotatedFqReader {
     readers: Vec<AnnotatedFastqReader>,
     current: usize,
@@ -380,11 +553,17 @@ impl MultiAnnotatedFqReader {
     }
 }
 
+/// Prefetches synchronized physical records and annotates each batch in parallel.
 struct AnnotatedFastqReader {
     readers: PrefetchIterator<Vec<SmallVec<[fastq::Record; 4]>>>,
     annotation: AnnotationStage,
 }
 
+/// Immutable annotation configuration shared by Rayon workers.
+///
+/// Workers return local [`QcFastq`] values, which the owning reader merges after
+/// parallel processing. The barcode analyzer is therefore read concurrently but
+/// never mutated during annotation.
 struct AnnotationStage {
     annotators: Vec<FastqAnnotator>,
     barcode_analyzer: BarcodeAnalyzer,
@@ -455,7 +634,7 @@ impl Iterator for AnnotatedFastqReader {
     type Item = (Vec<AnnotatedFastq>, QcFastq);
 
     fn next(&mut self) -> Option<Self::Item> {
-        // Group reads of the same index from different files into a SmallVec.
+        // Synchronized record groups are already assembled by BatchedFqReader.
         let chunk = self.readers.next()?;
 
         let parallel_chunk_size = (chunk.len() / 128).max(1);
@@ -474,6 +653,13 @@ impl Iterator for AnnotatedFastqReader {
     }
 }
 
+/// Annotates synchronized record groups and returns records plus local FASTQ QC.
+///
+/// One group contains records at the same position from every participating
+/// FASTQ input. Individual physical annotations are joined into one logical
+/// insert. Split failures increment the per-read defect count and drop only the
+/// failed physical annotation. Logical inserts without a barcode are omitted
+/// from downstream output after their available QC has been recorded.
 fn process_chunk<'a, I: IntoIterator<Item = &'a SmallVec<[fastq::Record; 4]>>>(
     barcode_analyzer: &BarcodeAnalyzer,
     annotators: &[FastqAnnotator],
@@ -513,10 +699,23 @@ fn process_chunk<'a, I: IntoIterator<Item = &'a SmallVec<[fastq::Record; 4]>>>(
     (annotated, qc)
 }
 
-/// A batched FASTQ reader that reads multiple FASTQ files in batches.
+/// Reads positionally synchronized records from multiple FASTQ files.
+///
+/// `batch_size` is an approximate aggregate sequence-length target in bases,
+/// not a record count. One record is read from every input during each vertical
+/// step. A complete synchronized group is always retained, so a returned batch
+/// may exceed the target.
+///
+/// Read names are normalized by removing a trailing `/1` or `/2` and must then
+/// match across every input. All readers must reach EOF at the same position.
+///
+/// # Panics
+///
+/// Panics when FASTQ reading fails, input files contain different record counts,
+/// or synchronized records have different normalized names.
 struct BatchedFqReader {
-    readers: Vec<FastqReader>, // a list of open file handles
-    batch_size: usize,         // target size for one chunk of data
+    readers: Vec<FastqReader>,
+    batch_size: usize,
 }
 
 impl Iterator for BatchedFqReader {
@@ -573,8 +772,12 @@ impl Iterator for BatchedFqReader {
     }
 }
 
-/// A FastqAnnotator that splits the reads into subregions, e.g., barcode, UMI, and
-/// return annotated reads.
+/// Splits one physical FASTQ record into barcode, UMI, and target regions.
+///
+/// Segment orientation determines whether barcode and UMI records are reverse
+/// complemented and whether a target is assigned to read 1 or read 2. Multiple
+/// barcode segments are concatenated. If several UMI segments are present in
+/// one physical record, the final segment replaces earlier ones.
 #[derive(Debug)]
 struct FastqAnnotator {
     read_id: String,
@@ -582,6 +785,10 @@ struct FastqAnnotator {
 }
 
 impl FastqAnnotator {
+    /// Creates an annotator when the segment specification contains useful data.
+    ///
+    /// Specifications with no barcode, UMI, or target regions are ignored by
+    /// returning `None`.
     pub fn new(read_id: impl Into<String>, segment_info: SegmentInfo) -> Option<Self> {
         if !segment_info.iter().any(|x| {
             x.region_type.is_barcode() || x.region_type.is_umi() || x.region_type.is_target()
@@ -595,7 +802,17 @@ impl FastqAnnotator {
         }
     }
 
-    /// Annotate a single fastq record.
+    /// Annotates one physical FASTQ record according to the segment definition.
+    ///
+    /// Barcode-correction failures are not annotation errors: the raw barcode is
+    /// retained with no corrected value. Structural split failures are returned
+    /// to the caller and counted as malformed reads by [`process_chunk`].
+    ///
+    /// # Panics
+    ///
+    /// Panics if one physical record produces more than one target-bearing
+    /// segment. A logical read pair must instead be assembled from separate
+    /// physical records through [`AnnotatedFastq::join`].
     fn annotate(
         &self,
         record: &fastq::Record,
@@ -651,13 +868,26 @@ impl FastqAnnotator {
     }
 }
 
+/// Raw and optionally corrected cell-barcode sequence.
+///
+/// The raw FASTQ record retains both sequence and quality scores. Corrected
+/// sequences contain bases only and are present when every constituent barcode
+/// segment was corrected successfully.
 #[derive(Debug)]
 pub struct Barcode {
+    /// Concatenated raw barcode bases and their quality scores.
     pub raw: fastq::Record,
+    /// Concatenated corrected bases, or `None` when correction was disabled or
+    /// any constituent segment could not be corrected.
     pub corrected: Option<Vec<u8>>,
 }
 
 impl Barcode {
+    /// Appends another barcode segment to this barcode.
+    ///
+    /// Raw sequence and quality scores are always appended. Corrected sequence
+    /// is appended only when both barcodes have corrected values; otherwise the
+    /// combined barcode is marked uncorrected.
     pub fn extend(&mut self, other: &Self) {
         extend_fastq_record(&mut self.raw, &other.raw);
         if let Some(c2) = &other.corrected {
@@ -670,29 +900,52 @@ impl Barcode {
     }
 }
 
+/// UMI sequence and quality scores represented as a FASTQ record.
 pub type UMI = fastq::Record;
 
-/// Metadata attached to every alignment generated from a read.
+/// Barcode and UMI metadata carried alongside target reads into an aligner.
+///
+/// The barcode is required at the alignment boundary. UMI metadata remains
+/// optional because not every assay defines a UMI region.
 #[derive(Debug)]
 pub struct ReadMetadata {
+    /// Required raw and optionally corrected cell barcode.
     pub barcode: Barcode,
+    /// Optional UMI sequence and quality scores.
     pub umi: Option<UMI>,
 }
 
 /// Backend-neutral input passed to an aligner.
+///
+/// Inputs may contain read 1, read 2, or both. The metadata is independent of
+/// backend-specific alignment input and is later attached to generated SAM
+/// records by the aligner abstraction.
 #[derive(Debug)]
 pub struct AlignmentInput {
+    /// Target sequence assigned to read 1, if present.
     pub read1: Option<fastq::Record>,
+    /// Target sequence assigned to read 2, if present.
     pub read2: Option<fastq::Record>,
+    /// Barcode and UMI metadata shared by the target reads.
     pub metadata: ReadMetadata,
 }
 
-/// An annotated fastq record with barcode, UMI, and sequence.
+/// One logical insert assembled from annotated physical FASTQ records.
+///
+/// During annotation all fields are optional because a physical record may
+/// contribute only one component. After synchronized records are joined,
+/// barcode-less inserts are filtered before alignment. Converting a remaining
+/// value into [`AlignmentInput`] therefore requires a barcode and moves all
+/// owned FASTQ records without copying them.
 #[derive(Debug)]
 pub struct AnnotatedFastq {
+    /// Raw and optionally corrected cell barcode.
     pub barcode: Option<Barcode>,
+    /// Optional UMI sequence and quality scores.
     pub umi: Option<UMI>,
+    /// Optional target sequence assigned to read 1.
     pub read1: Option<fastq::Record>,
+    /// Optional target sequence assigned to read 2.
     pub read2: Option<fastq::Record>,
 }
 
@@ -712,7 +965,16 @@ impl From<AnnotatedFastq> for AlignmentInput {
 }
 
 impl AnnotatedFastq {
-    /// Join another AnnotatedFastq from the same insert into self.
+    /// Joins another physical annotation from the same logical insert.
+    ///
+    /// Barcode and UMI sequence/quality fields are concatenated in input order.
+    /// Missing fields are adopted from `other`. Read 1 and read 2 are moved into
+    /// their corresponding empty slots.
+    ///
+    /// # Panics
+    ///
+    /// Panics when both values contain read 1 or both contain read 2. A logical
+    /// insert may have at most one target record for each side.
     pub fn join(&mut self, other: Self) {
         if let Some(bc) = &mut self.barcode {
             if let Some(x) = other.barcode.as_ref() {
@@ -748,12 +1010,20 @@ impl AnnotatedFastq {
     }
 }
 
+/// Appends sequence and quality scores from `other` to `this`.
+///
+/// The definition, read name, and description of `this` are preserved. This is
+/// used to concatenate segmented barcodes and UMIs while keeping their sequence
+/// and quality lengths synchronized.
 pub fn extend_fastq_record(this: &mut fastq::Record, other: &fastq::Record) {
     this.sequence_mut().extend_from_slice(other.sequence());
     this.quality_scores_mut()
         .extend_from_slice(other.quality_scores());
 }
 
+/// Removes a conventional `/1` or `/2` suffix before synchronization checks.
+///
+/// Other naming conventions are left unchanged.
 fn strip_fq_suffix(record: &mut fastq::Record) {
     let read_name = record.name();
     let n = read_name.len();

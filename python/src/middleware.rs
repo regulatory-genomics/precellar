@@ -34,8 +34,8 @@ impl FloatingBarcodeExtracter {
     #[pyo3(
         signature = (
             output, valid_barcodes, flank_5, flank_3, expected_len, *,
-            use_read1=true, kmer_size=12, mismatch_tolerance=0,
-            max_barcode_mismatch=1, confidence_threshold=0.975,
+            use_read1=true, kmer_size=15, mismatch_tolerance=1,
+            max_barcode_mismatch=1, confidence_threshold=0.9,
             max_expected_errors=None,
         )
     )]

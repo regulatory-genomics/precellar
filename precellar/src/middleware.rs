@@ -12,9 +12,7 @@ use std::io::Write;
 pub struct FloatingBarcodeQc {
     pub num_records: u64,
     pub num_extracted: u64,
-    pub num_forwarded: u64,
-    pub num_corrected: u64,
-    pub num_skipped: u64,
+    pub num_matched: u64,
 }
 
 impl FloatingBarcodeQc {
@@ -22,9 +20,7 @@ impl FloatingBarcodeQc {
         json!({
             "num_records": self.num_records,
             "num_extracted": self.num_extracted,
-            "num_forwarded": self.num_forwarded,
-            "num_corrected": self.num_corrected,
-            "num_skipped": self.num_skipped,
+            "num_matched": self.num_matched,
         })
     }
 }
@@ -147,12 +143,10 @@ where
             self.qc.num_records += 1;
             let Some((sequence, quality_scores)) = Self::selected_sequence(self.use_read1, &record)
             else {
-                self.qc.num_forwarded += 1;
                 forwarded.push(record);
                 continue;
             };
             let Some(range) = self.extractor.extract_range(sequence) else {
-                self.qc.num_forwarded += 1;
                 forwarded.push(record);
                 continue;
             };
@@ -188,9 +182,9 @@ where
             ) {
                 Ok(corrected) => {
                     Self::write_result(&mut self.output, &record, corrected)?;
-                    self.qc.num_corrected += 1;
+                    self.qc.num_matched += 1;
                 }
-                Err(_) => self.qc.num_skipped += 1,
+                Err(_) => {}
             }
         }
         self.output.flush()?;
