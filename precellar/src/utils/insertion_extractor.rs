@@ -18,6 +18,7 @@
 //! until a valid insertion is returned.
 
 use aho_corasick::{AhoCorasick, AhoCorasickBuilder};
+use std::ops::Range;
 
 /// Maximum displacement searched around the expected insertion boundary.
 const SEARCH_RADIUS: usize = 5;
@@ -167,13 +168,27 @@ impl InsertionExtractor {
     /// read, a required boundary exceeds the read, the mismatch tolerance is
     /// exceeded, or the resulting coordinates would be reversed.
     pub fn extract(&self, read_seq: &[u8]) -> Option<Vec<u8>> {
+        let range = self.extract_range(read_seq)?;
+        Some(read_seq[range].to_vec())
+    }
+
+    /// Extracts the insertion coordinates from `read_seq`, if a valid
+    /// structure is found.
+    ///
+    /// The returned range is a half-open byte range into `read_seq` and does
+    /// not include either fixed flank.
+    pub fn extract_range(&self, read_seq: &[u8]) -> Option<Range<usize>> {
         let automaton = self.automaton.as_ref()?;
         automaton
             .find_iter(read_seq)
             .find_map(|matched| self.extract_from_match(read_seq, matched))
     }
 
-    fn extract_from_match(&self, read_seq: &[u8], matched: aho_corasick::Match) -> Option<Vec<u8>> {
+    fn extract_from_match(
+        &self,
+        read_seq: &[u8],
+        matched: aho_corasick::Match,
+    ) -> Option<Range<usize>> {
         let seed = *self.seeds.get(matched.pattern().as_usize())?;
 
         match seed.flank {
@@ -187,7 +202,7 @@ impl InsertionExtractor {
                 if insert_end < insert_start {
                     return None;
                 }
-                Some(read_seq[insert_start..insert_end].to_vec())
+                Some(insert_start..insert_end)
             }
             Flank::ThreePrime => {
                 // The seed starts `offset` bases into the 3' flank, so its junction
@@ -199,7 +214,7 @@ impl InsertionExtractor {
                 if insert_start > insert_end {
                     return None;
                 }
-                Some(read_seq[insert_start..insert_end].to_vec())
+                Some(insert_start..insert_end)
             }
         }
     }
@@ -310,6 +325,10 @@ mod tests {
     fn extracts_from_five_prime_anchor() {
         let extractor = InsertionExtractor::new("ACGTCAGTGGCA", "TTGGAACCTTGG", 12, 4, 0);
         assert_eq!(
+            extractor.extract_range(b"ACGTCAGTGGCAACGTTTGGAACCTTGG"),
+            Some(12..16)
+        );
+        assert_eq!(
             extractor.extract(b"ACGTCAGTGGCAACGTTTGGAACCTTGG"),
             Some(b"ACGT".to_vec())
         );
@@ -318,6 +337,10 @@ mod tests {
     #[test]
     fn extracts_from_three_prime_anchor_with_mismatch() {
         let extractor = InsertionExtractor::new("ACGTCAGTGGCA", "TTGGAACCTTGG", 12, 4, 1);
+        assert_eq!(
+            extractor.extract_range(b"ACGTCAGTGGCAACGTTTGGAACCTTAG"),
+            Some(12..16)
+        );
         assert_eq!(
             extractor.extract(b"ACGTCAGTGGCAACGTTTGGAACCTTAG"),
             Some(b"ACGT".to_vec())

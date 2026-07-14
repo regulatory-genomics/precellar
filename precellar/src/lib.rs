@@ -3,6 +3,7 @@ pub mod align;
 pub mod barcode;
 pub mod fragment;
 pub mod genome;
+pub mod middleware;
 pub mod qc;
 pub mod transcriptome;
 pub mod utils;

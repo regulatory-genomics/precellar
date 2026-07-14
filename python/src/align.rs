@@ -231,6 +231,8 @@ pub fn make_minimap2_index(fasta: PathBuf, output_index: PathBuf, preset: &str) 
 /// chunk_size: int
 ///     This parameter is used to control the number of bases processed in each chunk per thread.
 ///     The total number of bases in each chunk is determined by: chunk_size * num_threads.
+/// middleware: precellar.middleware.FloatingBarcodeExtracter | None
+///     Optional Rust-backed FASTQ middleware applied before alignment.
 ///
 /// Returns
 /// -------
@@ -252,15 +254,15 @@ pub fn make_minimap2_index(fasta: PathBuf, output_index: PathBuf, preset: &str) 
         shift_left=4, shift_right=-5, compute_snv=false,
         strandedness=None,
         compression=None, compression_level=None,
-        temp_dir=None, num_threads=8, chunk_size=10000000,
+        temp_dir=None, num_threads=8, chunk_size=10000000, middleware=None,
     ),
     text_signature = "(assay, aligner, *,
         output, modality=None, output_type='alignment',
         mito_dna=['chrM', 'M'],
         shift_left=4, shift_right=-5, compute_snv=False,
         strandedness=None,
-        compression=None, compression_level=None,
-        temp_dir=None, num_threads=8, chunk_size=10000000)"
+         compression=None, compression_level=None,
+         temp_dir=None, num_threads=8, chunk_size=10000000, middleware=None)"
 )]
 pub fn align<'py>(
     py: Python<'py>,
@@ -279,6 +281,7 @@ pub fn align<'py>(
     temp_dir: Option<PathBuf>,
     num_threads: u16,
     chunk_size: usize,
+    middleware: Option<Bound<'py, PyAny>>,
 ) -> Result<Bound<'py, PyAny>> {
     let assay = extract_assays(assay)?;
 
@@ -319,6 +322,16 @@ pub fn align<'py>(
         mito_dna.iter().for_each(|x| {
             processor.add_mito_dna(x);
         });
+    }
+    if let Some(middleware) = middleware {
+        let middleware = middleware
+            .extract::<PyRef<'_, crate::middleware::FloatingBarcodeExtracter>>()
+            .map_err(|_| {
+                anyhow::anyhow!(
+                    "middleware must be a precellar.middleware.FloatingBarcodeExtracter"
+                )
+            })?;
+        processor = middleware.configure_processor(processor)?;
     }
 
     let mut qc_metrics = serde_json::Map::new();

@@ -1,6 +1,7 @@
 mod align;
 mod aligners;
 mod examples;
+mod middleware;
 mod pyseqspec;
 mod utils;
 
@@ -200,6 +201,7 @@ fn precellar(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(make_fastq, m)?)?;
 
     utils::register_utils(m)?;
+    middleware::register_middleware(m)?;
     aligners::register_aligners(m)?;
     examples::register_examples(m)?;
 

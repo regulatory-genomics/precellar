@@ -164,20 +164,10 @@ impl BarcodeAnalyzer {
         qual: &[u8],
     ) -> Result<&'a [u8], BarcodeError> {
         if let Some(options) = &self.barcode_correct_options {
-            let expected_errors: f64 = qual.iter().map(|&q| error_probability(q)).sum();
-            if expected_errors >= options.max_expected_errors {
-                return Err(BarcodeError::ExceedExpectedError(expected_errors));
-            }
-
-            let barcode_counts = &self.whitelists.get(region_id).unwrap().barcode_counts;
-            let (bc, prob) = barcode_counts.likelihood(barcode, qual, options.max_mismatch);
-            if prob <= 0.0 {
-                Err(BarcodeError::NoMatch)
-            } else if prob >= options.bc_confidence_threshold {
-                Ok(bc)
-            } else {
-                Err(BarcodeError::LowConfidence(prob))
-            }
+            self.whitelists
+                .get(region_id)
+                .expect("barcode region not found in whitelist")
+                .correct_barcode(barcode, qual, options)
         } else {
             Ok(barcode)
         }
@@ -359,13 +349,46 @@ fn update_best_option<'a>(
 
 /// A whitelist manager that handles barcode validation, counting, and prediction.
 #[derive(Debug, Clone)]
-struct Whitelist {
+pub(crate) struct Whitelist {
     barcode_counts: OligoFrequncy,
     mismatch_count: usize,
     pub(crate) total_count: usize,
 }
 
 impl Whitelist {
+    pub(crate) fn builder<I, S>(valid_barcodes: I) -> WhitelistBuilder
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<Vec<u8>>,
+    {
+        // Floating barcodes use an explicit valid-barcode list. Cell calling
+        // is therefore disabled even when the list is empty.
+        WhitelistBuilder::new(valid_barcodes, false)
+    }
+
+    pub(crate) fn correct_barcode<'a>(
+        &'a self,
+        barcode: &'a [u8],
+        qual: &[u8],
+        options: &BarcodeCorrectOptions,
+    ) -> Result<&'a [u8], BarcodeError> {
+        let expected_errors: f64 = qual.iter().map(|&q| error_probability(q)).sum();
+        if expected_errors >= options.max_expected_errors {
+            return Err(BarcodeError::ExceedExpectedError(expected_errors));
+        }
+
+        let (corrected, probability) =
+            self.barcode_counts
+                .likelihood(barcode, qual, options.max_mismatch);
+        if probability <= 0.0 {
+            Err(BarcodeError::NoMatch)
+        } else if probability >= options.bc_confidence_threshold {
+            Ok(corrected)
+        } else {
+            Err(BarcodeError::LowConfidence(probability))
+        }
+    }
+
     pub fn num_seen_barcodes(&self) -> usize {
         self.barcode_counts.values().filter(|&&x| x > 0).count()
     }
@@ -379,7 +402,7 @@ impl Whitelist {
     }
 }
 
-struct WhitelistBuilder {
+pub(crate) struct WhitelistBuilder {
     whitelist_exists: bool,
     barcode_counts: OligoFrequncy,
     mismatch_count: usize,
@@ -390,7 +413,7 @@ struct WhitelistBuilder {
 impl WhitelistBuilder {
     /// Create a new whitelist builder from list of valid barcodes.
     /// This list can be empty, in which case the whitelist will be predicted from the observed barcodes.
-    pub fn new<I: IntoIterator<Item = S>, S: Into<Vec<u8>>>(
+    pub(crate) fn new<I: IntoIterator<Item = S>, S: Into<Vec<u8>>>(
         valid_barcodes: I,
         call_cell_enabled: bool,
     ) -> Self {
@@ -407,7 +430,7 @@ impl WhitelistBuilder {
     }
 
     /// Add a barcode to the whitelist builder.
-    pub fn add(&mut self, barcode: &[u8]) {
+    pub(crate) fn add(&mut self, barcode: &[u8]) {
         if self.whitelist_exists {
             // If a whitelist exists, only count barcodes in the whitelist
             if let Some(count) = self.barcode_counts.get_mut(barcode) {
@@ -428,7 +451,7 @@ impl WhitelistBuilder {
     /// Finalize the whitelist builder and return the whitelist.
     /// If a whitelist was provided or cell_calling is false, the provided whitelist will be used.
     /// Otherwise, cell calling will be performed to predict the whitelist.
-    pub fn finish(mut self) -> Whitelist {
+    pub(crate) fn finish(mut self) -> Whitelist {
         if self.whitelist_exists || !self.call_cell_enabled {
             Whitelist {
                 barcode_counts: self.barcode_counts,

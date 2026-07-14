@@ -1,6 +1,7 @@
 use super::aligners::{Aligner, MultiMap, MultiMapR};
 
 use crate::barcode::{BarcodeAnalyzer, BarcodeCorrectOptions};
+use crate::middleware::{AnnotatedFastqStream, MiddlewareFactory};
 use crate::qc::{QcAlign, QcFastq};
 use crate::utils::{rev_compl_fastq_record, PrefetchIterator};
 use anyhow::Result;
@@ -27,6 +28,7 @@ pub struct FastqProcessor {
     mismatch_in_barcode: usize, // The number of mismatches allowed in barcode
     qc_align: HashMap<Modality, Arc<Mutex<QcAlign>>>,
     qc_fastq: HashMap<Modality, Arc<Mutex<QcFastq>>>,
+    middleware: Option<MiddlewareFactory>,
 }
 
 impl FastqProcessor {
@@ -40,11 +42,20 @@ impl FastqProcessor {
             mismatch_in_barcode: 1,
             qc_align: HashMap::new(),
             qc_fastq: HashMap::new(),
+            middleware: None,
         }
     }
 
     pub fn with_barcode_correct_prob(mut self, prob: f64) -> Self {
         self.barcode_correct_prob = prob;
+        self
+    }
+
+    pub fn with_middleware<F>(mut self, middleware: F) -> Self
+    where
+        F: FnOnce(AnnotatedFastqStream) -> AnnotatedFastqStream + Send + 'static,
+    {
+        self.middleware = Some(Box::new(middleware));
         self
     }
 
@@ -94,6 +105,7 @@ impl FastqProcessor {
         chunk_size: usize,
     ) -> AlignmentResult<'a, A> {
         let fq_reader = self.gen_barcoded_fastq(true, chunk_size);
+        let num_records = fq_reader.num_records();
         let n_reads: String = fq_reader
             .readers
             .iter()
@@ -101,7 +113,13 @@ impl FastqProcessor {
             .intersperse(" + ".to_string())
             .collect();
         info!("Aligning {} reads to reference genome ...", n_reads);
-        let result = AlignmentResult::new(aligner, fq_reader, &self.mito_dna, num_threads);
+        let fq_reader: AnnotatedFastqStream = Box::new(fq_reader);
+        let fq_reader = match self.middleware.take() {
+            Some(middleware) => middleware(fq_reader),
+            None => fq_reader,
+        };
+        let result =
+            AlignmentResult::new(aligner, fq_reader, num_records, &self.mito_dna, num_threads);
         self.qc_align.insert(self.modality(), result.qc.clone());
         result
     }
@@ -169,13 +187,12 @@ pub struct AlignmentResult<'a, A> {
 impl<'a, A: Aligner> AlignmentResult<'a, A> {
     fn new(
         aligner: &'a mut A,
-        fastq_reader: MultiAnnotatedFqReader,
+        fastq_reader: AnnotatedFastqStream,
+        num_records: usize,
         mito_dna: &HashSet<String>,
         num_threads: u16,
     ) -> Self {
         let header = aligner.header();
-        let num_records = fastq_reader.num_records();
-
         let mut qc = QcAlign::default();
         mito_dna.iter().for_each(|mito| {
             header
@@ -212,7 +229,10 @@ impl<'a, A> AlignmentResult<'a, A> {
 impl<'a, A: Aligner> Iterator for AlignmentResult<'a, A> {
     type Item = Vec<(Option<MultiMapR>, Option<MultiMapR>)>;
     fn next(&mut self) -> Option<Self::Item> {
-        let data = self.fastq_reader.next()?;
+        let Some(data) = self.fastq_reader.next() else {
+            self.num_processed = self.num_records;
+            return None;
+        };
         self.num_processed += data.len();
 
         // Align the reads.
