@@ -6,7 +6,12 @@ use precellar::{
 };
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
-use std::{fs::File, io::BufWriter, path::PathBuf};
+use seqspec::utils::open_file;
+use std::{
+    fs::File,
+    io::{BufRead, BufReader, BufWriter},
+    path::PathBuf,
+};
 
 /// Rust-backed middleware for extracting floating barcodes before alignment.
 #[pyclass(module = "precellar.middleware")]
@@ -38,7 +43,7 @@ impl FloatingBarcodeExtracter {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         output: PathBuf,
-        valid_barcodes: Vec<String>,
+        valid_barcodes: Bound<'_, PyAny>,
         flank_5: String,
         flank_3: String,
         expected_len: usize,
@@ -61,20 +66,7 @@ impl FloatingBarcodeExtracter {
             }
         }
 
-        let valid_barcodes: Vec<Vec<u8>> = valid_barcodes
-            .into_iter()
-            .map(|barcode| {
-                let barcode = barcode.to_ascii_uppercase();
-                if barcode.is_empty()
-                    || !barcode
-                        .bytes()
-                        .all(|base| matches!(base, b'A' | b'C' | b'G' | b'T'))
-                {
-                    bail!("valid barcodes must be non-empty DNA sequences");
-                }
-                Ok(barcode.into_bytes())
-            })
-            .collect::<Result<_>>()?;
+        let valid_barcodes = read_valid_barcodes(valid_barcodes)?;
         if let Some(length) = valid_barcodes.first().map(Vec::len) {
             if valid_barcodes.iter().any(|barcode| barcode.len() != length) {
                 bail!("all valid barcodes must have the same length");
@@ -95,6 +87,41 @@ impl FloatingBarcodeExtracter {
             max_expected_errors: max_expected_errors.unwrap_or(f64::MAX),
         })
     }
+}
+
+fn read_valid_barcodes(value: Bound<'_, PyAny>) -> Result<Vec<Vec<u8>>> {
+    let barcodes = if let Ok(barcodes) = value.extract::<Vec<String>>() {
+        barcodes
+    } else {
+        let path = value.extract::<PathBuf>().map_err(|_| {
+            anyhow::anyhow!("valid_barcodes must be a sequence of strings or a file path")
+        })?;
+        let reader = BufReader::new(open_file(path)?);
+        reader
+            .lines()
+            .map(|line| line.map(|line| line.trim().to_owned()))
+            .filter_map(|line| match line {
+                Ok(line) if !line.is_empty() => Some(Ok(line)),
+                Ok(_) => None,
+                Err(error) => Some(Err(error.into())),
+            })
+            .collect::<Result<Vec<_>>>()?
+    };
+
+    barcodes
+        .into_iter()
+        .map(|barcode| {
+            let barcode = barcode.to_ascii_uppercase();
+            if barcode.is_empty()
+                || !barcode
+                    .bytes()
+                    .all(|base| matches!(base, b'A' | b'C' | b'G' | b'T'))
+            {
+                bail!("valid barcodes must be non-empty DNA sequences");
+            }
+            Ok(barcode.into_bytes())
+        })
+        .collect::<Result<_>>()
 }
 
 impl FloatingBarcodeExtracter {
