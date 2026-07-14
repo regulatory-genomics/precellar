@@ -5,6 +5,7 @@ edition = "2021"
 
 [dependencies]
 anyhow = "1.0"
+aho-corasick = "1.1"
 anndata = "0.6.2"
 anndata-hdf5 = "0.5.2"
 bed-utils = { git = "https://github.com/kaizhang/bed-utils.git", rev="c7e7c80c7dcd61afbd6b296ac70552b9f439d9ce" }

@@ -1,3 +1,5 @@
+pub mod insertion_extractor;
+
 use std::ops::Range;
 
 use anyhow::{anyhow, Result};

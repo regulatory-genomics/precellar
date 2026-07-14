@@ -264,8 +264,7 @@ impl SplicedRecord {
 
                 let left_exons = find_exons(exons, left_segment.start, left_segment.end - 1);
                 let right_exons = find_exons(exons, right_segment.start, right_segment.end - 1);
-                let (Some(left_exon), Some(right_exon)) =
-                    (left_exons.last(), right_exons.first())
+                let (Some(left_exon), Some(right_exon)) = (left_exons.last(), right_exons.first())
                 else {
                     return false;
                 };
@@ -425,7 +424,9 @@ impl TxAlignment {
     pub fn to_fragments(&self) -> Box<dyn Iterator<Item = Fragment> + '_> {
         match self {
             TxAlignment::SeAligned { read, .. } => Box::new(read.to_fragments()),
-            TxAlignment::PeAligned { read1, read2, .. } => Box::new(read1.to_fragments().chain(read2.to_fragments())),
+            TxAlignment::PeAligned { read1, read2, .. } => {
+                Box::new(read1.to_fragments().chain(read2.to_fragments()))
+            }
             _ => Box::new(std::iter::empty()),
         }
     }
@@ -618,36 +619,43 @@ impl TxAligner {
                     .into_iter()
                     .map(|x| (x.transcript_id.clone(), x))
                     .collect();
-                self._align_one(&rec2, strandedness).into_iter().for_each(|a2| {
-                    if let Some(a1) = aln1.get(&a2.transcript_id) {
-                        if a1.strand == a2.strand {
-                            if a1.strand == Orientation::Antisense {
-                                has_antisense = true;
-                            } else {
-                                let ty = match (&a1.align_type, a2.align_type) {
-                                    (AlignType::Intronic, AlignType::Intronic) => AlignType::Intronic,
-                                    (AlignType::Exonic, AlignType::Exonic) => AlignType::Exonic,
-                                    (AlignType::Discordant, _) | (_, AlignType::Discordant) => AlignType::Discordant,
-                                    _ => AlignType::Spanning,
-                                };
-                                if ty == AlignType::Discordant {
-                                    has_discordant = true;
+                self._align_one(&rec2, strandedness)
+                    .into_iter()
+                    .for_each(|a2| {
+                        if let Some(a1) = aln1.get(&a2.transcript_id) {
+                            if a1.strand == a2.strand {
+                                if a1.strand == Orientation::Antisense {
+                                    has_antisense = true;
                                 } else {
-                                    if let Some(gid) = &gene_id {
-                                        if gid != &a1.gene_id {
-                                            multimapped = true;
+                                    let ty = match (&a1.align_type, a2.align_type) {
+                                        (AlignType::Intronic, AlignType::Intronic) => {
+                                            AlignType::Intronic
                                         }
+                                        (AlignType::Exonic, AlignType::Exonic) => AlignType::Exonic,
+                                        (AlignType::Discordant, _) | (_, AlignType::Discordant) => {
+                                            AlignType::Discordant
+                                        }
+                                        _ => AlignType::Spanning,
+                                    };
+                                    if ty == AlignType::Discordant {
+                                        has_discordant = true;
                                     } else {
-                                        gene_id = Some(a1.gene_id.clone());
+                                        if let Some(gid) = &gene_id {
+                                            if gid != &a1.gene_id {
+                                                multimapped = true;
+                                            }
+                                        } else {
+                                            gene_id = Some(a1.gene_id.clone());
+                                        }
+                                        alignments.push((a1.transcript_id.clone(), ty));
                                     }
-                                    alignments.push((a1.transcript_id.clone(), ty));
                                 }
                             }
                         }
-                    }
-                });
+                    });
                 Some((rec1, rec2, alignments))
-            }).collect();
+            })
+            .collect();
 
         if aln.is_empty() {
             None
