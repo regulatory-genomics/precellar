@@ -6,8 +6,8 @@ edition = "2021"
 [dependencies]
 anyhow = "1.0"
 aho-corasick = "1.1"
-anndata = "0.6.2"
-anndata-hdf5 = "0.5.2"
+anndata = "0.7"
+anndata-hdf5 = "0.5.3"
 bed-utils = { git = "https://github.com/kaizhang/bed-utils.git", rev="c7e7c80c7dcd61afbd6b296ac70552b9f439d9ce" }
 bwa-mem2 = { git = "https://github.com/regulatory-genomics/bwa-mem2-rust.git", rev = "27a375ec2239c79e8b3dafc504c1e197832a27bf" }
 minibwa = { git = "https://github.com/regulatory-genomics/minibwa-rs.git", rev = "22b2d201901c39b7b2cb096acd2a486dcce0c375" }
@@ -15,13 +15,13 @@ star-aligner = { git = "https://github.com/regulatory-genomics/star-aligner", re
 minimap2 = { git = "https://github.com/PPSherry/minimap2-rs.git", branch = "feature/paired-end-support" }
 smallvec = "1.15"
 bstr = "1.12"
-itertools = "0.14"
+itertools = "0.15"
 indexmap = "2.11"
 log = "0.4"
 lexical = "7.0"
 nalgebra-sparse = "0.11"
 noodles = { version = "0.101", features = ["core", "gtf", "fastq", "bam", "sam", "async"] }
-polars = "0.51"
+polars = "0.53"
 rayon = "1.11"
 bitcode = "0.6"
 serde_json = "1.0"
@@ -32,7 +32,7 @@ rand = "0.9.0"
 indicatif = "0.18"
 tempfile = "3"
 bio = "2.0"
-tikv-jemallocator = { version = "0.6", optional = true }
+tikv-jemallocator = { version = "0.7", optional = true }
 
 [dev-dependencies]
 flate2 = "1.1"
