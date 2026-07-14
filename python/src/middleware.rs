@@ -5,10 +5,9 @@ use precellar::{
 };
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
-use seqspec::utils::open_file;
+use seqspec::utils::{create_file, open_file, Compression};
 use std::{
-    fs::File,
-    io::{BufRead, BufReader, BufWriter},
+    io::{BufRead, BufReader},
     path::PathBuf,
 };
 
@@ -107,6 +106,10 @@ fn read_valid_barcodes(value: Bound<'_, PyAny>) -> Result<Vec<Vec<u8>>> {
             .collect::<Result<Vec<_>>>()?
     };
 
+    if barcodes.is_empty() {
+        bail!("valid_barcodes must contain at least one barcode");
+    }
+
     barcodes
         .into_iter()
         .map(|barcode| {
@@ -125,7 +128,8 @@ fn read_valid_barcodes(value: Bound<'_, PyAny>) -> Result<Vec<Vec<u8>>> {
 
 impl FloatingBarcodeExtracter {
     pub(crate) fn configure_plan(&self, plan: FastqPlan) -> Result<FastqPlan> {
-        let output = BufWriter::new(File::create(&self.output)?);
+        let compression = Compression::try_from(&self.output).ok();
+        let output = create_file(&self.output, compression, None, 1)?;
         let extractor = InsertionExtractor::new(
             &self.flank_5,
             &self.flank_3,
@@ -147,7 +151,7 @@ impl FloatingBarcodeExtracter {
             valid_barcodes,
             correction_options,
             output,
-        );
+        )?;
         Ok(plan.with_stage(stage))
     }
 }

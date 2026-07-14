@@ -361,9 +361,9 @@ impl Whitelist {
         I: IntoIterator<Item = S>,
         S: Into<Vec<u8>>,
     {
-        // Floating barcodes use an explicit valid-barcode list. Cell calling
-        // is therefore disabled even when the list is empty.
-        WhitelistBuilder::new(valid_barcodes, false)
+        // Floating barcodes use the same on-list semantics as cell barcodes.
+        // The caller must provide a non-empty explicit whitelist.
+        WhitelistBuilder::new(valid_barcodes, true)
     }
 
     pub(crate) fn correct_barcode<'a>(

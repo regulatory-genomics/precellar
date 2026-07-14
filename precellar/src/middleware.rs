@@ -6,6 +6,7 @@ pub use crate::pipeline::{AnnotatedFastqBatch, FastqStage, MiddlewareQcReport};
 use crate::utils::insertion_extractor::InsertionExtractor;
 use anyhow::Result;
 use serde_json::json;
+use std::collections::BTreeMap;
 use std::io::Write;
 
 #[derive(Debug, Default)]
@@ -26,13 +27,17 @@ impl FloatingBarcodeQc {
 }
 
 struct PendingFloatingBarcode {
-    barcode: Vec<u8>,
+    barcode: Option<Vec<u8>>,
     umi: Vec<u8>,
     sequence: Vec<u8>,
     quality_scores: Vec<u8>,
 }
 
 /// Extracts floating barcodes and removes extracted records from downstream.
+///
+/// Floating-barcode correction uses an explicit, non-empty whitelist. Every
+/// extracted floating sequence contributes to whitelist frequencies, but output
+/// is emitted only when the cell barcode has a corrected value.
 pub struct FloatingBarcodeStage<W> {
     use_read1: bool,
     extractor: InsertionExtractor,
@@ -54,12 +59,17 @@ where
         valid_barcodes: B,
         correction_options: BarcodeCorrectOptions,
         output: W,
-    ) -> Self
+    ) -> Result<Self>
     where
         B: IntoIterator<Item = S>,
         S: Into<Vec<u8>>,
     {
-        Self {
+        let valid_barcodes: Vec<Vec<u8>> = valid_barcodes.into_iter().map(Into::into).collect();
+        if valid_barcodes.is_empty() {
+            anyhow::bail!("valid_barcodes must contain at least one barcode");
+        }
+
+        Ok(Self {
             use_read1,
             extractor,
             whitelist_builder: Some(Whitelist::builder(valid_barcodes)),
@@ -68,7 +78,7 @@ where
             output,
             qc: FloatingBarcodeQc::default(),
             finished: false,
-        }
+        })
     }
 
     pub fn qc(&self) -> &FloatingBarcodeQc {
@@ -101,14 +111,7 @@ where
             barcode: record
                 .barcode
                 .as_ref()
-                .and_then(|barcode| {
-                    barcode
-                        .corrected
-                        .as_deref()
-                        .or(Some(barcode.raw.sequence()))
-                })
-                .unwrap_or_default()
-                .to_vec(),
+                .and_then(|barcode| barcode.corrected.clone()),
             umi: record
                 .umi
                 .as_ref()
@@ -119,17 +122,26 @@ where
         }
     }
 
-    fn write_result(
+    fn write_results(
         output: &mut W,
-        record: &PendingFloatingBarcode,
-        corrected: &[u8],
+        matches: BTreeMap<(Vec<u8>, Vec<u8>), BTreeMap<Vec<u8>, u64>>,
     ) -> std::io::Result<()> {
-        output.write_all(&record.barcode)?;
-        output.write_all(b"\t")?;
-        output.write_all(&record.umi)?;
-        output.write_all(b"\t")?;
-        output.write_all(corrected)?;
-        output.write_all(b"\n")
+        output.write_all(b"cell_barcode\tfloating_barcode\tumi_counts\n")?;
+        for ((cell_barcode, floating_barcode), umis) in matches {
+            output.write_all(&cell_barcode)?;
+            output.write_all(b"\t")?;
+            output.write_all(&floating_barcode)?;
+            output.write_all(b"\t")?;
+            for (index, (umi, count)) in umis.into_iter().enumerate() {
+                if index > 0 {
+                    output.write_all(b";")?;
+                }
+                output.write_all(&umi)?;
+                write!(output, ":{count}")?;
+            }
+            output.write_all(b"\n")?;
+        }
+        Ok(())
     }
 }
 
@@ -174,19 +186,31 @@ where
             .take()
             .expect("floating barcode stage already finalized")
             .finish();
+        let mut matches: BTreeMap<_, BTreeMap<Vec<u8>, u64>> = BTreeMap::new();
         for record in std::mem::take(&mut self.pending) {
-            match whitelist.correct_barcode(
-                &record.sequence,
-                &record.quality_scores,
-                &self.correction_options,
-            ) {
+            let PendingFloatingBarcode {
+                barcode,
+                umi,
+                sequence,
+                quality_scores,
+            } = record;
+            let Some(cell_barcode) = barcode else {
+                continue;
+            };
+            match whitelist.correct_barcode(&sequence, &quality_scores, &self.correction_options) {
                 Ok(corrected) => {
-                    Self::write_result(&mut self.output, &record, corrected)?;
+                    let floating_barcode = corrected.to_vec();
+                    *matches
+                        .entry((cell_barcode, floating_barcode))
+                        .or_default()
+                        .entry(umi)
+                        .or_default() += 1;
                     self.qc.num_matched += 1;
                 }
                 Err(_) => {}
             }
         }
+        Self::write_results(&mut self.output, matches)?;
         self.output.flush()?;
         self.finished = true;
         Ok(())
@@ -205,11 +229,28 @@ mod tests {
     use super::*;
     use noodles::fastq;
 
-    fn record(sequence: &[u8]) -> AnnotatedFastq {
+    fn record_with_metadata(
+        sequence: &[u8],
+        cell_barcode: Option<&[u8]>,
+        umi: Option<&[u8]>,
+    ) -> AnnotatedFastq {
         let quality_scores = vec![b'I'; sequence.len()];
         AnnotatedFastq {
-            barcode: None,
-            umi: None,
+            barcode: cell_barcode.map(|barcode| crate::align::Barcode {
+                raw: fastq::Record::new(
+                    fastq::record::Definition::default(),
+                    barcode,
+                    vec![b'I'; barcode.len()],
+                ),
+                corrected: Some(barcode.to_vec()),
+            }),
+            umi: umi.map(|umi| {
+                fastq::Record::new(
+                    fastq::record::Definition::default(),
+                    umi,
+                    vec![b'I'; umi.len()],
+                )
+            }),
             read1: Some(fastq::Record::new(
                 fastq::record::Definition::default(),
                 sequence,
@@ -217,6 +258,10 @@ mod tests {
             )),
             read2: None,
         }
+    }
+
+    fn record(sequence: &[u8]) -> AnnotatedFastq {
+        record_with_metadata(sequence, Some(b"CELL"), None)
     }
 
     fn extractor() -> InsertionExtractor {
@@ -231,14 +276,18 @@ mod tests {
             [b"ACGT".to_vec()],
             BarcodeCorrectOptions::default(),
             Vec::new(),
-        );
+        )
+        .unwrap();
 
         let forwarded = stage
             .process(vec![record(b"ACGTCAGTGGCAACGTTTGGAACCTTGG")])
             .unwrap();
         assert!(forwarded.is_empty());
         stage.finish().unwrap();
-        assert_eq!(stage.into_output(), b"\t\tACGT\n");
+        assert_eq!(
+            stage.into_output(),
+            b"cell_barcode\tfloating_barcode\tumi_counts\nCELL\tACGT\t:1\n"
+        );
     }
 
     #[test]
@@ -249,14 +298,77 @@ mod tests {
             [b"GGGG".to_vec()],
             BarcodeCorrectOptions::default(),
             Vec::new(),
-        );
+        )
+        .unwrap();
 
         let forwarded = stage
             .process(vec![record(b"ACGTCAGTGGCAACGTTTGGAACCTTGG")])
             .unwrap();
         assert!(forwarded.is_empty());
         stage.finish().unwrap();
-        assert!(stage.into_output().is_empty());
+        assert_eq!(
+            stage.into_output(),
+            b"cell_barcode\tfloating_barcode\tumi_counts\n"
+        );
+    }
+
+    #[test]
+    fn skips_matches_without_a_corrected_cell_barcode() {
+        let mut stage = FloatingBarcodeStage::new(
+            true,
+            extractor(),
+            [b"ACGT".to_vec()],
+            BarcodeCorrectOptions::default(),
+            Vec::new(),
+        )
+        .unwrap();
+        let mut record = record(b"ACGTCAGTGGCAACGTTTGGAACCTTGG");
+        record.barcode.as_mut().unwrap().corrected = None;
+
+        stage.process(vec![record]).unwrap();
+        stage.finish().unwrap();
+        assert_eq!(
+            stage.into_output(),
+            b"cell_barcode\tfloating_barcode\tumi_counts\n"
+        );
+    }
+
+    #[test]
+    fn groups_matches_by_cell_barcode_and_umi() {
+        let mut stage = FloatingBarcodeStage::new(
+            true,
+            extractor(),
+            [b"ACGT".to_vec()],
+            BarcodeCorrectOptions::default(),
+            Vec::new(),
+        )
+        .unwrap();
+        let sequence = b"ACGTCAGTGGCAACGTTTGGAACCTTGG";
+        stage
+            .process(vec![
+                record_with_metadata(sequence, Some(b"CCCC"), Some(b"UMI2")),
+                record_with_metadata(sequence, Some(b"AAAA"), None),
+                record_with_metadata(sequence, Some(b"CCCC"), Some(b"UMI1")),
+                record_with_metadata(sequence, Some(b"CCCC"), Some(b"UMI2")),
+            ])
+            .unwrap();
+        stage.finish().unwrap();
+        assert_eq!(
+            stage.into_output(),
+            b"cell_barcode\tfloating_barcode\tumi_counts\nAAAA\tACGT\t:1\nCCCC\tACGT\tUMI1:1;UMI2:2\n"
+        );
+    }
+
+    #[test]
+    fn rejects_an_empty_whitelist() {
+        assert!(FloatingBarcodeStage::new(
+            true,
+            extractor(),
+            Vec::<Vec<u8>>::new(),
+            BarcodeCorrectOptions::default(),
+            Vec::new(),
+        )
+        .is_err());
     }
 
     #[test]
@@ -267,11 +379,15 @@ mod tests {
             [b"ACGT".to_vec()],
             BarcodeCorrectOptions::default(),
             Vec::new(),
-        );
+        )
+        .unwrap();
 
         let forwarded = stage.process(vec![record(b"GATTGATTGATT")]).unwrap();
         assert_eq!(forwarded.len(), 1);
         stage.finish().unwrap();
-        assert!(stage.into_output().is_empty());
+        assert_eq!(
+            stage.into_output(),
+            b"cell_barcode\tfloating_barcode\tumi_counts\n"
+        );
     }
 }
