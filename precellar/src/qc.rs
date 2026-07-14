@@ -18,7 +18,7 @@ pub trait Metric: Sized + Extend<Self> {
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct QcFastq {
     pub(crate) num_reads: HashMap<String, u64>,
     pub(crate) num_defect: HashMap<String, u64>, // Number of reads with defects, e.g., misformed structure.
@@ -126,7 +126,7 @@ impl Metric for QcFastq {
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default)]
 struct AlignStat {
     total: u64,        // Total number of reads
     mapped: u64,       // Number of mapped reads
@@ -170,7 +170,7 @@ impl AlignStat {
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default)]
 struct PairAlignStat {
     read1: AlignStat,
     read2: AlignStat,
@@ -218,7 +218,7 @@ impl PairAlignStat {
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct QcAlign {
     pub(crate) mito_dna: HashSet<usize>, // Mitochondrial DNA reference sequence IDs
     stat_all: PairAlignStat,

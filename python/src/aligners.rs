@@ -5,7 +5,7 @@ use minibwa::{Index as MiniBwaIndex, MiniBwaSR, Options as MiniBwaOptions};
 use noodles::sam::Header;
 use precellar::align::{Minimap2Aligner, Minimap2Opts};
 use precellar::{
-    align::{Aligner, AnnotatedFastq},
+    align::{Aligner, AlignmentInput},
     transcriptome::{Transcript, TxAligner},
 };
 use pyo3::prelude::*;
@@ -82,7 +82,7 @@ impl Aligner for AlignerRef<'_> {
     fn align_reads(
         &mut self,
         num_threads: u16,
-        records: Vec<AnnotatedFastq>,
+        records: Vec<AlignmentInput>,
     ) -> Vec<(
         Option<precellar::align::MultiMapR>,
         Option<precellar::align::MultiMapR>,

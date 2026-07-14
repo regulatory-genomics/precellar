@@ -1,7 +1,7 @@
 use super::aligners::{Aligner, MultiMap, MultiMapR};
 
 use crate::barcode::{BarcodeAnalyzer, BarcodeCorrectOptions};
-use crate::middleware::{AnnotatedFastqStream, MiddlewareFactory};
+use crate::pipeline::{FastqStage, FastqStagePipeline, MiddlewareQcReport};
 use crate::qc::{QcAlign, QcFastq};
 use crate::utils::{rev_compl_fastq_record, PrefetchIterator};
 use anyhow::Result;
@@ -13,186 +13,245 @@ use rayon::iter::ParallelIterator;
 use rayon::slice::ParallelSlice;
 use seqspec::{Assay, FastqReader, Modality, SegmentInfo, SplitError};
 use smallvec::SmallVec;
-use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, Mutex};
+use std::collections::HashSet;
+use std::sync::Arc;
 
-/// FastqProcessor manages the preprocessing of FASTQ files including barcode correction,
-/// alignment, and QC metrics.
-pub struct FastqProcessor {
-    assay: Vec<Assay>, // Sequencing assays. Multiple assays can be processed at once.
-    current_modality: Option<Modality>, // Current sequencing modality being processed (e.g., RNA, ATAC).
-    mito_dna: HashSet<String>, // Set of mitochondrial DNA sequence identifiers for special handling.
-    barcode_correct_prob: f64, // if the posterior probability of a correction
-    // exceeds this threshold, the barcode will be corrected.
-    // cellrange uses 0.975 for ATAC and 0.9 for multiome.
-    mismatch_in_barcode: usize, // The number of mismatches allowed in barcode
-    qc_align: HashMap<Modality, Arc<Mutex<QcAlign>>>,
-    qc_fastq: HashMap<Modality, Arc<Mutex<QcFastq>>>,
-    middleware: Option<MiddlewareFactory>,
+/// Configuration for standard barcode correction during annotation.
+#[derive(Debug, Clone)]
+pub struct BarcodeCorrectionConfig {
+    pub confidence_threshold: f64,
+    pub max_mismatch: usize,
 }
 
-impl FastqProcessor {
-    /// Creates a new FastqProcessor with default settings.
-    pub fn new(assay: Vec<Assay>) -> Self {
+impl Default for BarcodeCorrectionConfig {
+    fn default() -> Self {
         Self {
-            assay,
-            current_modality: None,
-            mito_dna: HashSet::new(),
-            barcode_correct_prob: 0.975,
-            mismatch_in_barcode: 1,
-            qc_align: HashMap::new(),
-            qc_fastq: HashMap::new(),
-            middleware: None,
+            confidence_threshold: 0.975,
+            max_mismatch: 1,
+        }
+    }
+}
+
+/// Immutable configuration used to construct annotated FASTQ streams.
+pub struct FastqPlan {
+    assays: Arc<[Assay]>,
+    modality: Modality,
+    barcode_config: BarcodeCorrectionConfig,
+    stages: FastqStagePipeline,
+}
+
+impl FastqPlan {
+    pub fn new(assays: Vec<Assay>, modality: Modality) -> Self {
+        Self {
+            assays: assays.into(),
+            modality,
+            barcode_config: BarcodeCorrectionConfig::default(),
+            stages: FastqStagePipeline::default(),
         }
     }
 
-    pub fn with_barcode_correct_prob(mut self, prob: f64) -> Self {
-        self.barcode_correct_prob = prob;
+    pub fn with_barcode_config(mut self, config: BarcodeCorrectionConfig) -> Self {
+        self.barcode_config = config;
         self
     }
 
-    pub fn with_middleware<F>(mut self, middleware: F) -> Self
+    pub fn with_stage<S>(mut self, stage: S) -> Self
     where
-        F: FnOnce(AnnotatedFastqStream) -> AnnotatedFastqStream + Send + 'static,
+        S: FastqStage + 'static,
     {
-        self.middleware = Some(Box::new(middleware));
+        self.stages.push_stage(stage);
         self
     }
 
-    pub fn modality(&self) -> Modality {
-        self.current_modality
-            .expect("modality not set, please call set_modality first")
-    }
-
-    pub fn add_mito_dna(&mut self, mito_dna: impl Into<String>) {
-        self.mito_dna.insert(mito_dna.into());
-    }
-
-    pub fn with_modality(mut self, modality: Modality) -> Self {
-        self.current_modality = Some(modality);
-        self
-    }
-
-    pub fn get_fastq_qc(&self) -> &Arc<Mutex<QcFastq>> {
-        self.qc_fastq
-            .get(&self.modality())
-            .expect("fastq qc not found")
-    }
-
-    pub fn get_align_qc(&self) -> &Arc<Mutex<QcAlign>> {
-        self.qc_align
-            .get(&self.modality())
-            .expect("align qc not found")
-    }
-
-    /// Align reads and return the alignments.
-    /// If the fastq file is paired-end, the alignments will be returned as a tuple.
-    /// Otherwise, the alignments will be returned as a single vector.
-    ///
-    /// # Arguments
-    ///
-    /// * `num_threads` - The number of threads to use for alignment.
-    /// * `chunk_size` - The maximum number of bases in a chunk.
-    ///
-    /// # Returns
-    ///
-    /// An iterator of alignments. If the fastq file is paired-end, the alignments will be returned as a tuple.
-    /// Otherwise, the alignments will be returned as a single vector.
-    pub fn gen_barcoded_alignments<'a, A: Aligner>(
-        &'a mut self,
-        aligner: &'a mut A,
-        num_threads: u16,
-        chunk_size: usize,
-    ) -> AlignmentResult<'a, A> {
-        let fq_reader = self.gen_barcoded_fastq(true, chunk_size);
-        let num_records = fq_reader.num_records();
-        let n_reads: String = fq_reader
+    pub fn build(self, correct_barcode: bool, chunk_size: usize) -> Result<FastqExecution> {
+        let reader = self.build_reader(correct_barcode, chunk_size);
+        let num_records = reader.num_records();
+        let paired_end = reader.is_paired_end()?;
+        let n_reads = reader
             .readers
             .iter()
-            .map(|r| indicatif::HumanCount(r.barcode_analyzer.num_reads() as u64).to_string())
+            .map(|r| indicatif::HumanCount(r.annotation.num_reads() as u64).to_string())
             .intersperse(" + ".to_string())
             .collect();
-        info!("Aligning {} reads to reference genome ...", n_reads);
-        let fq_reader: AnnotatedFastqStream = Box::new(fq_reader);
-        let fq_reader = match self.middleware.take() {
-            Some(middleware) => middleware(fq_reader),
-            None => fq_reader,
-        };
-        let result =
-            AlignmentResult::new(aligner, fq_reader, num_records, &self.mito_dna, num_threads);
-        self.qc_align.insert(self.modality(), result.qc.clone());
-        result
+        Ok(FastqExecution {
+            source: reader,
+            stages: self.stages,
+            qc: QcFastq::default(),
+            num_records,
+            read_summary: n_reads,
+            paired_end,
+            finished: false,
+        })
     }
 
-    pub fn gen_barcoded_fastq(
-        &mut self,
-        correct_barcode: bool,
-        chunk_size: usize,
-    ) -> MultiAnnotatedFqReader {
-        let modality = self.modality();
-        // Initialize qc
-        self.qc_fastq
-            .insert(modality.clone(), Arc::new(Mutex::new(QcFastq::default())));
+    fn build_reader(&self, correct_barcode: bool, chunk_size: usize) -> MultiAnnotatedFqReader {
+        let num_assays = self.assays.len();
+        let readers = self
+            .assays
+            .iter()
+            .enumerate()
+            .map(|(i, assay)| {
+                if num_assays > 1 {
+                    info!(">>>Processing assay {}/{}<<<", i + 1, num_assays);
+                }
 
-        let num_assays = self.assay.len();
-        let result: Vec<_> =
-            self.assay
-                .iter()
-                .enumerate()
-                .map(|(i, assay)| {
-                    if num_assays > 1 {
-                        info!(">>>Processing assay {}/{}<<<", i + 1, num_assays);
-                    }
+                let mut barcode_analyzer = BarcodeAnalyzer::new(assay, self.modality);
+                barcode_analyzer.summary();
+                if correct_barcode {
+                    barcode_analyzer.barcode_correct_options = Some(BarcodeCorrectOptions {
+                        bc_confidence_threshold: self.barcode_config.confidence_threshold,
+                        max_mismatch: self.barcode_config.max_mismatch,
+                        ..Default::default()
+                    });
+                }
 
-                    let mut barcode_analyzer = BarcodeAnalyzer::new(assay, modality);
-                    barcode_analyzer.summary();
-                    if correct_barcode {
-                        barcode_analyzer.barcode_correct_options = Some(BarcodeCorrectOptions {
-                            bc_confidence_threshold: self.barcode_correct_prob,
-                            max_mismatch: self.mismatch_in_barcode,
-                            ..Default::default()
-                        });
-                    }
+                let readers = assay.get_segments_by_modality(self.modality).filter_map(
+                    |(read, segment_info)| {
+                        let annotator = FastqAnnotator::new(&read.read_id, segment_info)?;
+                        let reader = read.open()?;
+                        Some((annotator, reader))
+                    },
+                );
+                AnnotatedFastqReader::new(readers, barcode_analyzer, chunk_size)
+            })
+            .collect();
 
-                    let readers = assay.get_segments_by_modality(modality).filter_map(
-                        |(read, segment_info)| {
-                            let annotator = FastqAnnotator::new(&read.read_id, segment_info)?;
-                            let reader = read.open()?;
-                            Some((annotator, reader))
-                        },
-                    );
-                    AnnotatedFastqReader::new(
-                        readers,
-                        self.get_fastq_qc().clone(),
-                        barcode_analyzer,
-                        chunk_size,
-                    )
-                })
-                .collect();
-        MultiAnnotatedFqReader::new(result)
+        MultiAnnotatedFqReader::new(readers)
     }
+}
+
+#[derive(Debug)]
+pub struct FastqReport {
+    pub fastq: QcFastq,
+    pub middleware: Vec<MiddlewareQcReport>,
+}
+
+/// One execution of a prepared FASTQ plan.
+pub struct FastqExecution {
+    source: MultiAnnotatedFqReader,
+    stages: FastqStagePipeline,
+    qc: QcFastq,
+    num_records: usize,
+    read_summary: String,
+    paired_end: bool,
+    finished: bool,
+}
+
+impl FastqExecution {
+    pub fn num_records(&self) -> usize {
+        self.num_records
+    }
+
+    pub fn read_summary(&self) -> &str {
+        &self.read_summary
+    }
+
+    pub fn is_paired_end(&self) -> bool {
+        self.paired_end
+    }
+
+    pub fn next_batch(&mut self) -> Result<Option<Vec<AnnotatedFastq>>> {
+        if self.finished {
+            return Ok(None);
+        }
+
+        loop {
+            let Some((batch, qc)) = self.source.next() else {
+                self.stages.finish()?;
+                self.finished = true;
+                return Ok(None);
+            };
+            self.qc.extend(std::iter::once(qc));
+            let batch = self.stages.process(batch)?;
+            if !batch.is_empty() {
+                return Ok(Some(batch));
+            }
+        }
+    }
+
+    pub fn finish(self) -> Result<FastqReport> {
+        if !self.finished {
+            anyhow::bail!("FASTQ execution has not reached end-of-input");
+        }
+        Ok(FastqReport {
+            fastq: self.qc,
+            middleware: self.stages.reports(),
+        })
+    }
+}
+
+/// Alignment execution configuration and stream construction.
+pub struct AlignmentRunner<'a, A> {
+    aligner: &'a mut A,
+    num_threads: u16,
+    mito_dna: HashSet<String>,
+}
+
+impl<'a, A: Aligner> AlignmentRunner<'a, A> {
+    pub fn new(aligner: &'a mut A, num_threads: u16) -> Self {
+        Self {
+            aligner,
+            num_threads,
+            mito_dna: HashSet::new(),
+        }
+    }
+
+    pub fn with_mito_dna<I, S>(mut self, mito_dna: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.mito_dna.extend(mito_dna.into_iter().map(Into::into));
+        self
+    }
+
+    pub fn stream(self, execution: FastqExecution) -> AlignmentResult<'a, A> {
+        AlignmentResult::new(self.aligner, execution, &self.mito_dna, self.num_threads)
+    }
+
+    pub fn run<F>(self, execution: FastqExecution, mut consume: F) -> Result<RunReport>
+    where
+        F: FnMut(&AlignmentBatch) -> Result<()>,
+    {
+        let mut stream = self.stream(execution);
+        while let Some(batch) = stream.next() {
+            consume(&batch)?;
+        }
+        stream.finish()
+    }
+}
+
+pub type AlignmentBatch = Vec<(Option<MultiMapR>, Option<MultiMapR>)>;
+pub type AlignmentStream<'a, A> = AlignmentResult<'a, A>;
+
+#[derive(Debug)]
+pub struct RunReport {
+    pub fastq: FastqReport,
+    pub alignment: QcAlign,
 }
 
 /// Iterator that yields alignment results from annotated FASTQ reads with QC metrics.
 pub struct AlignmentResult<'a, A> {
     aligner: &'a mut A,
-    fastq_reader: PrefetchIterator<Vec<AnnotatedFastq>>,
-    qc: Arc<Mutex<QcAlign>>,
+    execution: FastqExecution,
+    qc: QcAlign,
     header: noodles::sam::Header,
     num_threads: u16,
     num_records: usize,
     num_processed: usize,
+    complete: bool,
+    error: Option<anyhow::Error>,
 }
 
 impl<'a, A: Aligner> AlignmentResult<'a, A> {
     fn new(
         aligner: &'a mut A,
-        fastq_reader: AnnotatedFastqStream,
-        num_records: usize,
+        execution: FastqExecution,
         mito_dna: &HashSet<String>,
         num_threads: u16,
     ) -> Self {
         let header = aligner.header();
+        let num_records = execution.num_records();
         let mut qc = QcAlign::default();
         mito_dna.iter().for_each(|mito| {
             header
@@ -203,12 +262,14 @@ impl<'a, A: Aligner> AlignmentResult<'a, A> {
 
         Self {
             aligner,
-            fastq_reader: PrefetchIterator::new(fastq_reader, 1),
-            qc: Arc::new(Mutex::new(qc)),
+            execution,
+            qc,
             header,
             num_threads,
             num_records,
             num_processed: 0,
+            complete: false,
+            error: None,
         }
     }
 }
@@ -221,37 +282,61 @@ impl<'a, A> AlignmentResult<'a, A> {
     pub fn num_processed(&self) -> usize {
         self.num_processed
     }
+
+    pub fn finish(self) -> Result<RunReport> {
+        if let Some(error) = self.error {
+            return Err(error);
+        }
+        if !self.complete {
+            anyhow::bail!("alignment stream has not reached end-of-input");
+        }
+        Ok(RunReport {
+            fastq: self.execution.finish()?,
+            alignment: self.qc,
+        })
+    }
 }
 
 /// Implement the Iterator trait for AlignmentResult.
 /// The alignment results are yielded as a tuple of two MultiMapR.
 /// If the read is unpaired, the second element is None.
 impl<'a, A: Aligner> Iterator for AlignmentResult<'a, A> {
-    type Item = Vec<(Option<MultiMapR>, Option<MultiMapR>)>;
+    type Item = AlignmentBatch;
     fn next(&mut self) -> Option<Self::Item> {
-        let Some(data) = self.fastq_reader.next() else {
-            self.num_processed = self.num_records;
-            return None;
+        let data = match self.execution.next_batch() {
+            Ok(Some(data)) => data,
+            Ok(None) => {
+                self.num_processed = self.num_records;
+                self.complete = true;
+                return None;
+            }
+            Err(error) => {
+                self.error = Some(error);
+                self.complete = true;
+                return None;
+            }
         };
         self.num_processed += data.len();
 
         // Align the reads.
-        let results: Vec<_> = self.aligner.align_reads(self.num_threads, data);
-        let mut qc = self.qc.lock().unwrap();
-        results.iter().for_each(|ali| match ali {
-            (Some(ali1), Some(ali2)) => {
-                qc.add_pair(&self.header, ali1, ali2).unwrap();
+        let records = data.into_iter().map(AlignmentInput::from).collect();
+        let results: Vec<_> = self.aligner.align_reads(self.num_threads, records);
+        for alignment in &results {
+            let result = match alignment {
+                (Some(ali1), Some(ali2)) => self.qc.add_pair(&self.header, ali1, ali2),
+                (Some(ali1), None) => self.qc.add_read1(&self.header, ali1),
+                (None, Some(ali2)) => self.qc.add_read2(&self.header, ali2),
+                _ => {
+                    debug!("No alignment found for read");
+                    Ok(())
+                }
+            };
+            if let Err(error) = result {
+                self.error = Some(error);
+                self.complete = true;
+                return None;
             }
-            (Some(ali1), None) => {
-                qc.add_read1(&self.header, ali1).unwrap();
-            }
-            (None, Some(ali2)) => {
-                qc.add_read2(&self.header, ali2).unwrap();
-            }
-            _ => {
-                debug!("No alignment found for read");
-            }
-        });
+        }
         Some(results)
     }
 }
@@ -263,7 +348,7 @@ pub struct MultiAnnotatedFqReader {
 }
 
 impl Iterator for MultiAnnotatedFqReader {
-    type Item = Vec<AnnotatedFastq>;
+    type Item = (Vec<AnnotatedFastq>, QcFastq);
 
     fn next(&mut self) -> Option<Self::Item> {
         let reader = self.readers.get_mut(self.current)?;
@@ -285,10 +370,7 @@ impl MultiAnnotatedFqReader {
     }
 
     pub fn num_records(&self) -> usize {
-        self.readers
-            .iter()
-            .map(|x| x.barcode_analyzer.num_reads())
-            .sum()
+        self.readers.iter().map(|x| x.annotation.num_reads()).sum()
     }
 
     pub fn is_paired_end(&self) -> Result<bool> {
@@ -302,38 +384,25 @@ impl MultiAnnotatedFqReader {
 
 struct AnnotatedFastqReader {
     trim_poly_a: bool,
-    annotators: Vec<FastqAnnotator>,
     readers: PrefetchIterator<Vec<SmallVec<[fastq::Record; 4]>>>,
-    barcode_analyzer: BarcodeAnalyzer,
-    qc: Arc<Mutex<QcFastq>>,
+    annotation: AnnotationStage,
 }
 
-impl AnnotatedFastqReader {
-    fn new<T: IntoIterator<Item = (FastqAnnotator, FastqReader)>>(
-        iter: T,
-        qc: Arc<Mutex<QcFastq>>,
-        barcode_analyzer: BarcodeAnalyzer,
-        chunk_size: usize,
-    ) -> Self {
-        let (annotators, readers): (Vec<_>, Vec<_>) = iter.into_iter().unzip();
+struct AnnotationStage {
+    annotators: Vec<FastqAnnotator>,
+    barcode_analyzer: BarcodeAnalyzer,
+}
+
+impl AnnotationStage {
+    fn new(annotators: Vec<FastqAnnotator>, barcode_analyzer: BarcodeAnalyzer) -> Self {
         Self {
             annotators,
-            readers: PrefetchIterator::new(
-                BatchedFqReader {
-                    readers,
-                    batch_size: chunk_size,
-                },
-                1,
-            ),
-            trim_poly_a: false,
             barcode_analyzer,
-            qc,
         }
     }
 
-    pub fn with_polya_trimmed(mut self) -> Self {
-        self.trim_poly_a = true;
-        self
+    fn num_reads(&self) -> usize {
+        self.barcode_analyzer.num_reads()
     }
 
     fn is_paired_end(&self) -> bool {
@@ -352,26 +421,65 @@ impl AnnotatedFastqReader {
         });
         has_read1 && has_read2
     }
+
+    fn process_chunk<'a, I: IntoIterator<Item = &'a SmallVec<[fastq::Record; 4]>>>(
+        &self,
+        chunk: I,
+    ) -> (Vec<AnnotatedFastq>, QcFastq) {
+        process_chunk(&self.barcode_analyzer, &self.annotators, chunk)
+    }
+}
+
+impl AnnotatedFastqReader {
+    fn new<T: IntoIterator<Item = (FastqAnnotator, FastqReader)>>(
+        iter: T,
+        barcode_analyzer: BarcodeAnalyzer,
+        chunk_size: usize,
+    ) -> Self {
+        let (annotators, readers): (Vec<_>, Vec<_>) = iter.into_iter().unzip();
+        Self {
+            annotation: AnnotationStage::new(annotators, barcode_analyzer),
+            readers: PrefetchIterator::new(
+                BatchedFqReader {
+                    readers,
+                    batch_size: chunk_size,
+                },
+                1,
+            ),
+            trim_poly_a: false,
+        }
+    }
+
+    pub fn with_polya_trimmed(mut self) -> Self {
+        self.trim_poly_a = true;
+        self
+    }
+
+    fn is_paired_end(&self) -> bool {
+        self.annotation.is_paired_end()
+    }
 }
 
 impl Iterator for AnnotatedFastqReader {
-    type Item = Vec<AnnotatedFastq>;
+    type Item = (Vec<AnnotatedFastq>, QcFastq);
 
     fn next(&mut self) -> Option<Self::Item> {
         // Group reads of the same index from different files into a SmallVec.
         let chunk = self.readers.next()?;
 
-        let n = chunk.len();
-        let annotators = &self.annotators;
-        let result: Vec<_> = chunk
-            .par_chunks(n / 128)
-            .flat_map_iter(|chunk| {
-                let (fq, qc) = process_chunk(&self.barcode_analyzer, &annotators, chunk);
-                self.qc.lock().unwrap().extend(std::iter::once(qc));
-                fq
-            })
+        let parallel_chunk_size = (chunk.len() / 128).max(1);
+        let annotation = &self.annotation;
+        let processed: Vec<_> = chunk
+            .par_chunks(parallel_chunk_size)
+            .map(|chunk| annotation.process_chunk(chunk))
             .collect();
-        Some(result)
+        let mut records = Vec::new();
+        let mut qc = QcFastq::default();
+        for (chunk, chunk_qc) in processed {
+            records.extend(chunk);
+            qc.extend(std::iter::once(chunk_qc));
+        }
+        Some((records, qc))
     }
 }
 
@@ -573,6 +681,21 @@ impl Barcode {
 
 pub type UMI = fastq::Record;
 
+/// Metadata attached to every alignment generated from a read.
+#[derive(Debug)]
+pub struct ReadMetadata {
+    pub barcode: Barcode,
+    pub umi: Option<UMI>,
+}
+
+/// Backend-neutral input passed to an aligner.
+#[derive(Debug)]
+pub struct AlignmentInput {
+    pub read1: Option<fastq::Record>,
+    pub read2: Option<fastq::Record>,
+    pub metadata: ReadMetadata,
+}
+
 /// An annotated fastq record with barcode, UMI, and sequence.
 #[derive(Debug)]
 pub struct AnnotatedFastq {
@@ -580,6 +703,21 @@ pub struct AnnotatedFastq {
     pub umi: Option<UMI>,
     pub read1: Option<fastq::Record>,
     pub read2: Option<fastq::Record>,
+}
+
+impl From<AnnotatedFastq> for AlignmentInput {
+    fn from(record: AnnotatedFastq) -> Self {
+        Self {
+            read1: record.read1,
+            read2: record.read2,
+            metadata: ReadMetadata {
+                barcode: record
+                    .barcode
+                    .expect("annotated FASTQ passed to alignment without a barcode"),
+                umi: record.umi,
+            },
+        }
+    }
 }
 
 impl AnnotatedFastq {
@@ -721,16 +859,17 @@ mod tests {
     fn test_fq(input: &str, output: &str) {
         let assay = Assay::from_path(input).unwrap();
         let modality = assay.modalities[0].clone();
-        let mut fq_proc = FastqProcessor::new(vec![assay]).with_modality(modality);
+        let mut execution = FastqPlan::new(vec![assay], modality)
+            .build(false, 500)
+            .unwrap();
         let file = std::fs::File::open(output).unwrap();
-        let reader = std::io::BufReader::new(flate2::read::GzDecoder::new(file));
-        for (fq, line) in fq_proc
-            .gen_barcoded_fastq(false, 500)
-            .flatten()
-            .zip(reader.lines())
-        {
-            assert_eq!(show_fq(&fq), line.unwrap());
+        let mut lines = std::io::BufReader::new(flate2::read::GzDecoder::new(file)).lines();
+        while let Some(batch) = execution.next_batch().unwrap() {
+            for fq in batch {
+                assert_eq!(show_fq(&fq), lines.next().unwrap().unwrap());
+            }
         }
+        execution.finish().unwrap();
     }
 
     #[test]
@@ -738,11 +877,16 @@ mod tests {
         let seqspec = "data/test4.yaml";
         let assay = Assay::from_path(seqspec).unwrap();
         let modality = assay.modalities[0].clone();
-        let mut fq_proc = FastqProcessor::new(vec![assay]).with_modality(modality);
+        let mut execution = FastqPlan::new(vec![assay], modality)
+            .build(false, 5000)
+            .unwrap();
         // open a file
-        for fq in fq_proc.gen_barcoded_fastq(false, 5000).flatten() {
-            println!("{}", show_fq(&fq));
+        while let Some(batch) = execution.next_batch().unwrap() {
+            for fq in batch {
+                println!("{}", show_fq(&fq));
+            }
         }
+        execution.finish().unwrap();
     }
 
     #[test]

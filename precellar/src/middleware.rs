@@ -1,15 +1,33 @@
 //! FASTQ processing middleware.
-//!
-//! Middleware in this module consumes annotated FASTQ records, performs an
-//! operation on them, and either forwards or removes each record.
 
 use crate::align::AnnotatedFastq;
 use crate::barcode::{BarcodeCorrectOptions, Whitelist, WhitelistBuilder};
+pub use crate::pipeline::{AnnotatedFastqBatch, FastqStage, MiddlewareQcReport};
 use crate::utils::insertion_extractor::InsertionExtractor;
-use std::io::{self, Write};
+use anyhow::Result;
+use serde_json::json;
+use std::io::Write;
 
-pub type AnnotatedFastqStream = Box<dyn Iterator<Item = Vec<AnnotatedFastq>> + Send>;
-pub type MiddlewareFactory = Box<dyn FnOnce(AnnotatedFastqStream) -> AnnotatedFastqStream + Send>;
+#[derive(Debug, Default)]
+pub struct FloatingBarcodeQc {
+    pub num_records: u64,
+    pub num_extracted: u64,
+    pub num_forwarded: u64,
+    pub num_corrected: u64,
+    pub num_skipped: u64,
+}
+
+impl FloatingBarcodeQc {
+    pub fn to_json(&self) -> serde_json::Value {
+        json!({
+            "num_records": self.num_records,
+            "num_extracted": self.num_extracted,
+            "num_forwarded": self.num_forwarded,
+            "num_corrected": self.num_corrected,
+            "num_skipped": self.num_skipped,
+        })
+    }
+}
 
 struct PendingFloatingBarcode {
     barcode: Vec<u8>,
@@ -19,33 +37,22 @@ struct PendingFloatingBarcode {
 }
 
 /// Extracts floating barcodes and removes extracted records from downstream.
-///
-/// Records without an extractable floating barcode are forwarded immediately.
-/// Extracted records are removed immediately but retained in memory until the
-/// input is exhausted, allowing their frequencies to be included in the
-/// whitelist before correction. Only successfully corrected barcodes are
-/// written as headerless, tab-separated `barcode`, `umi`, and floating-barcode
-/// rows.
-pub struct FloatingBarcodeExtracter<I, W> {
-    input: I,
+pub struct FloatingBarcodeStage<W> {
     use_read1: bool,
     extractor: InsertionExtractor,
     whitelist_builder: Option<WhitelistBuilder>,
-    whitelist: Option<Whitelist>,
     correction_options: BarcodeCorrectOptions,
     pending: Vec<PendingFloatingBarcode>,
     output: W,
-    finalized: bool,
-    error: Option<io::Error>,
+    qc: FloatingBarcodeQc,
+    finished: bool,
 }
 
-impl<I, W> FloatingBarcodeExtracter<I, W>
+impl<W> FloatingBarcodeStage<W>
 where
-    I: Iterator<Item = Vec<AnnotatedFastq>>,
-    W: Write,
+    W: Write + Send,
 {
     pub fn new<B, S>(
-        input: I,
         use_read1: bool,
         extractor: InsertionExtractor,
         valid_barcodes: B,
@@ -57,22 +64,19 @@ where
         S: Into<Vec<u8>>,
     {
         Self {
-            input,
             use_read1,
             extractor,
             whitelist_builder: Some(Whitelist::builder(valid_barcodes)),
-            whitelist: None,
             correction_options,
             pending: Vec::new(),
             output,
-            finalized: false,
-            error: None,
+            qc: FloatingBarcodeQc::default(),
+            finished: false,
         }
     }
 
-    /// Returns a write error encountered while processing the stream.
-    pub fn error(&self) -> Option<&io::Error> {
-        self.error.as_ref()
+    pub fn qc(&self) -> &FloatingBarcodeQc {
+        &self.qc
     }
 
     pub fn into_output(self) -> W {
@@ -87,12 +91,12 @@ where
             record
                 .read1
                 .as_ref()
-                .map(|x| (x.sequence(), x.quality_scores()))
+                .map(|read| (read.sequence(), read.quality_scores()))
         } else {
             record
                 .read2
                 .as_ref()
-                .map(|x| (x.sequence(), x.quality_scores()))
+                .map(|read| (read.sequence(), read.quality_scores()))
         }
     }
 
@@ -101,13 +105,18 @@ where
             barcode: record
                 .barcode
                 .as_ref()
-                .and_then(|x| x.corrected.as_deref().or(Some(x.raw.sequence())))
+                .and_then(|barcode| {
+                    barcode
+                        .corrected
+                        .as_deref()
+                        .or(Some(barcode.raw.sequence()))
+                })
                 .unwrap_or_default()
                 .to_vec(),
             umi: record
                 .umi
                 .as_ref()
-                .map(|x| x.sequence().to_vec())
+                .map(|umi| umi.sequence().to_vec())
                 .unwrap_or_default(),
             sequence: Vec::new(),
             quality_scores: Vec::new(),
@@ -118,7 +127,7 @@ where
         output: &mut W,
         record: &PendingFloatingBarcode,
         corrected: &[u8],
-    ) -> io::Result<()> {
+    ) -> std::io::Result<()> {
         output.write_all(&record.barcode)?;
         output.write_all(b"\t")?;
         output.write_all(&record.umi)?;
@@ -126,83 +135,74 @@ where
         output.write_all(corrected)?;
         output.write_all(b"\n")
     }
+}
 
-    fn finalize(&mut self) {
-        if self.finalized {
-            return;
+impl<W> FastqStage for FloatingBarcodeStage<W>
+where
+    W: Write + Send,
+{
+    fn process(&mut self, batch: AnnotatedFastqBatch) -> Result<AnnotatedFastqBatch> {
+        let mut forwarded = Vec::with_capacity(batch.len());
+        for record in batch {
+            self.qc.num_records += 1;
+            let Some((sequence, quality_scores)) = Self::selected_sequence(self.use_read1, &record)
+            else {
+                self.qc.num_forwarded += 1;
+                forwarded.push(record);
+                continue;
+            };
+            let Some(range) = self.extractor.extract_range(sequence) else {
+                self.qc.num_forwarded += 1;
+                forwarded.push(record);
+                continue;
+            };
+
+            self.qc.num_extracted += 1;
+            let mut pending = Self::pending_record(&record);
+            pending.sequence = sequence[range.clone()].to_vec();
+            pending.quality_scores = quality_scores[range].to_vec();
+            self.whitelist_builder
+                .as_mut()
+                .expect("floating barcode stage already finalized")
+                .add(&pending.sequence);
+            self.pending.push(pending);
         }
-        self.finalized = true;
+        Ok(forwarded)
+    }
 
-        let whitelist = self
+    fn finish(&mut self) -> Result<()> {
+        if self.finished {
+            return Ok(());
+        }
+
+        let whitelist: Whitelist = self
             .whitelist_builder
             .take()
-            .expect("floating barcode whitelist builder already finalized")
+            .expect("floating barcode stage already finalized")
             .finish();
-        self.whitelist = Some(whitelist);
-
-        let pending = std::mem::take(&mut self.pending);
-        let whitelist = self.whitelist.as_ref().unwrap();
-        for record in pending {
-            let corrected = whitelist.correct_barcode(
+        for record in std::mem::take(&mut self.pending) {
+            match whitelist.correct_barcode(
                 &record.sequence,
                 &record.quality_scores,
                 &self.correction_options,
-            );
-            if let Ok(corrected) = corrected {
-                if let Err(error) = Self::write_result(&mut self.output, &record, corrected) {
-                    self.error = Some(error);
-                    break;
+            ) {
+                Ok(corrected) => {
+                    Self::write_result(&mut self.output, &record, corrected)?;
+                    self.qc.num_corrected += 1;
                 }
+                Err(_) => self.qc.num_skipped += 1,
             }
         }
+        self.output.flush()?;
+        self.finished = true;
+        Ok(())
     }
-}
 
-impl<I, W> Iterator for FloatingBarcodeExtracter<I, W>
-where
-    I: Iterator<Item = Vec<AnnotatedFastq>>,
-    W: Write,
-{
-    type Item = Vec<AnnotatedFastq>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        if self.finalized {
-            return None;
-        }
-
-        loop {
-            let Some(chunk) = self.input.next() else {
-                self.finalize();
-                return None;
-            };
-
-            let mut forwarded = Vec::with_capacity(chunk.len());
-            for record in chunk {
-                let Some((sequence, quality_scores)) =
-                    Self::selected_sequence(self.use_read1, &record)
-                else {
-                    forwarded.push(record);
-                    continue;
-                };
-                let Some(range) = self.extractor.extract_range(sequence) else {
-                    forwarded.push(record);
-                    continue;
-                };
-
-                let mut pending = Self::pending_record(&record);
-                pending.sequence = sequence[range.clone()].to_vec();
-                pending.quality_scores = quality_scores[range].to_vec();
-                self.whitelist_builder
-                    .as_mut()
-                    .expect("floating barcode whitelist builder already finalized")
-                    .add(&pending.sequence);
-                self.pending.push(pending);
-            }
-
-            if !forwarded.is_empty() {
-                return Some(forwarded);
-            }
-        }
+    fn report(&self) -> Option<MiddlewareQcReport> {
+        Some(MiddlewareQcReport {
+            name: "floating_barcode".to_string(),
+            metrics: self.qc.to_json(),
+        })
     }
 }
 
@@ -231,9 +231,7 @@ mod tests {
 
     #[test]
     fn removes_extracted_reads_and_writes_corrected_barcode() {
-        let input = vec![vec![record(b"ACGTCAGTGGCAACGTTTGGAACCTTGG")]];
-        let mut middleware = FloatingBarcodeExtracter::new(
-            input.into_iter(),
+        let mut stage = FloatingBarcodeStage::new(
             true,
             extractor(),
             [b"ACGT".to_vec()],
@@ -241,15 +239,17 @@ mod tests {
             Vec::new(),
         );
 
-        assert!(middleware.next().is_none());
-        assert_eq!(middleware.into_output(), b"\t\tACGT\n");
+        let forwarded = stage
+            .process(vec![record(b"ACGTCAGTGGCAACGTTTGGAACCTTGG")])
+            .unwrap();
+        assert!(forwarded.is_empty());
+        stage.finish().unwrap();
+        assert_eq!(stage.into_output(), b"\t\tACGT\n");
     }
 
     #[test]
     fn removes_extracted_reads_when_barcode_is_not_correctable() {
-        let input = vec![vec![record(b"ACGTCAGTGGCAACGTTTGGAACCTTGG")]];
-        let mut middleware = FloatingBarcodeExtracter::new(
-            input.into_iter(),
+        let mut stage = FloatingBarcodeStage::new(
             true,
             extractor(),
             [b"GGGG".to_vec()],
@@ -257,15 +257,17 @@ mod tests {
             Vec::new(),
         );
 
-        assert!(middleware.next().is_none());
-        assert!(middleware.into_output().is_empty());
+        let forwarded = stage
+            .process(vec![record(b"ACGTCAGTGGCAACGTTTGGAACCTTGG")])
+            .unwrap();
+        assert!(forwarded.is_empty());
+        stage.finish().unwrap();
+        assert!(stage.into_output().is_empty());
     }
 
     #[test]
     fn forwards_reads_without_an_extracted_barcode() {
-        let input = vec![vec![record(b"GATTGATTGATT")]];
-        let mut middleware = FloatingBarcodeExtracter::new(
-            input.into_iter(),
+        let mut stage = FloatingBarcodeStage::new(
             true,
             extractor(),
             [b"ACGT".to_vec()],
@@ -273,8 +275,9 @@ mod tests {
             Vec::new(),
         );
 
-        assert_eq!(middleware.next().unwrap().len(), 1);
-        assert!(middleware.next().is_none());
-        assert!(middleware.into_output().is_empty());
+        let forwarded = stage.process(vec![record(b"GATTGATTGATT")]).unwrap();
+        assert_eq!(forwarded.len(), 1);
+        stage.finish().unwrap();
+        assert!(stage.into_output().is_empty());
     }
 }

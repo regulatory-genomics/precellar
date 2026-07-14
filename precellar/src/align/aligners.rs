@@ -2,7 +2,7 @@
 mod minimap2;
 pub use minimap2::{Minimap2Aligner, Minimap2Opts};
 
-use super::fastq::AnnotatedFastq;
+use super::fastq::{AlignmentInput, Barcode};
 use crate::barcode::{get_barcode, get_umi};
 
 use anyhow::{bail, ensure, Result};
@@ -12,6 +12,7 @@ use noodles::sam::alignment::Record;
 pub use star_aligner::StarAligner;
 
 use log;
+use noodles::fastq;
 use noodles::sam;
 use noodles::sam::alignment::record::data::field::tag::Tag;
 use noodles::sam::alignment::record_buf::{data::field::value::Value, RecordBuf};
@@ -124,7 +125,7 @@ pub trait Aligner {
     fn align_reads(
         &mut self,
         num_threads: u16,
-        records: Vec<AnnotatedFastq>,
+        records: Vec<AlignmentInput>,
     ) -> Vec<(Option<MultiMapR>, Option<MultiMapR>)>;
 }
 
@@ -136,14 +137,14 @@ impl Aligner for BurrowsWheelerAligner {
     fn align_reads(
         &mut self,
         num_threads: u16,
-        records: Vec<AnnotatedFastq>,
+        records: Vec<AlignmentInput>,
     ) -> Vec<(Option<MultiMapR>, Option<MultiMapR>)> {
         if records[0].read2.is_some() {
             let (info, mut reads): (Vec<_>, Vec<_>) = records
                 .into_iter()
                 .map(|rec| {
                     (
-                        (rec.barcode.unwrap(), rec.umi),
+                        (rec.metadata.barcode, rec.metadata.umi),
                         (rec.read1.unwrap(), rec.read2.unwrap()),
                     )
                 })
@@ -152,44 +153,22 @@ impl Aligner for BurrowsWheelerAligner {
                 .enumerate()
                 .map(|(i, (mut ali1, mut ali2))| {
                     let (bc, umi) = info.get(i).unwrap();
-                    add_cell_barcode(
-                        &mut ali1,
-                        bc.raw.sequence(),
-                        bc.raw.quality_scores(),
-                        bc.corrected.as_deref(),
-                    );
-                    add_cell_barcode(
-                        &mut ali2,
-                        bc.raw.sequence(),
-                        bc.raw.quality_scores(),
-                        bc.corrected.as_deref(),
-                    );
-                    if let Some(umi) = umi {
-                        add_umi(&mut ali1, umi.sequence(), umi.quality_scores());
-                        add_umi(&mut ali2, umi.sequence(), umi.quality_scores());
-                    }
+                    attach_read_metadata(&mut ali1, bc, umi.as_ref());
+                    attach_read_metadata(&mut ali2, bc, umi.as_ref());
                     (Some(ali1.into()), Some(ali2.into()))
                 })
                 .collect()
         } else {
             let (info, mut reads): (Vec<_>, Vec<_>) = records
                 .into_iter()
-                .map(|rec| ((rec.barcode.unwrap(), rec.umi), rec.read1.unwrap()))
+                .map(|rec| ((rec.metadata.barcode, rec.metadata.umi), rec.read1.unwrap()))
                 .unzip();
 
             self.align_reads(num_threads, reads.as_mut_slice())
                 .enumerate()
                 .map(|(i, mut alignment)| {
                     let (bc, umi) = info.get(i).unwrap();
-                    add_cell_barcode(
-                        &mut alignment,
-                        bc.raw.sequence(),
-                        bc.raw.quality_scores(),
-                        bc.corrected.as_deref(),
-                    );
-                    if let Some(umi) = umi {
-                        add_umi(&mut alignment, umi.sequence(), umi.quality_scores());
-                    }
+                    attach_read_metadata(&mut alignment, bc, umi.as_ref());
                     (Some(alignment.into()), None)
                 })
                 .collect()
@@ -205,14 +184,14 @@ impl Aligner for MiniBwaSR {
     fn align_reads(
         &mut self,
         num_threads: u16,
-        records: Vec<AnnotatedFastq>,
+        records: Vec<AlignmentInput>,
     ) -> Vec<(Option<MultiMapR>, Option<MultiMapR>)> {
         if records[0].read2.is_some() {
             let (info, mut reads): (Vec<_>, Vec<_>) = records
                 .into_iter()
                 .map(|rec| {
                     (
-                        (rec.barcode.unwrap(), rec.umi),
+                        (rec.metadata.barcode, rec.metadata.umi),
                         (rec.read1.unwrap(), rec.read2.unwrap()),
                     )
                 })
@@ -226,29 +205,15 @@ impl Aligner for MiniBwaSR {
                     let mut ali1 = ali1.into_iter().next().unwrap();
                     let mut ali2 = ali2.into_iter().next().unwrap();
                     let (bc, umi) = info.get(i).unwrap();
-                    add_cell_barcode(
-                        &mut ali1,
-                        bc.raw.sequence(),
-                        bc.raw.quality_scores(),
-                        bc.corrected.as_deref(),
-                    );
-                    add_cell_barcode(
-                        &mut ali2,
-                        bc.raw.sequence(),
-                        bc.raw.quality_scores(),
-                        bc.corrected.as_deref(),
-                    );
-                    if let Some(umi) = umi {
-                        add_umi(&mut ali1, umi.sequence(), umi.quality_scores());
-                        add_umi(&mut ali2, umi.sequence(), umi.quality_scores());
-                    }
+                    attach_read_metadata(&mut ali1, bc, umi.as_ref());
+                    attach_read_metadata(&mut ali2, bc, umi.as_ref());
                     (Some(ali1.into()), Some(ali2.into()))
                 })
                 .collect()
         } else {
             let (info, mut reads): (Vec<_>, Vec<_>) = records
                 .into_iter()
-                .map(|rec| ((rec.barcode.unwrap(), rec.umi), rec.read1.unwrap()))
+                .map(|rec| ((rec.metadata.barcode, rec.metadata.umi), rec.read1.unwrap()))
                 .unzip();
 
             self.align_reads(num_threads, reads.as_mut_slice())
@@ -258,15 +223,7 @@ impl Aligner for MiniBwaSR {
                     // Extract the primary alignment and discard the rest
                     let mut alignment = alignment.into_iter().next().unwrap();
                     let (bc, umi) = info.get(i).unwrap();
-                    add_cell_barcode(
-                        &mut alignment,
-                        bc.raw.sequence(),
-                        bc.raw.quality_scores(),
-                        bc.corrected.as_deref(),
-                    );
-                    if let Some(umi) = umi {
-                        add_umi(&mut alignment, umi.sequence(), umi.quality_scores());
-                    }
+                    attach_read_metadata(&mut alignment, bc, umi.as_ref());
                     (Some(alignment.into()), None)
                 })
                 .collect()
@@ -282,7 +239,7 @@ impl Aligner for StarAligner {
     fn align_reads(
         &mut self,
         num_threads: u16,
-        records: Vec<AnnotatedFastq>,
+        records: Vec<AlignmentInput>,
     ) -> Vec<(Option<MultiMapR>, Option<MultiMapR>)> {
         let chunk_size = get_chunk_size(records.len(), num_threads as usize);
 
@@ -291,7 +248,7 @@ impl Aligner for StarAligner {
             .flat_map_iter(|chunk| {
                 let mut aligner = self.clone();
                 chunk.iter().map(move |rec| {
-                    let bc = rec.barcode.as_ref().unwrap();
+                    let bc = &rec.metadata.barcode;
                     let read1 = rec.read1.as_ref();
                     let read2 = rec.read2.as_ref();
 
@@ -301,29 +258,13 @@ impl Aligner for StarAligner {
                         ali1.iter_mut()
                             .chain(ali2.iter_mut())
                             .for_each(|alignment| {
-                                add_cell_barcode(
-                                    alignment,
-                                    bc.raw.sequence(),
-                                    bc.raw.quality_scores(),
-                                    bc.corrected.as_deref(),
-                                );
-                                if let Some(umi) = &rec.umi {
-                                    add_umi(alignment, umi.sequence(), umi.quality_scores());
-                                };
+                                attach_read_metadata(alignment, bc, rec.metadata.umi.as_ref());
                             });
                         (Some(ali1.try_into().unwrap()), Some(ali2.try_into().unwrap()))
                     } else if let Some(read) = read1.or(read2) {
                         let mut ali = aligner.align_read(read).unwrap();
                         ali.iter_mut().for_each(|alignment| {
-                            add_cell_barcode(
-                                alignment,
-                                bc.raw.sequence(),
-                                bc.raw.quality_scores(),
-                                bc.corrected.as_deref(),
-                            );
-                            if let Some(umi) = &rec.umi {
-                                add_umi(alignment, umi.sequence(), umi.quality_scores());
-                            };
+                            attach_read_metadata(alignment, bc, rec.metadata.umi.as_ref());
                         });
                         if read1.is_some() {
                             (Some(ali.try_into().unwrap()), None)
@@ -349,7 +290,7 @@ impl Aligner for Minimap2Aligner {
     fn align_reads(
         &mut self,
         num_threads: u16,
-        records: Vec<AnnotatedFastq>,
+        records: Vec<AlignmentInput>,
     ) -> Vec<(Option<MultiMapR>, Option<MultiMapR>)> {
         let chunk_size = get_chunk_size(records.len(), num_threads as usize);
 
@@ -361,7 +302,7 @@ impl Aligner for Minimap2Aligner {
                 let mut thread_aligner = self.clone();
 
                 chunk.iter().map(move |rec| {
-                    let bc = rec.barcode.as_ref().unwrap();
+                    let bc = &rec.metadata.barcode;
                     let read1 = rec.read1.as_ref();
                     let read2 = rec.read2.as_ref();
 
@@ -371,29 +312,13 @@ impl Aligner for Minimap2Aligner {
                         ali1.iter_mut()
                             .chain(ali2.iter_mut())
                             .for_each(|alignment| {
-                                add_cell_barcode(
-                                    alignment,
-                                    bc.raw.sequence(),
-                                    bc.raw.quality_scores(),
-                                    bc.corrected.as_deref(),
-                                );
-                                if let Some(umi) = &rec.umi {
-                                    add_umi(alignment, umi.sequence(), umi.quality_scores());
-                                };
+                                attach_read_metadata(alignment, bc, rec.metadata.umi.as_ref());
                             });
                         (Some(ali1.try_into().unwrap()), Some(ali2.try_into().unwrap()))
                     } else if let Some(read) = read1.or(read2) {
                         let mut ali = thread_aligner.align_read(read).unwrap();
                         ali.iter_mut().for_each(|alignment| {
-                            add_cell_barcode(
-                                alignment,
-                                bc.raw.sequence(),
-                                bc.raw.quality_scores(),
-                                bc.corrected.as_deref(),
-                            );
-                            if let Some(umi) = &rec.umi {
-                                add_umi(alignment, umi.sequence(), umi.quality_scores());
-                            };
+                            attach_read_metadata(alignment, bc, rec.metadata.umi.as_ref());
                         });
                         if read1.is_some() {
                             (Some(ali.try_into().unwrap()), None)
@@ -420,30 +345,30 @@ fn get_chunk_size(total_length: usize, num_threads: usize) -> usize {
     }
 }
 
-// Additional helper functions for adding metadata like cell barcodes and UMIs to alignments.
-fn add_cell_barcode(
+// Centralize FASTQ metadata policy so every alignment backend emits the same SAM tags.
+fn attach_read_metadata(
     record_buf: &mut RecordBuf,
-    ori_barcode: &[u8],
-    ori_qual: &[u8],
-    correct_barcode: Option<&[u8]>,
+    barcode: &Barcode,
+    umi: Option<&fastq::Record>,
 ) {
     let data = record_buf.data_mut();
     data.insert(
         Tag::CELL_BARCODE_SEQUENCE,
-        Value::String(ori_barcode.into()),
+        Value::String(barcode.raw.sequence().into()),
     );
     data.insert(
         Tag::CELL_BARCODE_QUALITY_SCORES,
-        Value::String(ori_qual.into()),
+        Value::String(barcode.raw.quality_scores().into()),
     );
 
-    if let Some(barcode) = correct_barcode {
-        data.insert(Tag::CELL_BARCODE_ID, Value::String(barcode.into()));
+    if let Some(corrected) = barcode.corrected.as_deref() {
+        data.insert(Tag::CELL_BARCODE_ID, Value::String(corrected.into()));
     }
-}
-
-fn add_umi(record_buf: &mut RecordBuf, umi: &[u8], qual: &[u8]) {
-    let data = record_buf.data_mut();
-    data.insert(Tag::UMI_SEQUENCE, Value::String(umi.into()));
-    data.insert(Tag::UMI_QUALITY_SCORES, Value::String(qual.into()));
+    if let Some(umi) = umi {
+        data.insert(Tag::UMI_SEQUENCE, Value::String(umi.sequence().into()));
+        data.insert(
+            Tag::UMI_QUALITY_SCORES,
+            Value::String(umi.quality_scores().into()),
+        );
+    }
 }

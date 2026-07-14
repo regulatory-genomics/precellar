@@ -1,7 +1,6 @@
 use anyhow::{bail, Result};
 use precellar::{
-    align::FastqProcessor, barcode::BarcodeCorrectOptions,
-    middleware::FloatingBarcodeExtracter as RustFloatingBarcodeExtracter,
+    align::FastqPlan, barcode::BarcodeCorrectOptions, middleware::FloatingBarcodeStage,
     utils::insertion_extractor::InsertionExtractor,
 };
 use pyo3::prelude::*;
@@ -125,7 +124,7 @@ fn read_valid_barcodes(value: Bound<'_, PyAny>) -> Result<Vec<Vec<u8>>> {
 }
 
 impl FloatingBarcodeExtracter {
-    pub(crate) fn configure_processor(&self, processor: FastqProcessor) -> Result<FastqProcessor> {
+    pub(crate) fn configure_plan(&self, plan: FastqPlan) -> Result<FastqPlan> {
         let output = BufWriter::new(File::create(&self.output)?);
         let extractor = InsertionExtractor::new(
             &self.flank_5,
@@ -142,16 +141,14 @@ impl FloatingBarcodeExtracter {
         };
         let use_read1 = self.use_read1;
 
-        Ok(processor.with_middleware(move |input| {
-            Box::new(RustFloatingBarcodeExtracter::new(
-                input,
-                use_read1,
-                extractor,
-                valid_barcodes,
-                correction_options,
-                output,
-            ))
-        }))
+        let stage = FloatingBarcodeStage::new(
+            use_read1,
+            extractor,
+            valid_barcodes,
+            correction_options,
+            output,
+        );
+        Ok(plan.with_stage(stage))
     }
 }
 

@@ -6,7 +6,7 @@ use core::panic;
 use indicatif::{ProgressBar, ProgressFinish, ProgressStyle};
 use log::info;
 use noodles::sam::{self, alignment::io::Write};
-use precellar::align::{Aligner, AlignmentResult};
+use precellar::align::{Aligner, AlignmentResult, AlignmentRunner};
 use precellar::qc::Metric;
 use pyo3::types::PyDict;
 use pyo3::{prelude::*, BoundObject};
@@ -15,7 +15,7 @@ use serde_json::Value;
 use std::{path::PathBuf, str::FromStr};
 
 use precellar::{
-    align::{FastqProcessor, MultiMapR},
+    align::{BarcodeCorrectionConfig, FastqPlan, MultiMapR},
     fragment::{IntoFragOpts, IntoFragments},
     qc::QcFragment,
     transcriptome::Quantifier,
@@ -315,14 +315,11 @@ pub fn align<'py>(
     };
 
     let transcript_annotator = aligner.transcript_annotator(strandedness);
-    let mut processor = FastqProcessor::new(assay)
-        .with_modality(modality)
-        .with_barcode_correct_prob(0.9);
-    if !mito_dna.is_empty() {
-        mito_dna.iter().for_each(|x| {
-            processor.add_mito_dna(x);
-        });
-    }
+    let barcode_config = BarcodeCorrectionConfig {
+        confidence_threshold: 0.9,
+        max_mismatch: 1,
+    };
+    let mut plan = FastqPlan::new(assay, modality).with_barcode_config(barcode_config);
     if let Some(middleware) = middleware {
         let middleware = middleware
             .extract::<PyRef<'_, crate::middleware::FloatingBarcodeExtracter>>()
@@ -331,21 +328,24 @@ pub fn align<'py>(
                     "middleware must be a precellar.middleware.FloatingBarcodeExtracter"
                 )
             })?;
-        processor = middleware.configure_processor(processor)?;
+        plan = middleware.configure_plan(plan)?;
     }
 
     let mut qc_metrics = serde_json::Map::new();
 
-    let alignments = processor.gen_barcoded_alignments(
-        &mut aligner,
-        num_threads,
-        num_threads as usize * chunk_size,
+    let execution = plan.build(true, num_threads as usize * chunk_size)?;
+    info!(
+        "Aligning {} reads to reference genome ...",
+        execution.read_summary()
     );
-    let alignments = AlignProgressBar::new(alignments);
+    let alignments = AlignmentRunner::new(&mut aligner, num_threads)
+        .with_mito_dna(mito_dna.iter().cloned())
+        .stream(execution);
+    let mut alignments = AlignProgressBar::new(alignments);
 
     match OutputType::try_from(output_type)? {
         OutputType::Alignment => {
-            write_alignments(py, output, &header, alignments)?;
+            write_alignments(py, output, &header, &mut alignments)?;
         }
         OutputType::Fragment => {
             let compression = compression
@@ -376,7 +376,7 @@ pub fn align<'py>(
             mito_dna.iter().for_each(|x| {
                 frag_qc.add_mito_dna(x);
             });
-            alignments
+            (&mut alignments)
                 .into_fragments(&header, opts)
                 .into_iter()
                 .for_each(|fragments| {
@@ -392,19 +392,18 @@ pub fn align<'py>(
             let mut quantifier = Quantifier::new(transcript_annotator.unwrap())?;
             quantifier.num_threads = num_threads as usize;
             quantifier.temp_dir = temp_dir;
-            let quant_qc = quantifier.quantify(&header, alignments, output.clone())?;
+            let quant_qc = quantifier.quantify(&header, &mut alignments, output.clone())?;
             qc_metrics.insert("gene_quantification".to_owned(), quant_qc.into());
         }
     };
 
-    qc_metrics.insert(
-        "fastq".to_owned(),
-        processor.get_fastq_qc().lock().unwrap().to_json(),
-    );
-    qc_metrics.insert(
-        "alignment".to_owned(),
-        processor.get_align_qc().lock().unwrap().to_json(),
-    );
+    let report = alignments.finish()?;
+    for middleware in report.fastq.middleware {
+        qc_metrics.insert(middleware.name, middleware.metrics);
+    }
+
+    qc_metrics.insert("fastq".to_owned(), report.fastq.fastq.to_json());
+    qc_metrics.insert("alignment".to_owned(), report.alignment.to_json());
 
     Ok(value_into_pyobject(qc_metrics.into(), py))
 }
@@ -448,6 +447,10 @@ impl<'a, A> AlignProgressBar<'a, A> {
             pb: pb.with_finish(ProgressFinish::Abandon),
             alignments,
         }
+    }
+
+    fn finish(self) -> Result<precellar::align::RunReport> {
+        self.alignments.finish()
     }
 }
 
