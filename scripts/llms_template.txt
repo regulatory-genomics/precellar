@@ -1,0 +1,9 @@
+# precellar: A Python package for single-cell epigenomics analysis
+
+## API Reference
+
+Below is a list of available functions in SnapATAC2. For detailed API usage, please use python function `help(function_name)` to retrieve the docstring.
+
+[PLACE HOLDER]
+
+## Tutorials

@@ -29,3 +29,18 @@ Documentation = "https://lab.kaizhang.org/precellar/"
 Repository = "https://github.com/regulatory-genomics/precellar"
 Issues = "https://github.com/regulatory-genomics/precellar/issues"
 Changelog = "https://lab.kaizhang.org/precellar/version/dev/changelog.html"
+
+[dependency-groups]
+dev = [
+  {include-group = "test"},
+]
+
+# For integration-testing
+test = [
+  "pytest >=8.1.1,<9",
+  "hypothesis >=6.72.4,<7",
+]
+
+docs = [
+  "auto-api @ git+https://github.com/regulatory-genomics/auto-api@3ce76f37730e63d0259edf4e4f968d130f741385",
+]
