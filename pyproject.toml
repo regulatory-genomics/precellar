@@ -21,6 +21,7 @@ dynamic = ["version"]
 
 [tool.maturin]
 features = ["pyo3/extension-module"]
+manifest-path = "Cargo.toml"
 
 [project.urls]
 Homepage = "https://lab.kaizhang.org/precellar/"

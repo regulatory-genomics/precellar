@@ -50,7 +50,6 @@ jobs:
         CXXFLAGS: "-Wno-error"
         RUSTFLAGS: "-C target-cpu=x86-64"
       run: |
-        cd ${GITHUB_WORKSPACE}/python
         mkdir ${GITHUB_WORKSPACE}/wheel_files
         pip wheel . --wheel-dir ${GITHUB_WORKSPACE}/wheel_files
 

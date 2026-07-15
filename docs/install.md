@@ -48,5 +48,5 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 Once you have the Rust compiler properly installed, you can use pip to install the precellar library:
 
 ```
-pip install 'git+https://github.com/regulatory-genomics/precellar.git#egg=precellar&subdirectory=python'
+pip install 'git+https://github.com/regulatory-genomics/precellar.git'
 ```

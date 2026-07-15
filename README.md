@@ -21,7 +21,7 @@ pip install precellar
 ### Development version
 
 ```
-pip install 'git+https://github.com/regulatory-genomics/precellar.git#egg=precellar&subdirectory=python'
+pip install 'git+https://github.com/regulatory-genomics/precellar.git'
 ```
 
 ## Examples

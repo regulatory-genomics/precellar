@@ -1,5 +1,5 @@
 [package]
-name = "precellar"
+name = "precellar-core"
 version = "0.5.4"
 edition = "2021"
 
