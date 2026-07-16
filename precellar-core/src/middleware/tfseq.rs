@@ -1,14 +1,17 @@
-//! FASTQ processing middleware.
+//! TFseq floating-barcode middleware.
 
+use super::{AnnotatedFastqBatch, FastqStage, MiddlewareQcReport};
 use crate::align::AnnotatedFastq;
 use crate::barcode::{BarcodeCorrectOptions, Whitelist, WhitelistBuilder};
-pub use crate::pipeline::{AnnotatedFastqBatch, FastqStage, MiddlewareQcReport};
 use crate::utils::insertion_extractor::InsertionExtractor;
 use anyhow::Result;
+use bitcode::{Decode, Encode};
 use rayon::prelude::*;
 use serde_json::json;
 use std::collections::{BTreeMap, HashMap};
 use std::io::Write;
+
+const CORRECTION_BATCH_SIZE: usize = 4_194_304;
 
 #[derive(Debug, Default)]
 pub struct FloatingBarcodeQc {
@@ -27,12 +30,14 @@ impl FloatingBarcodeQc {
     }
 }
 
+#[derive(Decode, Encode)]
 struct PendingInsertion {
     insertion_index: usize,
     sequence: Vec<u8>,
     quality_scores: Vec<u8>,
 }
 
+#[derive(Decode, Encode)]
 struct PendingFloatingBarcode {
     barcode: Vec<u8>,
     umi: Vec<u8>,
@@ -190,7 +195,7 @@ pub struct FloatingBarcodeStage<W> {
     barcode_table: FloatingBarcodeTable,
     whitelist_builders: Option<Vec<WhitelistBuilder>>,
     correction_options: BarcodeCorrectOptions,
-    pending: Vec<PendingFloatingBarcode>,
+    pending: Option<bed_utils::extsort::ExternalChunkBuilder<PendingFloatingBarcode>>,
     output: W,
     thread_pool: rayon::ThreadPool,
     qc: FloatingBarcodeQc,
@@ -230,7 +235,10 @@ where
             barcode_table,
             whitelist_builders: Some(valid_barcodes.into_iter().map(Whitelist::builder).collect()),
             correction_options,
-            pending: Vec::new(),
+            pending: Some(bed_utils::extsort::ExternalChunkBuilder::new(
+                tempfile::tempfile()?,
+                2,
+            )?),
             output,
             thread_pool: rayon::ThreadPoolBuilder::new().num_threads(1).build()?,
             qc: FloatingBarcodeQc::default(),
@@ -273,27 +281,25 @@ where
         }
     }
 
-    fn write_results(
+    fn write_result(
         output: &mut W,
-        matches: BTreeMap<(Vec<u8>, Vec<u8>, Vec<u8>), BTreeMap<Vec<u8>, u64>>,
+        (cell_barcode, name_1, name_2): (Vec<u8>, Vec<u8>, Vec<u8>),
+        umis: BTreeMap<Vec<u8>, u64>,
     ) -> std::io::Result<()> {
-        output.write_all(b"cell_barcode\tname_1\tname_2\tumi_counts\n")?;
-        for ((cell_barcode, name_1, name_2), umis) in matches {
-            output.write_all(&cell_barcode)?;
-            output.write_all(b"\t")?;
-            output.write_all(&name_1)?;
-            output.write_all(b"\t")?;
-            output.write_all(&name_2)?;
-            output.write_all(b"\t")?;
-            for (index, (umi, count)) in umis.into_iter().enumerate() {
-                if index > 0 {
-                    output.write_all(b";")?;
-                }
-                output.write_all(&umi)?;
-                write!(output, ":{count}")?;
+        output.write_all(&cell_barcode)?;
+        output.write_all(b"\t")?;
+        output.write_all(&name_1)?;
+        output.write_all(b"\t")?;
+        output.write_all(&name_2)?;
+        output.write_all(b"\t")?;
+        for (index, (umi, count)) in umis.into_iter().enumerate() {
+            if index > 0 {
+                output.write_all(b";")?;
             }
-            output.write_all(b"\n")?;
+            output.write_all(&umi)?;
+            write!(output, ":{count}")?;
         }
+        output.write_all(b"\n")?;
         Ok(())
     }
 
@@ -412,11 +418,14 @@ where
                             .add(&insertion.sequence);
                     }
                     if let Some(barcode) = barcode {
-                        self.pending.push(PendingFloatingBarcode {
-                            barcode,
-                            umi,
-                            insertions,
-                        });
+                        self.pending
+                            .as_mut()
+                            .expect("floating barcode stage already finalized")
+                            .add(PendingFloatingBarcode {
+                                barcode,
+                                umi,
+                                insertions,
+                            })?;
                     }
                 }
             }
@@ -436,28 +445,52 @@ where
             .into_iter()
             .map(WhitelistBuilder::finish)
             .collect();
-        let pending = std::mem::take(&mut self.pending);
+        let pending = self
+            .pending
+            .take()
+            .expect("floating barcode stage already finalized")
+            .finish()?;
         let whitelists = &whitelists;
         let barcode_table = &self.barcode_table;
         let correction_options = &self.correction_options;
-        let resolved: Vec<_> = self.thread_pool.install(|| {
-            pending
-                .into_par_iter()
-                .filter_map(|record| {
-                    Self::resolve_pending(record, whitelists, barcode_table, correction_options)
-                })
-                .collect()
-        });
-        self.qc.num_matched += resolved.len() as u64;
+        let pool = &self.thread_pool;
+        let mut pending = pending;
         let mut matches: BTreeMap<_, BTreeMap<Vec<u8>, u64>> = BTreeMap::new();
-        for (barcode, name_1, name_2, umi) in resolved {
-            *matches
-                .entry((barcode, name_1, name_2))
-                .or_default()
-                .entry(umi)
-                .or_default() += 1;
+        loop {
+            let mut batch = Vec::with_capacity(CORRECTION_BATCH_SIZE);
+            while batch.len() < CORRECTION_BATCH_SIZE {
+                match pending.next() {
+                    Some(Ok(record)) => batch.push(record),
+                    Some(Err(error)) => return Err(error.into()),
+                    None => break,
+                }
+            }
+            if batch.is_empty() {
+                break;
+            }
+            let resolved = pool.install(|| {
+                batch
+                    .into_par_iter()
+                    .filter_map(|record| {
+                        Self::resolve_pending(record, whitelists, barcode_table, correction_options)
+                    })
+                    .collect::<Vec<_>>()
+            });
+            self.qc.num_matched += resolved.len() as u64;
+            for (barcode, name_1, name_2, umi) in resolved {
+                *matches
+                    .entry((barcode, name_1, name_2))
+                    .or_default()
+                    .entry(umi)
+                    .or_default() += 1;
+            }
         }
-        Self::write_results(&mut self.output, matches)?;
+
+        self.output
+            .write_all(b"cell_barcode\tname_1\tname_2\tumi_counts\n")?;
+        for (key, umis) in matches {
+            Self::write_result(&mut self.output, key, umis)?;
+        }
         self.output.flush()?;
         self.finished = true;
         Ok(())

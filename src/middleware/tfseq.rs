@@ -2,7 +2,7 @@ use anyhow::{bail, Result};
 use precellar::{
     align::FastqPlan,
     barcode::BarcodeCorrectOptions,
-    middleware::{FloatingBarcodeEntry, FloatingBarcodeStage, FloatingBarcodeTable},
+    middleware::tfseq::{FloatingBarcodeEntry, FloatingBarcodeStage, FloatingBarcodeTable},
     utils::insertion_extractor::InsertionExtractor,
 };
 use pyo3::prelude::*;
