@@ -7,17 +7,6 @@ description = "precellar: Single-cell epigenomics preprocessing toolkit"
 license = "MIT"
 readme = "README.md"
 repository = "https://github.com/regulatory-genomics/precellar"
-exclude = [
-    ".github/",
-    "docs/",
-    "seqspec_templates/",
-    "TFSeq/",
-    "test2/",
-    "DESIGN.md",
-    "DEVELOPMENT.md",
-    "TEST.md",
-    "index.py",
-]
 
 [workspace]
 members = ["seqspec", "precellar-core"]

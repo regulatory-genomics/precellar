@@ -40,13 +40,13 @@ jobs:
         uses: astral-sh/setup-uv@v4
 
       - name: Generate llms.txt
-        run: uv run --group docs python scripts/generate_llms_txt.py --output snapatac2/llms.txt
+        run: uv run --group docs python scripts/generate_llms_txt.py --output src/llms.txt
 
       - name: Build wheels
         run: python -m cibuildwheel --output-dir wheelhouse .
 
       - name: Clean up generated llms.txt
-        run: rm -f snapatac2/llms.txt
+        run: rm -f src/llms.txt
 
       - uses: actions/upload-artifact@v4
         with:
