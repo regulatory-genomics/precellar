@@ -129,7 +129,7 @@ fn read_barcode_table(path: PathBuf) -> Result<Vec<FloatingBarcodeEntry>> {
 }
 
 impl FloatingBarcodeFinder {
-    pub(crate) fn configure_plan(&self, plan: FastqPlan) -> Result<FastqPlan> {
+    pub(crate) fn configure_plan(&self, plan: FastqPlan, num_threads: usize) -> Result<FastqPlan> {
         let compression = Compression::try_from(&self.output).ok();
         let output = create_file(&self.output, compression, None, 1)?;
         let extractor = InsertionExtractor::new(
@@ -153,7 +153,7 @@ impl FloatingBarcodeFinder {
             correction_options,
             output,
         )?;
-        Ok(plan.with_stage(stage))
+        Ok(plan.with_stage(stage.with_num_threads(num_threads)?))
     }
 }
 

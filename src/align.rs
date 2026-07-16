@@ -328,7 +328,7 @@ pub fn align<'py>(
                     "middleware must be a precellar.middleware.tfseq.FloatingBarcodeFinder"
                 )
             })?;
-        plan = middleware.configure_plan(plan)?;
+        plan = middleware.configure_plan(plan, num_threads as usize)?;
     }
 
     let mut qc_metrics = serde_json::Map::new();

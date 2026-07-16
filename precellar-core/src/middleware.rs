@@ -5,6 +5,7 @@ use crate::barcode::{BarcodeCorrectOptions, Whitelist, WhitelistBuilder};
 pub use crate::pipeline::{AnnotatedFastqBatch, FastqStage, MiddlewareQcReport};
 use crate::utils::insertion_extractor::InsertionExtractor;
 use anyhow::Result;
+use rayon::prelude::*;
 use serde_json::json;
 use std::collections::{BTreeMap, HashMap};
 use std::io::Write;
@@ -36,6 +37,15 @@ struct PendingFloatingBarcode {
     barcode: Vec<u8>,
     umi: Vec<u8>,
     insertions: Vec<PendingInsertion>,
+}
+
+enum ProcessedFloatingBarcode {
+    Forward(AnnotatedFastq),
+    Extracted {
+        barcode: Option<Vec<u8>>,
+        umi: Vec<u8>,
+        insertions: Vec<PendingInsertion>,
+    },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -182,6 +192,7 @@ pub struct FloatingBarcodeStage<W> {
     correction_options: BarcodeCorrectOptions,
     pending: Vec<PendingFloatingBarcode>,
     output: W,
+    thread_pool: rayon::ThreadPool,
     qc: FloatingBarcodeQc,
     finished: bool,
 }
@@ -221,6 +232,7 @@ where
             correction_options,
             pending: Vec::new(),
             output,
+            thread_pool: rayon::ThreadPoolBuilder::new().num_threads(1).build()?,
             qc: FloatingBarcodeQc::default(),
             finished: false,
         })
@@ -232,6 +244,16 @@ where
 
     pub fn into_output(self) -> W {
         self.output
+    }
+
+    pub fn with_num_threads(mut self, num_threads: usize) -> Result<Self> {
+        if num_threads == 0 {
+            anyhow::bail!("num_threads must be greater than zero");
+        }
+        self.thread_pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(num_threads)
+            .build()?;
+        Ok(self)
     }
 
     fn selected_sequence<'a>(
@@ -249,21 +271,6 @@ where
                 .as_ref()
                 .map(|read| (read.sequence(), read.quality_scores()))
         }
-    }
-
-    fn pending_record(
-        record: &AnnotatedFastq,
-        insertions: Vec<PendingInsertion>,
-    ) -> Option<PendingFloatingBarcode> {
-        Some(PendingFloatingBarcode {
-            barcode: record.barcode.as_ref()?.corrected.clone()?,
-            umi: record
-                .umi
-                .as_ref()
-                .map(|umi| umi.sequence().to_vec())
-                .unwrap_or_default(),
-            insertions,
-        })
     }
 
     fn write_results(
@@ -289,6 +296,84 @@ where
         }
         Ok(())
     }
+
+    fn process_record(
+        extractor: &InsertionExtractor,
+        use_read1: bool,
+        record: AnnotatedFastq,
+    ) -> Result<ProcessedFloatingBarcode> {
+        let Some((sequence, quality_scores)) = Self::selected_sequence(use_read1, &record) else {
+            return Ok(ProcessedFloatingBarcode::Forward(record));
+        };
+        if sequence.len() != quality_scores.len() {
+            anyhow::bail!("selected FASTQ sequence and quality lengths differ");
+        }
+        let Some(ranges) = extractor.extract_ranges(sequence) else {
+            return Ok(ProcessedFloatingBarcode::Forward(record));
+        };
+        if ranges.is_empty() {
+            return Ok(ProcessedFloatingBarcode::Forward(record));
+        }
+
+        let barcode = record
+            .barcode
+            .as_ref()
+            .and_then(|barcode| barcode.corrected.clone());
+        let umi = if barcode.is_some() {
+            record
+                .umi
+                .as_ref()
+                .map(|umi| umi.sequence().to_vec())
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        let insertions = ranges
+            .into_iter()
+            .map(|(insertion_index, range)| PendingInsertion {
+                insertion_index,
+                sequence: sequence[range.clone()].to_vec(),
+                quality_scores: quality_scores[range].to_vec(),
+            })
+            .collect();
+        Ok(ProcessedFloatingBarcode::Extracted {
+            barcode,
+            umi,
+            insertions,
+        })
+    }
+
+    fn resolve_pending(
+        record: PendingFloatingBarcode,
+        whitelists: &[Whitelist],
+        barcode_table: &FloatingBarcodeTable,
+        correction_options: &BarcodeCorrectOptions,
+    ) -> Option<(Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>)> {
+        let PendingFloatingBarcode {
+            barcode,
+            umi,
+            insertions,
+        } = record;
+        let mut floating_barcodes: [Option<Vec<u8>>; 2] = [None, None];
+        for insertion in insertions {
+            let PendingInsertion {
+                insertion_index,
+                sequence,
+                quality_scores,
+            } = insertion;
+            let whitelist = whitelists.get(insertion_index)?;
+            if let Ok(corrected) =
+                whitelist.correct_barcode(&sequence, &quality_scores, correction_options)
+            {
+                floating_barcodes[insertion_index] = Some(corrected.to_vec());
+            }
+        }
+        let entry = barcode_table.resolve(
+            floating_barcodes[0].as_deref(),
+            floating_barcodes[1].as_deref(),
+        )?;
+        Some((barcode, entry.name_1.clone(), entry.name_2.clone(), umi))
+    }
 }
 
 impl<W> FastqStage for FloatingBarcodeStage<W>
@@ -296,52 +381,43 @@ where
     W: Write + Send,
 {
     fn process(&mut self, batch: AnnotatedFastqBatch) -> Result<AnnotatedFastqBatch> {
-        let mut forwarded = Vec::with_capacity(batch.len());
-        for record in batch {
-            self.qc.num_records += 1;
-            let Some((sequence, quality_scores)) = Self::selected_sequence(self.use_read1, &record)
-            else {
-                forwarded.push(record);
-                continue;
-            };
-            if sequence.len() != quality_scores.len() {
-                anyhow::bail!("selected FASTQ sequence and quality lengths differ");
-            }
-            let Some(ranges) = self.extractor.extract_ranges(sequence) else {
-                forwarded.push(record);
-                continue;
-            };
-            if ranges.is_empty() {
-                forwarded.push(record);
-                continue;
-            }
+        let num_records = batch.len() as u64;
+        let extractor = &self.extractor;
+        let use_read1 = self.use_read1;
+        let results: Vec<_> = self.thread_pool.install(|| {
+            batch
+                .into_par_iter()
+                .map(|record| Self::process_record(extractor, use_read1, record))
+                .collect()
+        });
+        let results: Vec<_> = results.into_iter().collect::<Result<_>>()?;
+        self.qc.num_records += num_records;
 
-            self.qc.num_extracted += 1;
-            let retain_pending = record
-                .barcode
-                .as_ref()
-                .and_then(|barcode| barcode.corrected.as_ref())
-                .is_some();
-            let mut insertions = retain_pending.then(|| Vec::with_capacity(ranges.len()));
-            for (insertion_index, range) in ranges {
-                let extracted = &sequence[range.clone()];
-                self.whitelist_builders
-                    .as_mut()
-                    .expect("floating barcode stage already finalized")
-                    .get_mut(insertion_index)
-                    .expect("extractor returned an invalid insertion index")
-                    .add(extracted);
-                if let Some(insertions) = insertions.as_mut() {
-                    insertions.push(PendingInsertion {
-                        insertion_index,
-                        sequence: extracted.to_vec(),
-                        quality_scores: quality_scores[range].to_vec(),
-                    });
-                }
-            }
-            if let Some(insertions) = insertions {
-                if let Some(pending) = Self::pending_record(&record, insertions) {
-                    self.pending.push(pending);
+        let mut forwarded = Vec::with_capacity(results.len());
+        for result in results {
+            match result {
+                ProcessedFloatingBarcode::Forward(record) => forwarded.push(record),
+                ProcessedFloatingBarcode::Extracted {
+                    barcode,
+                    umi,
+                    insertions,
+                } => {
+                    self.qc.num_extracted += 1;
+                    for insertion in &insertions {
+                        self.whitelist_builders
+                            .as_mut()
+                            .expect("floating barcode stage already finalized")
+                            .get_mut(insertion.insertion_index)
+                            .expect("extractor returned an invalid insertion index")
+                            .add(&insertion.sequence);
+                    }
+                    if let Some(barcode) = barcode {
+                        self.pending.push(PendingFloatingBarcode {
+                            barcode,
+                            umi,
+                            insertions,
+                        });
+                    }
                 }
             }
         }
@@ -360,45 +436,26 @@ where
             .into_iter()
             .map(WhitelistBuilder::finish)
             .collect();
+        let pending = std::mem::take(&mut self.pending);
+        let whitelists = &whitelists;
+        let barcode_table = &self.barcode_table;
+        let correction_options = &self.correction_options;
+        let resolved: Vec<_> = self.thread_pool.install(|| {
+            pending
+                .into_par_iter()
+                .filter_map(|record| {
+                    Self::resolve_pending(record, whitelists, barcode_table, correction_options)
+                })
+                .collect()
+        });
+        self.qc.num_matched += resolved.len() as u64;
         let mut matches: BTreeMap<_, BTreeMap<Vec<u8>, u64>> = BTreeMap::new();
-        for record in std::mem::take(&mut self.pending) {
-            let PendingFloatingBarcode {
-                barcode,
-                umi,
-                insertions,
-            } = record;
-            let mut floating_barcodes: [Option<Vec<u8>>; 2] = [None, None];
-            for insertion in insertions {
-                let PendingInsertion {
-                    insertion_index,
-                    sequence,
-                    quality_scores,
-                } = insertion;
-                let Some(whitelist) = whitelists.get(insertion_index) else {
-                    continue;
-                };
-                match whitelist.correct_barcode(
-                    &sequence,
-                    &quality_scores,
-                    &self.correction_options,
-                ) {
-                    Ok(corrected) => {
-                        floating_barcodes[insertion_index] = Some(corrected.to_vec());
-                    }
-                    Err(_) => {}
-                }
-            }
-            if let Some(entry) = self.barcode_table.resolve(
-                floating_barcodes[0].as_deref(),
-                floating_barcodes[1].as_deref(),
-            ) {
-                *matches
-                    .entry((barcode, entry.name_1.clone(), entry.name_2.clone()))
-                    .or_default()
-                    .entry(umi)
-                    .or_default() += 1;
-                self.qc.num_matched += 1;
-            }
+        for (barcode, name_1, name_2, umi) in resolved {
+            *matches
+                .entry((barcode, name_1, name_2))
+                .or_default()
+                .entry(umi)
+                .or_default() += 1;
         }
         Self::write_results(&mut self.output, matches)?;
         self.output.flush()?;
@@ -565,6 +622,39 @@ mod tests {
             stage.into_output(),
             b"cell_barcode\tname_1\tname_2\tumi_counts\nAAAA\tTF1\tSITE1\t:1\nCCCC\tTF1\tSITE1\tUMI1:1;UMI2:2\n"
         );
+    }
+
+    fn run_with_threads(num_threads: usize) -> (Vec<u8>, Vec<Vec<u8>>, (u64, u64, u64)) {
+        let mut stage = FloatingBarcodeStage::new(
+            true,
+            extractor(),
+            table(),
+            BarcodeCorrectOptions::default(),
+            Vec::new(),
+        )
+        .unwrap()
+        .with_num_threads(num_threads)
+        .unwrap();
+        let forwarded = stage
+            .process(vec![
+                record(b"GATTGATT"),
+                record(full_sequence()),
+                record(b"TCTCTCTC"),
+                record(b"AAAATTCCCC"),
+            ])
+            .unwrap()
+            .into_iter()
+            .filter_map(|record| record.read1.map(|read| read.sequence().to_vec()))
+            .collect();
+        stage.finish().unwrap();
+        let qc = stage.qc();
+        let metrics = (qc.num_records, qc.num_extracted, qc.num_matched);
+        (stage.into_output(), forwarded, metrics)
+    }
+
+    #[test]
+    fn parallel_processing_matches_serial_processing() {
+        assert_eq!(run_with_threads(1), run_with_threads(2));
     }
 
     #[test]
