@@ -6,7 +6,7 @@ pub use crate::pipeline::{AnnotatedFastqBatch, FastqStage, MiddlewareQcReport};
 use crate::utils::insertion_extractor::InsertionExtractor;
 use anyhow::Result;
 use serde_json::json;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::io::Write;
 
 #[derive(Debug, Default)]
@@ -38,6 +38,136 @@ struct PendingFloatingBarcode {
     insertions: Vec<PendingInsertion>,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FloatingBarcodeEntry {
+    pub name_1: Vec<u8>,
+    pub name_2: Vec<u8>,
+    pub barcode_1: Vec<u8>,
+    pub barcode_2: Vec<u8>,
+}
+
+impl FloatingBarcodeEntry {
+    pub fn new<N1, N2, B1, B2>(name_1: N1, name_2: N2, barcode_1: B1, barcode_2: B2) -> Self
+    where
+        N1: Into<Vec<u8>>,
+        N2: Into<Vec<u8>>,
+        B1: Into<Vec<u8>>,
+        B2: Into<Vec<u8>>,
+    {
+        Self {
+            name_1: name_1.into(),
+            name_2: name_2.into(),
+            barcode_1: barcode_1.into(),
+            barcode_2: barcode_2.into(),
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct FloatingBarcodeTable {
+    entries: Vec<FloatingBarcodeEntry>,
+    expected_lens: [usize; 2],
+    barcode_1_rows: HashMap<Vec<u8>, Option<usize>>,
+    barcode_2_rows: HashMap<Vec<u8>, Option<usize>>,
+    pair_rows: HashMap<Vec<u8>, HashMap<Vec<u8>, usize>>,
+}
+
+impl FloatingBarcodeTable {
+    pub fn new(mut entries: Vec<FloatingBarcodeEntry>, expected_lens: &[usize]) -> Result<Self> {
+        if expected_lens.len() != 2 {
+            anyhow::bail!("barcode tables require exactly two insertion gaps");
+        }
+        if entries.is_empty() {
+            anyhow::bail!("barcode_table must contain at least one row");
+        }
+
+        let expected_lens = [expected_lens[0], expected_lens[1]];
+        let mut barcode_1_rows = HashMap::new();
+        let mut barcode_2_rows = HashMap::new();
+        let mut pair_rows: HashMap<Vec<u8>, HashMap<Vec<u8>, usize>> = HashMap::new();
+        for (index, entry) in entries.iter_mut().enumerate() {
+            if entry.name_1.is_empty() || entry.name_2.is_empty() {
+                anyhow::bail!("barcode table names must not be empty");
+            }
+            if entry
+                .name_1
+                .iter()
+                .chain(&entry.name_2)
+                .any(|byte| matches!(byte, b'\t' | b'\n' | b'\r' | 0..=31))
+            {
+                anyhow::bail!("barcode table names must not contain control characters");
+            }
+            entry.barcode_1.make_ascii_uppercase();
+            entry.barcode_2.make_ascii_uppercase();
+            if !is_dna(&entry.barcode_1) || !is_dna(&entry.barcode_2) {
+                anyhow::bail!("barcode table barcodes must be non-empty DNA sequences");
+            }
+            if entry.barcode_1.len() != expected_lens[0]
+                || entry.barcode_2.len() != expected_lens[1]
+            {
+                anyhow::bail!(
+                    "barcode table row {} has lengths ({}, {}), expected ({}, {})",
+                    index + 1,
+                    entry.barcode_1.len(),
+                    entry.barcode_2.len(),
+                    expected_lens[0],
+                    expected_lens[1]
+                );
+            }
+
+            insert_unique_index(&mut barcode_1_rows, &entry.barcode_1, index);
+            insert_unique_index(&mut barcode_2_rows, &entry.barcode_2, index);
+            if pair_rows
+                .entry(entry.barcode_1.clone())
+                .or_default()
+                .insert(entry.barcode_2.clone(), index)
+                .is_some()
+            {
+                anyhow::bail!("barcode table contains a duplicate barcode combination");
+            }
+        }
+
+        Ok(Self {
+            entries,
+            expected_lens,
+            barcode_1_rows,
+            barcode_2_rows,
+            pair_rows,
+        })
+    }
+
+    pub fn expected_lens(&self) -> &[usize; 2] {
+        &self.expected_lens
+    }
+
+    fn resolve(
+        &self,
+        barcode_1: Option<&[u8]>,
+        barcode_2: Option<&[u8]>,
+    ) -> Option<&FloatingBarcodeEntry> {
+        let index = match (barcode_1, barcode_2) {
+            (Some(barcode_1), Some(barcode_2)) => *self.pair_rows.get(barcode_1)?.get(barcode_2)?,
+            (Some(barcode_1), None) => self.barcode_1_rows.get(barcode_1).copied().flatten()?,
+            (None, Some(barcode_2)) => self.barcode_2_rows.get(barcode_2).copied().flatten()?,
+            (None, None) => return None,
+        };
+        self.entries.get(index)
+    }
+}
+
+fn is_dna(sequence: &[u8]) -> bool {
+    !sequence.is_empty()
+        && sequence
+            .iter()
+            .all(|base| matches!(base, b'A' | b'C' | b'G' | b'T'))
+}
+
+fn insert_unique_index(rows: &mut HashMap<Vec<u8>, Option<usize>>, barcode: &[u8], index: usize) {
+    rows.entry(barcode.to_vec())
+        .and_modify(|existing| *existing = None)
+        .or_insert(Some(index));
+}
+
 /// Extracts floating barcodes and removes extracted records from downstream.
 ///
 /// Floating-barcode correction uses an explicit, non-empty whitelist. Every
@@ -47,6 +177,7 @@ struct PendingFloatingBarcode {
 pub struct FloatingBarcodeStage<W> {
     use_read1: bool,
     extractor: InsertionExtractor,
+    barcode_table: FloatingBarcodeTable,
     whitelist_builders: Option<Vec<WhitelistBuilder>>,
     correction_options: BarcodeCorrectOptions,
     pending: Vec<PendingFloatingBarcode>,
@@ -59,36 +190,33 @@ impl<W> FloatingBarcodeStage<W>
 where
     W: Write + Send,
 {
-    pub fn new<B, V, S>(
+    pub fn new(
         use_read1: bool,
         extractor: InsertionExtractor,
-        valid_barcodes: B,
+        barcode_table: FloatingBarcodeTable,
         correction_options: BarcodeCorrectOptions,
         output: W,
-    ) -> Result<Self>
-    where
-        B: IntoIterator<Item = S>,
-        S: IntoIterator<Item = V>,
-        V: Into<Vec<u8>>,
-    {
-        let valid_barcodes: Vec<Vec<Vec<u8>>> = valid_barcodes
-            .into_iter()
-            .map(|barcodes| barcodes.into_iter().map(Into::into).collect())
-            .collect();
-        if valid_barcodes.len() != extractor.num_gaps() {
-            anyhow::bail!(
-                "valid_barcodes must contain one whitelist per insertion gap (expected {}, got {})",
-                extractor.num_gaps(),
-                valid_barcodes.len()
-            );
+    ) -> Result<Self> {
+        if extractor.expected_lens() != &barcode_table.expected_lens()[..] {
+            anyhow::bail!("barcode table lengths do not match extractor insertion lengths");
         }
-        if valid_barcodes.iter().any(Vec::is_empty) {
-            anyhow::bail!("each insertion gap must have a non-empty barcode whitelist");
-        }
+        let valid_barcodes = [
+            barcode_table
+                .entries
+                .iter()
+                .map(|entry| entry.barcode_1.clone())
+                .collect::<Vec<_>>(),
+            barcode_table
+                .entries
+                .iter()
+                .map(|entry| entry.barcode_2.clone())
+                .collect::<Vec<_>>(),
+        ];
 
         Ok(Self {
             use_read1,
             extractor,
+            barcode_table,
             whitelist_builders: Some(valid_barcodes.into_iter().map(Whitelist::builder).collect()),
             correction_options,
             pending: Vec::new(),
@@ -140,20 +268,15 @@ where
 
     fn write_results(
         output: &mut W,
-        num_gaps: usize,
-        matches: BTreeMap<(Vec<u8>, Vec<Vec<u8>>), BTreeMap<Vec<u8>, u64>>,
+        matches: BTreeMap<(Vec<u8>, Vec<u8>, Vec<u8>), BTreeMap<Vec<u8>, u64>>,
     ) -> std::io::Result<()> {
-        output.write_all(b"cell_barcode")?;
-        for index in 0..num_gaps {
-            write!(output, "\tfloating_barcode{}", index + 1)?;
-        }
-        output.write_all(b"\tumi_counts\n")?;
-        for ((cell_barcode, floating_barcodes), umis) in matches {
+        output.write_all(b"cell_barcode\tname_1\tname_2\tumi_counts\n")?;
+        for ((cell_barcode, name_1, name_2), umis) in matches {
             output.write_all(&cell_barcode)?;
-            for floating_barcode in floating_barcodes {
-                output.write_all(b"\t")?;
-                output.write_all(&floating_barcode)?;
-            }
+            output.write_all(b"\t")?;
+            output.write_all(&name_1)?;
+            output.write_all(b"\t")?;
+            output.write_all(&name_2)?;
             output.write_all(b"\t")?;
             for (index, (umi, count)) in umis.into_iter().enumerate() {
                 if index > 0 {
@@ -193,6 +316,7 @@ where
                 continue;
             }
 
+            self.qc.num_extracted += 1;
             let retain_pending = record
                 .barcode
                 .as_ref()
@@ -200,7 +324,6 @@ where
                 .is_some();
             let mut insertions = retain_pending.then(|| Vec::with_capacity(ranges.len()));
             for (insertion_index, range) in ranges {
-                self.qc.num_extracted += 1;
                 let extracted = &sequence[range.clone()];
                 self.whitelist_builders
                     .as_mut()
@@ -237,7 +360,6 @@ where
             .into_iter()
             .map(WhitelistBuilder::finish)
             .collect();
-        let num_gaps = whitelists.len();
         let mut matches: BTreeMap<_, BTreeMap<Vec<u8>, u64>> = BTreeMap::new();
         for record in std::mem::take(&mut self.pending) {
             let PendingFloatingBarcode {
@@ -245,8 +367,7 @@ where
                 umi,
                 insertions,
             } = record;
-            let mut floating_barcodes = vec![b"-".to_vec(); num_gaps];
-            let mut matched = false;
+            let mut floating_barcodes: [Option<Vec<u8>>; 2] = [None, None];
             for insertion in insertions {
                 let PendingInsertion {
                     insertion_index,
@@ -262,22 +383,24 @@ where
                     &self.correction_options,
                 ) {
                     Ok(corrected) => {
-                        floating_barcodes[insertion_index] = corrected.to_vec();
-                        matched = true;
+                        floating_barcodes[insertion_index] = Some(corrected.to_vec());
                     }
                     Err(_) => {}
                 }
             }
-            if matched {
+            if let Some(entry) = self.barcode_table.resolve(
+                floating_barcodes[0].as_deref(),
+                floating_barcodes[1].as_deref(),
+            ) {
                 *matches
-                    .entry((barcode, floating_barcodes))
+                    .entry((barcode, entry.name_1.clone(), entry.name_2.clone()))
                     .or_default()
                     .entry(umi)
                     .or_default() += 1;
                 self.qc.num_matched += 1;
             }
         }
-        Self::write_results(&mut self.output, num_gaps, matches)?;
+        Self::write_results(&mut self.output, matches)?;
         self.output.flush()?;
         self.finished = true;
         Ok(())
@@ -333,12 +456,24 @@ mod tests {
 
     fn extractor() -> InsertionExtractor {
         InsertionExtractor::new(
-            vec!["ACGTCAGTGGCA".into(), "TTGGAACCTTGG".into()],
-            vec![4],
-            12,
-            0,
+            vec!["AAAA".into(), "CCCC".into(), "GGGG".into()],
+            vec![2, 3],
+            3,
+            0.0,
         )
         .unwrap()
+    }
+
+    fn table() -> FloatingBarcodeTable {
+        FloatingBarcodeTable::new(
+            vec![FloatingBarcodeEntry::new("TF1", "SITE1", "TT", "AAA")],
+            &[2, 3],
+        )
+        .unwrap()
+    }
+
+    fn full_sequence() -> &'static [u8] {
+        b"AAAATTCCCCAAAGGGG"
     }
 
     #[test]
@@ -346,20 +481,18 @@ mod tests {
         let mut stage = FloatingBarcodeStage::new(
             true,
             extractor(),
-            [[b"ACGT".to_vec()]],
+            table(),
             BarcodeCorrectOptions::default(),
             Vec::new(),
         )
         .unwrap();
 
-        let forwarded = stage
-            .process(vec![record(b"ACGTCAGTGGCAACGTTTGGAACCTTGG")])
-            .unwrap();
+        let forwarded = stage.process(vec![record(full_sequence())]).unwrap();
         assert!(forwarded.is_empty());
         stage.finish().unwrap();
         assert_eq!(
             stage.into_output(),
-            b"cell_barcode\tfloating_barcode1\tumi_counts\nCELL\tACGT\t:1\n"
+            b"cell_barcode\tname_1\tname_2\tumi_counts\nCELL\tTF1\tSITE1\t:1\n"
         );
     }
 
@@ -368,20 +501,22 @@ mod tests {
         let mut stage = FloatingBarcodeStage::new(
             true,
             extractor(),
-            [[b"GGGG".to_vec()]],
+            FloatingBarcodeTable::new(
+                vec![FloatingBarcodeEntry::new("TF2", "SITE2", "GG", "CCC")],
+                &[2, 3],
+            )
+            .unwrap(),
             BarcodeCorrectOptions::default(),
             Vec::new(),
         )
         .unwrap();
 
-        let forwarded = stage
-            .process(vec![record(b"ACGTCAGTGGCAACGTTTGGAACCTTGG")])
-            .unwrap();
+        let forwarded = stage.process(vec![record(full_sequence())]).unwrap();
         assert!(forwarded.is_empty());
         stage.finish().unwrap();
         assert_eq!(
             stage.into_output(),
-            b"cell_barcode\tfloating_barcode1\tumi_counts\n"
+            b"cell_barcode\tname_1\tname_2\tumi_counts\n"
         );
     }
 
@@ -390,19 +525,19 @@ mod tests {
         let mut stage = FloatingBarcodeStage::new(
             true,
             extractor(),
-            [[b"ACGT".to_vec()]],
+            table(),
             BarcodeCorrectOptions::default(),
             Vec::new(),
         )
         .unwrap();
-        let mut record = record(b"ACGTCAGTGGCAACGTTTGGAACCTTGG");
+        let mut record = record(full_sequence());
         record.barcode.as_mut().unwrap().corrected = None;
 
         stage.process(vec![record]).unwrap();
         stage.finish().unwrap();
         assert_eq!(
             stage.into_output(),
-            b"cell_barcode\tfloating_barcode1\tumi_counts\n"
+            b"cell_barcode\tname_1\tname_2\tumi_counts\n"
         );
     }
 
@@ -411,12 +546,12 @@ mod tests {
         let mut stage = FloatingBarcodeStage::new(
             true,
             extractor(),
-            [[b"ACGT".to_vec()]],
+            table(),
             BarcodeCorrectOptions::default(),
             Vec::new(),
         )
         .unwrap();
-        let sequence = b"ACGTCAGTGGCAACGTTTGGAACCTTGG";
+        let sequence = full_sequence();
         stage
             .process(vec![
                 record_with_metadata(sequence, Some(b"CCCC"), Some(b"UMI2")),
@@ -428,20 +563,8 @@ mod tests {
         stage.finish().unwrap();
         assert_eq!(
             stage.into_output(),
-            b"cell_barcode\tfloating_barcode1\tumi_counts\nAAAA\tACGT\t:1\nCCCC\tACGT\tUMI1:1;UMI2:2\n"
+            b"cell_barcode\tname_1\tname_2\tumi_counts\nAAAA\tTF1\tSITE1\t:1\nCCCC\tTF1\tSITE1\tUMI1:1;UMI2:2\n"
         );
-    }
-
-    #[test]
-    fn rejects_an_empty_whitelist() {
-        assert!(FloatingBarcodeStage::new(
-            true,
-            extractor(),
-            Vec::<Vec<Vec<u8>>>::new(),
-            BarcodeCorrectOptions::default(),
-            Vec::new(),
-        )
-        .is_err());
     }
 
     #[test]
@@ -450,13 +573,13 @@ mod tests {
             vec!["AAAA".into(), "CCCC".into(), "GGGG".into()],
             vec![2, 3],
             3,
-            0,
+            0.0,
         )
         .unwrap();
         let mut stage = FloatingBarcodeStage::new(
             true,
             extractor,
-            [[b"TT".to_vec()], [b"AAA".to_vec()]],
+            table(),
             BarcodeCorrectOptions::default(),
             Vec::new(),
         )
@@ -464,11 +587,11 @@ mod tests {
 
         let forwarded = stage.process(vec![record(b"AAAATTCCCCAAAGGGG")]).unwrap();
         assert!(forwarded.is_empty());
-        assert_eq!(stage.qc().num_extracted, 2);
+        assert_eq!(stage.qc().num_extracted, 1);
         stage.finish().unwrap();
         assert_eq!(
             stage.into_output(),
-            b"cell_barcode\tfloating_barcode1\tfloating_barcode2\tumi_counts\nCELL\tTT\tAAA\t:1\n"
+            b"cell_barcode\tname_1\tname_2\tumi_counts\nCELL\tTF1\tSITE1\t:1\n"
         );
     }
 
@@ -478,13 +601,13 @@ mod tests {
             vec!["AAAA".into(), "CCCC".into(), "GGGG".into()],
             vec![2, 3],
             3,
-            0,
+            0.0,
         )
         .unwrap();
         let mut stage = FloatingBarcodeStage::new(
             true,
             extractor,
-            [[b"TT".to_vec()], [b"AAA".to_vec()]],
+            table(),
             BarcodeCorrectOptions::default(),
             Vec::new(),
         )
@@ -497,7 +620,7 @@ mod tests {
         stage.finish().unwrap();
         assert_eq!(
             stage.into_output(),
-            b"cell_barcode\tfloating_barcode1\tfloating_barcode2\tumi_counts\nCELL\t-\tAAA\t:1\nCELL\tTT\t-\t:1\n"
+            b"cell_barcode\tname_1\tname_2\tumi_counts\nCELL\tTF1\tSITE1\t:2\n"
         );
     }
 
@@ -507,13 +630,13 @@ mod tests {
             vec!["AAAA".into(), "CCCC".into(), "GGGG".into()],
             vec![2, 3],
             3,
-            0,
+            0.0,
         )
         .unwrap();
         let mut stage = FloatingBarcodeStage::new(
             true,
             extractor,
-            [[b"TT".to_vec()], [b"GGG".to_vec()]],
+            table(),
             BarcodeCorrectOptions::default(),
             Vec::new(),
         )
@@ -521,24 +644,44 @@ mod tests {
 
         stage.process(vec![record(b"AAAATTCCCCTTTGGGG")]).unwrap();
         stage.finish().unwrap();
-        assert_eq!(stage.qc().num_extracted, 2);
+        assert_eq!(stage.qc().num_extracted, 1);
         assert_eq!(stage.qc().num_matched, 1);
         assert_eq!(
             stage.into_output(),
-            b"cell_barcode\tfloating_barcode1\tfloating_barcode2\tumi_counts\nCELL\tTT\t-\t:1\n"
+            b"cell_barcode\tname_1\tname_2\tumi_counts\nCELL\tTF1\tSITE1\t:1\n"
         );
     }
 
     #[test]
-    fn rejects_an_empty_per_gap_whitelist() {
-        assert!(FloatingBarcodeStage::new(
+    fn rejects_an_empty_barcode_table() {
+        assert!(FloatingBarcodeTable::new(Vec::new(), &[2, 3]).is_err());
+    }
+
+    #[test]
+    fn rejects_an_ambiguous_single_barcode_lookup() {
+        let mut stage = FloatingBarcodeStage::new(
             true,
             extractor(),
-            [Vec::<Vec<u8>>::new()],
+            FloatingBarcodeTable::new(
+                vec![
+                    FloatingBarcodeEntry::new("TF1", "SITE1", "TT", "AAA"),
+                    FloatingBarcodeEntry::new("TF2", "SITE2", "TT", "CCC"),
+                ],
+                &[2, 3],
+            )
+            .unwrap(),
             BarcodeCorrectOptions::default(),
             Vec::new(),
         )
-        .is_err());
+        .unwrap();
+
+        stage.process(vec![record(b"AAAATTCCCC")]).unwrap();
+        stage.finish().unwrap();
+        assert_eq!(stage.qc().num_matched, 0);
+        assert_eq!(
+            stage.into_output(),
+            b"cell_barcode\tname_1\tname_2\tumi_counts\n"
+        );
     }
 
     #[test]
@@ -546,7 +689,7 @@ mod tests {
         let mut stage = FloatingBarcodeStage::new(
             true,
             extractor(),
-            [[b"ACGT".to_vec()]],
+            table(),
             BarcodeCorrectOptions::default(),
             Vec::new(),
         )
@@ -557,7 +700,7 @@ mod tests {
         stage.finish().unwrap();
         assert_eq!(
             stage.into_output(),
-            b"cell_barcode\tfloating_barcode1\tumi_counts\n"
+            b"cell_barcode\tname_1\tname_2\tumi_counts\n"
         );
     }
 }

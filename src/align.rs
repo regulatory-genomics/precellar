@@ -231,7 +231,7 @@ pub fn make_minimap2_index(fasta: PathBuf, output_index: PathBuf, preset: &str) 
 /// chunk_size: int
 ///     This parameter is used to control the number of bases processed in each chunk per thread.
 ///     The total number of bases in each chunk is determined by: chunk_size * num_threads.
-/// middleware: precellar.middleware.FloatingBarcodeExtracter | None
+/// middleware: precellar.middleware.tfseq.FloatingBarcodeFinder | None
 ///     Optional Rust-backed FASTQ middleware applied before alignment.
 ///
 /// Returns
@@ -322,10 +322,10 @@ pub fn align<'py>(
     let mut plan = FastqPlan::new(assay, modality).with_barcode_config(barcode_config);
     if let Some(middleware) = middleware {
         let middleware = middleware
-            .extract::<PyRef<'_, crate::middleware::FloatingBarcodeExtracter>>()
+            .extract::<PyRef<'_, crate::middleware::FloatingBarcodeFinder>>()
             .map_err(|_| {
                 anyhow::anyhow!(
-                    "middleware must be a precellar.middleware.FloatingBarcodeExtracter"
+                    "middleware must be a precellar.middleware.tfseq.FloatingBarcodeFinder"
                 )
             })?;
         plan = middleware.configure_plan(plan)?;
