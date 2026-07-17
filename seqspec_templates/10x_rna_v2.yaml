@@ -73,8 +73,8 @@ library_spec:
     name: GEX UMI
     sequence_type: random
     sequence: XXXXXXXXXXXX
-    min_len: 12
-    max_len: 12
+    min_len: 10
+    max_len: 10
     onlist: null
     regions: null
     parent_id: rna
