@@ -68,7 +68,7 @@ impl<'py> TryFrom<Bound<'py, PyAny>> for AlignerRef<'py> {
             Ok(AlignerRef::Minimap2(aligner))
         } else {
             Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
-                "Expected a STAR, BWAMEM2, MINIBWA, or MINIMAP2 aligner",
+                "Expected a Star, BwaMem2, MiniBwa, or Minimap2 aligner",
             ))
         }
     }
@@ -113,7 +113,7 @@ impl Aligner for AlignerRef<'_> {
     index_path : str
         The path to the STAR index directory.
 */
-#[pyclass]
+#[pyclass(name = "Star")]
 #[repr(transparent)]
 pub struct STAR(StarAligner);
 
@@ -153,7 +153,7 @@ impl STAR {
     index_path : str
         The path to the BWA-MEM2 index directory.
 */
-#[pyclass]
+#[pyclass(name = "BwaMem2")]
 #[repr(transparent)]
 pub struct BWAMEM2(BurrowsWheelerAligner);
 
@@ -214,7 +214,7 @@ impl BWAMEM2 {
     }
 
     /// Whether to output log messages.
-    pub fn logging(&mut self, enable: bool) {
+    pub fn set_logging_enabled(&mut self, enable: bool) {
         if enable {
             self.0.opts.enable_log();
         } else {
@@ -237,7 +237,7 @@ impl BWAMEM2 {
     methylation : bool
         Whether to load an index built for methylation-aware mapping.
 */
-#[pyclass]
+#[pyclass(name = "MiniBwa")]
 #[repr(transparent)]
 pub struct MINIBWA(MiniBwaSR);
 
@@ -303,7 +303,7 @@ impl MINIBWA {
           - 'ava-pb': PacBio all-vs-all overlap
           - 'ava-ont': ONT all-vs-all overlap
 */
-#[pyclass]
+#[pyclass(name = "Minimap2")]
 pub struct MINIMAP2 {
     aligner: Minimap2Aligner,
     _temp_index: Option<tempfile::TempPath>, // To hold temporary index if created from FASTA

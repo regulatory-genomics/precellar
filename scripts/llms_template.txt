@@ -2,7 +2,7 @@
 
 ## API Reference
 
-Below is a list of available functions in SnapATAC2. For detailed API usage, please use python function `help(function_name)` to retrieve the docstring.
+Below is a list of available functions in precellar. For detailed API usage, please use python function `help(function_name)` to retrieve the docstring.
 
 [PLACE HOLDER]
 

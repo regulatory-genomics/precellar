@@ -2,7 +2,10 @@ use anyhow::{bail, Result};
 use precellar::{
     align::FastqPlan,
     barcode::BarcodeCorrectOptions,
-    middleware::tfseq::{FloatingBarcodeEntry, FloatingBarcodeStage, FloatingBarcodeTable},
+    middleware::tfseq::{
+        FloatingBarcodeEntry, FloatingBarcodeStage as CoreFloatingBarcodeStage,
+        FloatingBarcodeTable,
+    },
     utils::insertion_extractor::InsertionExtractor,
 };
 use pyo3::prelude::*;
@@ -13,8 +16,8 @@ use std::{
 };
 
 /// Rust-backed middleware for extracting floating barcodes before alignment.
-#[pyclass(module = "precellar.middleware.tfseq")]
-pub struct FloatingBarcodeFinder {
+#[pyclass(module = "precellar.middleware.tfseq", name = "FloatingBarcodeStage")]
+pub struct FloatingBarcodeStage {
     output: PathBuf,
     barcode_table: FloatingBarcodeTable,
     flanks: Vec<String>,
@@ -28,7 +31,7 @@ pub struct FloatingBarcodeFinder {
 }
 
 #[pymethods]
-impl FloatingBarcodeFinder {
+impl FloatingBarcodeStage {
     #[new]
     #[pyo3(
         signature = (
@@ -128,7 +131,7 @@ fn read_barcode_table(path: PathBuf) -> Result<Vec<FloatingBarcodeEntry>> {
     Ok(entries)
 }
 
-impl FloatingBarcodeFinder {
+impl FloatingBarcodeStage {
     pub(crate) fn configure_plan(&self, plan: FastqPlan, num_threads: usize) -> Result<FastqPlan> {
         let compression = Compression::try_from(&self.output).ok();
         let output = create_file(&self.output, compression, None, 1)?;
@@ -146,7 +149,7 @@ impl FloatingBarcodeFinder {
         };
         let use_read1 = self.use_read1;
 
-        let stage = FloatingBarcodeStage::new(
+        let stage = CoreFloatingBarcodeStage::new(
             use_read1,
             extractor,
             barcode_table,
@@ -158,5 +161,5 @@ impl FloatingBarcodeFinder {
 }
 
 pub(crate) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
-    module.add_class::<FloatingBarcodeFinder>()
+    module.add_class::<FloatingBarcodeStage>()
 }

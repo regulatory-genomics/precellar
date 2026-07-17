@@ -1,6 +1,6 @@
 pub(crate) mod tfseq;
 
-pub(crate) use tfseq::FloatingBarcodeFinder;
+pub(crate) use tfseq::FloatingBarcodeStage;
 
 use pyo3::prelude::*;
 use pyo3::types::PyDict;

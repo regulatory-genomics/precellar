@@ -1,48 +1,20 @@
 use crate::aligners::AlignerRef;
 use crate::pyseqspec::extract_assays;
-
+use crate::sinks::{
+    AlignmentContext, AlignmentSink, BamSink, FragmentsSink, GeneQuantificationSink,
+};
 use anyhow::{bail, Result};
-use core::panic;
 use indicatif::{ProgressBar, ProgressFinish, ProgressStyle};
 use log::info;
-use noodles::sam::{self, alignment::io::Write};
 use precellar::align::{Aligner, AlignmentResult, AlignmentRunner};
+use precellar::align::{BarcodeCorrectionConfig, FastqPlan, MultiMapR};
 use precellar::qc::Metric;
+use pyo3::prelude::*;
 use pyo3::types::PyDict;
-use pyo3::{prelude::*, BoundObject};
-use seqspec::ChemistryStrandedness;
-use serde_json::Value;
+use pyo3::BoundObject;
+use seqspec::Modality;
+use serde_json::{Map, Value};
 use std::{path::PathBuf, str::FromStr};
-
-use precellar::{
-    align::{BarcodeCorrectionConfig, FastqPlan, MultiMapR},
-    fragment::{IntoFragOpts, IntoFragments},
-    qc::QcFragment,
-    transcriptome::Quantifier,
-};
-use seqspec::{
-    utils::{create_file, Compression},
-    Modality,
-};
-
-pub enum OutputType {
-    Alignment,
-    GeneQuantification,
-    Fragment,
-}
-
-impl TryFrom<&str> for OutputType {
-    type Error = anyhow::Error;
-
-    fn try_from(value: &str) -> Result<Self> {
-        match value {
-            "alignment" => Ok(OutputType::Alignment),
-            "gene_quantification" => Ok(OutputType::GeneQuantification),
-            "fragment" => Ok(OutputType::Fragment),
-            x => bail!("invalid output type: {}", x),
-        }
-    }
-}
 
 /// Create a genome index from a fasta file.
 ///
@@ -54,23 +26,24 @@ impl TryFrom<&str> for OutputType {
 /// genome_prefix: Path
 ///   File path to the genome index.
 #[pyfunction]
-pub fn make_bwa_index(fasta: PathBuf, genome_prefix: PathBuf) -> Result<()> {
+pub fn make_bwa_mem2_index(fasta: PathBuf, genome_prefix: PathBuf) -> Result<()> {
     bwa_mem2::FMIndex::new(fasta, genome_prefix)?;
     Ok(())
 }
 
-/// Create a minibwa index from a fasta file.
+/// Create a minibwa index from a FASTA file.
 ///
 /// Parameters
 /// ----------
+///
 /// fasta: Path
-///    File path to the fasta file.
+///    File path to the FASTA file.
 /// index_prefix: Path
-///   File path prefix for the minibwa index files.
+///    File path prefix for the minibwa index files.
 /// num_threads: int
-///   The number of threads to use when building the index.
+///    The number of threads to use when building the index.
 /// methylation: bool
-///   Whether to build a methylation-aware index.
+///    Whether to build a methylation-aware index.
 #[pyfunction]
 #[pyo3(
     signature = (fasta, index_prefix, *, num_threads=8, methylation=false),
@@ -88,46 +61,8 @@ pub fn make_minibwa_index(
 
 /// Create a minimap2 index from a FASTA file.
 ///
-/// This function creates a `.mmi` index file that can be used with the MINIMAP2 aligner.
-/// The index is created with k-mer and window sizes optimized for the selected preset.
-///
-/// Parameters
-/// ----------
-/// fasta: Path
-///    File path to the FASTA file containing reference sequences.
-/// output_index: Path
-///   File path for the output minimap2 index (.mmi file).
-/// preset: str
-///    Optional preset to optimize index for specific read types:
-///    - Long Reads DNA Mapping:
-///      - 'map-ont': Oxford Nanopore reads (default)
-///      - 'map-pb': PacBio CLR reads
-///      - 'map-hifi': PacBio HiFi reads
-///      - 'lr:hq': Long reads, high quality
-///    - Spliced / RNA-seq Alignment:
-///      - 'splice': RNA-seq long reads
-///      - 'splice:hq': High-quality RNA-seq long reads
-///      - 'splice:sr': Short-read RNA-seq
-///    - Long Assembly to Reference Mapping:
-///      - 'asm5', 'asm10', 'asm20': Assembly alignment (5%, 10%, 20% divergence)
-///    - Short Reads Mapping:
-///      - 'short': Short single-end reads
-///      - 'sr': Short paired-end reads
-///    - All-vs-All Overlap Mapping:
-///      - 'ava-pb': PacBio all-vs-all overlap
-///      - 'ava-ont': ONT all-vs-all overlap
-///
-/// Examples
-/// --------
-/// >>> from precellar import make_minimap2_index
-/// >>> make_minimap2_index("genome.fa", "genome.mmi", preset="map-ont")
-/// >>> # For RNA-seq
-/// >>> make_minimap2_index("transcriptome.fa", "transcriptome.mmi", preset="splice")
-///
-/// See Also
-/// --------
-/// aligners.MINIMAP2 : The aligner class that uses these indices
-/// make_bwa_index : Create BWA-MEM2 index for short reads
+/// `preset` selects the minimap2 read or alignment model. See the Python API
+/// documentation for the list of supported presets.
 #[pyfunction]
 #[pyo3(
     signature = (fasta, output_index, *, preset="map-ont"),
@@ -135,23 +70,18 @@ pub fn make_minibwa_index(
 )]
 pub fn make_minimap2_index(fasta: PathBuf, output_index: PathBuf, preset: &str) -> Result<()> {
     let preset = match preset.to_lowercase().as_str() {
-        // Long Reads DNA Mapping
         "map-ont" => minimap2::Preset::MapOnt,
         "map-pb" => minimap2::Preset::MapPb,
         "map-hifi" => minimap2::Preset::MapHifi,
         "lr:hq" => minimap2::Preset::LrHq,
-        // Spliced / RNA-seq Alignment
         "splice" => minimap2::Preset::Splice,
         "splice:hq" => minimap2::Preset::SpliceHq,
         "splice:sr" => minimap2::Preset::SpliceSr,
-        // Long Assembly to Reference Mapping
         "asm5" => minimap2::Preset::Asm5,
         "asm10" => minimap2::Preset::Asm10,
         "asm20" => minimap2::Preset::Asm20,
-        // Short Reads Mapping
         "short" => minimap2::Preset::Short,
         "sr" => minimap2::Preset::Sr,
-        // All-vs-All overlap Mapping
         "ava-pb" => minimap2::Preset::AvaPb,
         "ava-ont" => minimap2::Preset::AvaOnt,
         _ => bail!(
@@ -164,286 +94,472 @@ pub fn make_minimap2_index(fasta: PathBuf, output_index: PathBuf, preset: &str) 
         "Creating minimap2 index for fasta: {:?} with preset: {:?}",
         fasta, preset
     );
-    // Build index from FASTA and save to output
-    // with_index(input, Some(output)) reads FASTA from input and saves .mmi to output
     minimap2::Aligner::builder()
         .preset(preset)
         .with_index(
             fasta.to_str().unwrap(),
             Some(output_index.to_str().unwrap()),
         )
-        .map_err(|e| anyhow::anyhow!("Failed to create minimap2 index: {}", e))?;
-
+        .map_err(|error| anyhow::anyhow!("Failed to create minimap2 index: {}", error))?;
     Ok(())
 }
 
-/// Align fastq reads to the reference genome and generate unique fragments.
+/// A reusable configuration for reading and annotating assay FASTQs.
 ///
-/// Parameters
-/// ----------
+/// Use this builder to configure the input assay, modality, barcode correction,
+/// and optional middleware before attaching an aligner with
+/// [`FastqPipeline::align_with`]. The constructor does not open FASTQ files.
+/// Processing starts only when a terminal method on the returned
+/// [`AlignmentJob`] is called.
 ///
-/// assay: Assay | Path | list[Assay | Path]
-///     An Assay object or file path to the yaml sequencing specification file, see
-///     https://github.com/pachterlab/seqspec. The assay can also be a list of
-///     Assay objects or file paths. In this case, the results will be
-///     concatenated into a single output file.
-/// aligner: STAR | BWAMEM2 | MINIBWA | MINIMAP2
-///     The aligner to use for the alignment. Available aligners can be found at
-///     `precellar.aligners` submodule.
-/// output: Path
-///     File path to the output file. The type of the output file is determined by the `output_type` parameter (see below).
-/// modality: str | None
-///     The modality of the sequencing data, e.g., "rna" or "atac".
-/// output_type: Literal["alignment", "fragment", "gene_quantification"]
-///     The type of the output file. If "alignment", the output will be a BAM file containing the alignments.
-///     If "fragment", the output will be a fragment file containing the unique fragments.
-///     If "gene_quantification", the output will be a h5ad file containing the gene quantification.
-/// mito_dna: list[str]
-///     List of mitochondrial DNA names.
-/// shift_left: int
-///     The number of bases to shift the left end of the fragment.
-///     For example, in ATAC-seq, this is usually set to 4 to account for the Tn5 transposase insertion bias.
-///     Available only when `output_type='fragment'`.
-/// shift_right: int
-///     The number of bases to shift the right end of the fragment.
-///     For example, in ATAC-seq, this is usually set to -5 to account for the Tn5 transposase insertion bias.
-///     Available only when `output_type='fragment'`.
-/// compute_snv: bool
-///     Whether to compute single nucleotide variants (SNVs) from the alignments.
-///     If True, the SNVs will be computed and added to the fragment file.
-/// strandedness: Literal['forward', 'reverse', 'unstranded', 'auto'] | None
-///     The strand specificity of the assay. Can be "forward", "reverse", "unstranded", "auto".
-///     "forward" means that the read 1 is expected to be aligned to the same strand as the original RNA molecule.
-///     For example, in 10x Genomics 3' scRNA-seq, the read 1 is aligned to the reverse strand of the original RNA molecule,
-///     so the strandedness should be set to "reverse".
-///     If "auto", the strand specificity will be inferred from the data. Note that automatic
-///     inference may not always be accurate, especially for in the samples where the
-///     antisense transcription is prevalent, e.g., brain samples.
-/// compression: str | None
-///     The compression algorithm to use for the output fragment file.
-///     If None, the compression algorithm will be inferred from the file extension.
-/// compression_level: int | None
-///     The compression level to use for the output fragment file.
-/// temp_dir: Path | None
-///     The temporary directory to use.
-/// num_threads: int
-///     The number of threads to use.
-/// chunk_size: int
-///     This parameter is used to control the number of bases processed in each chunk per thread.
-///     The total number of bases in each chunk is determined by: chunk_size * num_threads.
-/// middleware: precellar.middleware.tfseq.FloatingBarcodeFinder | None
-///     Optional Rust-backed FASTQ middleware applied before alignment.
-///
-/// Returns
-/// -------
-/// dict
-///    A dictionary containing the QC metrics of the alignment and fragment generation.
-///
-/// See Also
-/// --------
-/// aligners.BWAMEM2
-/// aligners.MINIBWA
-/// aligners.STAR
-/// aligners.MINIMAP2
-#[pyfunction]
-#[pyo3(
-    signature = (
-        assay, aligner, *,
-        output, modality=None, output_type="alignment",
-        mito_dna=vec!["chrM".to_owned(), "M".to_owned()],
-        shift_left=4, shift_right=-5, compute_snv=false,
-        strandedness=None,
-        compression=None, compression_level=None,
-        temp_dir=None, num_threads=8, chunk_size=10000000, middleware=None,
-    ),
-    text_signature = "(assay, aligner, *,
-        output, modality=None, output_type='alignment',
-        mito_dna=['chrM', 'M'],
-        shift_left=4, shift_right=-5, compute_snv=False,
-        strandedness=None,
-         compression=None, compression_level=None,
-         temp_dir=None, num_threads=8, chunk_size=10000000, middleware=None)"
-)]
-pub fn align<'py>(
-    py: Python<'py>,
-    assay: Bound<'py, PyAny>,
-    aligner: Bound<'py, PyAny>,
-    output: PathBuf,
-    modality: Option<&str>,
-    output_type: &str,
-    mito_dna: Vec<String>,
-    shift_left: i64,
-    shift_right: i64,
-    compute_snv: bool,
-    strandedness: Option<&str>,
-    compression: Option<&str>,
-    compression_level: Option<u32>,
-    temp_dir: Option<PathBuf>,
-    num_threads: u16,
-    chunk_size: usize,
-    middleware: Option<Bound<'py, PyAny>>,
-) -> Result<Bound<'py, PyAny>> {
-    let assay = extract_assays(assay)?;
+/// Anti-Patterns
+/// -------------
+/// - Do not pass an aligner to the constructor. Attach it with `align_with`.
+/// - Do not put fragment-only options such as `shift_left` here. Pass them to
+///   `precellar.sinks.FragmentsSink`.
+/// - Do not expect this object to execute a workflow by itself. Select one
+///   terminal output after calling `align_with`.
+#[pyclass]
+pub struct FastqPipeline {
+    assays: Vec<seqspec::Assay>,
+    modality: Modality,
+    barcode_config: BarcodeCorrectionConfig,
+    middleware: Option<Py<PyAny>>,
+}
 
-    let modality = match modality {
-        Some(m) => Modality::from_str(m),
-        None => {
-            let m = assay[0].modality()?;
-            info!("Using default modality: {}", m);
-            Ok(m)
+#[pymethods]
+impl FastqPipeline {
+    /// Create a lazy FASTQ pipeline from an assay object, assay path, or list.
+    ///
+    /// Parameters
+    /// ----------
+    /// assay : precellar.Assay | pathlib.Path | str | list
+    ///     A seqspec assay object, a path to a seqspec file, or a list of
+    ///     assays. Assays are processed in the supplied order.
+    /// modality : str, optional
+    ///     Modality to annotate, such as `"rna"` or `"atac"`. If omitted,
+    ///     use the modality declared by the first assay.
+    ///
+    /// Returns
+    /// -------
+    /// FastqPipeline
+    ///     A lazy configuration object that can be further configured.
+    ///
+    /// Raises
+    /// ------
+    /// ValueError
+    ///     If the assay list is empty or the modality is invalid.
+    ///
+    /// Examples
+    /// --------
+    /// The following complete script creates a pipeline and selects the
+    /// modality explicitly before attaching an aligner:
+    ///
+    ///     import precellar
+    ///
+    ///     assay = precellar.Assay("assay.yaml")
+    ///     assay.update_read("R1", fastq="R1.fastq.gz")
+    ///     assay.update_read("R2", fastq="R2.fastq.gz")
+    ///     pipeline = precellar.FastqPipeline(assay, modality="atac")
+    ///     job = pipeline.align_with(
+    ///         precellar.aligners.BwaMem2("/references/GRCh38"),
+    ///         num_threads=4,
+    ///     )
+    ///     report = job.run_sink(precellar.sinks.BamSink("aligned.bam"))
+    #[new]
+    #[pyo3(signature = (assay, *, modality=None))]
+    pub fn new(assay: Bound<'_, PyAny>, modality: Option<&str>) -> Result<Self> {
+        let assays = extract_assays(assay)?;
+        if assays.is_empty() {
+            bail!("assay must contain at least one assay");
         }
-    }?;
+        let modality = match modality {
+            Some(modality) => Modality::from_str(modality)?,
+            None => {
+                let modality = assays[0].modality()?;
+                log::info!("Using default modality: {}", modality);
+                modality
+            }
+        };
+        Ok(Self {
+            assays,
+            modality,
+            barcode_config: BarcodeCorrectionConfig {
+                confidence_threshold: 0.9,
+                max_mismatch: 1,
+            },
+            middleware: None,
+        })
+    }
 
-    let mut aligner = AlignerRef::try_from(aligner)?;
-    let header = aligner.header();
-    let strandedness = if let Some(s) = strandedness {
-        match s.to_lowercase().as_str() {
-            "forward" => Some(ChemistryStrandedness::Forward),
-            "reverse" => Some(ChemistryStrandedness::Reverse),
-            "unstranded" => Some(ChemistryStrandedness::Unstranded),
-            "auto" => None,
-            _ => panic!("strandedness must be 'unstranded', 'forward', 'reverse' or 'auto'"),
+    /// Configure standard barcode correction for FASTQ annotation.
+    ///
+    /// Parameters
+    /// ----------
+    /// confidence_threshold : float, keyword-only, default=0.9
+    ///     Minimum confidence required to accept a barcode correction.
+    /// max_mismatch : int, keyword-only, default=1
+    ///     Maximum number of barcode mismatches considered during correction.
+    ///
+    /// Returns
+    /// -------
+    /// FastqPipeline
+    ///     The same pipeline object, allowing method chaining.
+    ///
+    /// Raises
+    /// ------
+    /// ValueError
+    ///     If `confidence_threshold` is not finite or is outside `[0, 1]`.
+    ///
+    /// Anti-Patterns
+    /// -------------
+    /// - Do not use this method to configure TFseq floating barcodes. Use
+    ///   `with_middleware` for floating-barcode extraction.
+    ///
+    /// Examples
+    /// --------
+    ///     import precellar
+    ///
+    ///     assay = precellar.Assay("assay.yaml")
+    ///     assay.update_read("R1", fastq="R1.fastq.gz")
+    ///     assay.update_read("R2", fastq="R2.fastq.gz")
+    ///     job = (
+    ///         precellar.FastqPipeline(assay, modality="rna")
+    ///         .with_barcode_correction(
+    ///             confidence_threshold=0.95,
+    ///             max_mismatch=1,
+    ///         )
+    ///         .align_with(precellar.aligners.Star("/references/STAR"))
+    ///     )
+    ///     report = job.run_sink(
+    ///         precellar.sinks.GeneQuantificationSink(
+    ///             "matrix.h5ad", strandedness="reverse"
+    ///         )
+    ///     )
+    #[pyo3(signature = (*, confidence_threshold=0.9, max_mismatch=1))]
+    pub fn with_barcode_correction<'py>(
+        mut slf: PyRefMut<'py, Self>,
+        confidence_threshold: f64,
+        max_mismatch: usize,
+    ) -> Result<PyRefMut<'py, Self>> {
+        if !confidence_threshold.is_finite() || !(0.0..=1.0).contains(&confidence_threshold) {
+            bail!("confidence_threshold must be finite and between zero and one");
         }
-    } else {
-        if assay[0].chemistry_strandedness.is_some() {
-            assay[0].chemistry_strandedness
-        } else if modality == Modality::RNA {
-            panic!("strandedness must be provided if not specified in the assay. Possible values are 'unstranded', 'forward', 'reverse' or 'auto'")
-        } else {
-            None
-        }
-    };
+        slf.barcode_config = BarcodeCorrectionConfig {
+            confidence_threshold,
+            max_mismatch,
+        };
+        Ok(slf)
+    }
 
-    let transcript_annotator = aligner.transcript_annotator(strandedness);
-    let barcode_config = BarcodeCorrectionConfig {
-        confidence_threshold: 0.9,
-        max_mismatch: 1,
-    };
-    let mut plan = FastqPlan::new(assay, modality).with_barcode_config(barcode_config);
-    if let Some(middleware) = middleware {
-        let middleware = middleware
-            .extract::<PyRef<'_, crate::middleware::FloatingBarcodeFinder>>()
+    /// Add Rust-backed TFseq floating-barcode middleware.
+    ///
+    /// Parameters
+    /// ----------
+    /// middleware : precellar.middleware.tfseq.FloatingBarcodeStage
+    ///     Middleware configured with floating-barcode templates and a barcode
+    ///     table.
+    ///
+    /// Returns
+    /// -------
+    /// FastqPipeline
+    ///     The same pipeline object, allowing method chaining.
+    ///
+    /// Raises
+    /// ------
+    /// TypeError
+    ///     If `middleware` is not a `FloatingBarcodeStage`.
+    ///
+    /// Anti-Patterns
+    /// -------------
+    /// - Do not pass a generic Python callable. Middleware must be the Rust
+    ///   `FloatingBarcodeStage` object.
+    /// - Do not call a terminal output method on the middleware object. Attach
+    ///   it here, then terminate the returned alignment job.
+    ///
+    /// Examples
+    /// --------
+    ///     import precellar
+    ///
+    ///     assay = precellar.Assay("assay.yaml")
+    ///     assay.update_read("R1", fastq="R1.fastq.gz")
+    ///     assay.update_read("R2", fastq="R2.fastq.gz")
+    ///     floating = precellar.middleware.tfseq.FloatingBarcodeStage(
+    ///         output="floating.tsv.gz",
+    ///         barcode_table="barcodes.tsv",
+    ///         flanks=["ACGT", "TGCA", "GACT"],
+    ///         expected_lens=[8, 8],
+    ///     )
+    ///     job = (
+    ///         precellar.FastqPipeline(assay, modality="rna")
+    ///         .with_middleware(floating)
+    ///         .align_with(precellar.aligners.Star("/references/STAR"))
+    ///     )
+    ///     report = job.run_sink(
+    ///         precellar.sinks.GeneQuantificationSink(
+    ///             "matrix.h5ad", strandedness="reverse"
+    ///         )
+    ///     )
+    pub fn with_middleware<'py>(
+        mut slf: PyRefMut<'py, Self>,
+        middleware: Bound<'py, PyAny>,
+    ) -> Result<PyRefMut<'py, Self>> {
+        middleware
+            .extract::<PyRef<'_, crate::middleware::FloatingBarcodeStage>>()
             .map_err(|_| {
                 anyhow::anyhow!(
-                    "middleware must be a precellar.middleware.tfseq.FloatingBarcodeFinder"
+                    "middleware must be a precellar.middleware.tfseq.FloatingBarcodeStage"
                 )
             })?;
-        plan = middleware.configure_plan(plan, num_threads as usize)?;
+        slf.middleware = Some(middleware.unbind());
+        Ok(slf)
     }
 
-    let mut qc_metrics = serde_json::Map::new();
-
-    let execution = plan.build(true, num_threads as usize * chunk_size)?;
-    info!(
-        "Aligning {} reads to reference genome ...",
-        execution.read_summary()
-    );
-    let alignments = AlignmentRunner::new(&mut aligner, num_threads)
-        .with_mito_dna(mito_dna.iter().cloned())
-        .stream(execution);
-    let mut alignments = AlignProgressBar::new(alignments);
-
-    match OutputType::try_from(output_type)? {
-        OutputType::Alignment => {
-            write_alignments(py, output, &header, &mut alignments)?;
+    /// Attach an aligner and create a lazy, one-shot alignment job.
+    ///
+    /// Parameters
+    /// ----------
+    /// aligner : precellar.aligners.Star | BwaMem2 | MiniBwa | Minimap2
+    ///     Configured aligner object.
+    /// num_threads : int, keyword-only, default=8
+    ///     Number of threads used for FASTQ processing and alignment.
+    /// chunk_size : int, keyword-only, default=10000000
+    ///     Approximate number of bases per synchronized FASTQ batch per thread.
+    /// mito_dna : list[str], keyword-only, default=["chrM", "M"]
+    ///     Reference names treated as mitochondrial DNA for alignment QC.
+    /// temp_dir : pathlib.Path | str, optional
+    ///     Temporary directory used by fragment and quantification consumers.
+    ///
+    /// Returns
+    /// -------
+    /// AlignmentJob
+    ///     A job that must be consumed by exactly one terminal output method.
+    ///
+    /// Raises
+    /// ------
+    /// ValueError
+    ///     If `num_threads` or `chunk_size` is zero.
+    /// TypeError
+    ///     If the object is not a supported aligner. The check is performed
+    ///     when the terminal operation begins because the job is lazy.
+    ///
+    /// Anti-Patterns
+    /// -------------
+    /// - Do not call `run_sink` twice on the same job. A job is one-shot.
+    /// - Do not pass `shift_left`, `shift_right`, or `strandedness` here. Those
+    ///   options belong to their terminal consumers.
+    ///
+    /// Examples
+    /// --------
+    ///     import precellar
+    ///
+    ///     assay = precellar.Assay("assay.yaml")
+    ///     assay.update_read("R1", fastq="R1.fastq.gz")
+    ///     assay.update_read("R2", fastq="R2.fastq.gz")
+    ///     pipeline = precellar.FastqPipeline(assay, modality="atac")
+    ///     job = pipeline.align_with(
+    ///         precellar.aligners.BwaMem2("/references/GRCh38"),
+    ///         num_threads=8,
+    ///         chunk_size=10_000_000,
+    ///     )
+    ///     report = job.run_sink(
+    ///         precellar.sinks.FragmentsSink("fragments.tsv.gz")
+    ///     )
+    #[pyo3(signature = (
+        aligner, *, num_threads=8, chunk_size=10000000,
+        mito_dna=vec!["chrM".to_owned(), "M".to_owned()], temp_dir=None
+    ))]
+    pub fn align_with(
+        slf: PyRef<'_, Self>,
+        py: Python<'_>,
+        aligner: Bound<'_, PyAny>,
+        num_threads: u16,
+        chunk_size: usize,
+        mito_dna: Vec<String>,
+        temp_dir: Option<PathBuf>,
+    ) -> Result<AlignmentJob> {
+        if num_threads == 0 {
+            bail!("num_threads must be greater than zero");
         }
-        OutputType::Fragment => {
-            let compression = compression
-                .map(|x| Compression::from_str(x).unwrap())
-                .or((&output).try_into().ok());
-
-            let mut writer = create_file(
-                output.clone(),
-                compression,
-                compression_level,
-                num_threads as u32,
-            )?;
-            writeln!(
-                writer,
-                "{}",
-                fragment_file_header(compute_snv, shift_left, shift_right)
-            )?;
-
-            let opts = IntoFragOpts {
-                shift_left,
-                shift_right,
-                temp_dir: temp_dir.clone(),
-                compute_snv,
-                ..Default::default()
-            };
-
-            let mut frag_qc = QcFragment::default();
-            mito_dna.iter().for_each(|x| {
-                frag_qc.add_mito_dna(x);
-            });
-            (&mut alignments)
-                .into_fragments(&header, opts)
-                .into_iter()
-                .for_each(|fragments| {
-                    py.check_signals().unwrap();
-                    fragments.into_iter().for_each(|frag| {
-                        frag_qc.update(&frag);
-                        writeln!(writer, "{}", frag).unwrap();
-                    })
-                });
-            qc_metrics.insert("fragment".to_owned(), frag_qc.into());
+        if chunk_size == 0 {
+            bail!("chunk_size must be greater than zero");
         }
-        OutputType::GeneQuantification => {
-            let mut quantifier = Quantifier::new(transcript_annotator.unwrap())?;
-            quantifier.num_threads = num_threads as usize;
-            quantifier.temp_dir = temp_dir;
-            let quant_qc = quantifier.quantify(&header, &mut alignments, output.clone())?;
-            qc_metrics.insert("gene_quantification".to_owned(), quant_qc.into());
-        }
-    };
-
-    let report = alignments.finish()?;
-    for middleware in report.fastq.middleware {
-        qc_metrics.insert(middleware.name, middleware.metrics);
+        Ok(AlignmentJob {
+            state: Some(AlignmentJobState {
+                assays: slf.assays.clone(),
+                modality: slf.modality,
+                barcode_config: slf.barcode_config.clone(),
+                middleware: slf
+                    .middleware
+                    .as_ref()
+                    .map(|middleware| middleware.clone_ref(py)),
+                aligner: aligner.unbind(),
+                num_threads,
+                chunk_size,
+                mito_dna,
+                temp_dir,
+            }),
+        })
     }
-
-    qc_metrics.insert("fastq".to_owned(), report.fastq.fastq.to_json());
-    qc_metrics.insert("alignment".to_owned(), report.alignment.to_json());
-
-    Ok(value_into_pyobject(qc_metrics.into(), py))
 }
 
-fn fragment_file_header(compute_snv: bool, shift_left: i64, shift_right: i64) -> String {
-    let header = if compute_snv {
-        "# chromosome\tstart\tend\tbarcode\tcount\tstrand\talignment1_start\talignment1_snv\talignment2_start\talignment2_snv"
-    } else {
-        "# chromosome\tstart\tend\tbarcode\tcount\tstrand"
-    };
-    [
-        &format!(
-            "# This file contains unique fragments generated using precellar-v{}",
-            env!("CARGO_PKG_VERSION")
-        ),
-        "#",
-        "# Parameters",
-        &format!("# shift_left = {}", shift_left),
-        &format!("# shift_right = {}", shift_right),
-        "#",
-        "# Each line represents a unique fragment with the following fields:",
-        header,
-    ]
-    .join("\n")
+/// A lazy, one-shot alignment workflow.
+///
+/// Call [`AlignmentJob::run_sink`] with one sink from `precellar.sinks` to
+/// execute the workflow. The active core stream is created only after a sink
+/// is selected.
+///
+/// Anti-Patterns
+/// -------------
+/// - Do not reuse a job after a terminal method returns. Create another job
+///   from the `FastqPipeline` when a second output is required.
+/// - Do not expect `run_sink` to return alignment records. It returns a QC
+///   dictionary after the selected sink consumes the output.
+#[pyclass]
+pub struct AlignmentJob {
+    state: Option<AlignmentJobState>,
 }
 
-struct AlignProgressBar<'a, A> {
+struct AlignmentJobState {
+    assays: Vec<seqspec::Assay>,
+    modality: Modality,
+    barcode_config: BarcodeCorrectionConfig,
+    middleware: Option<Py<PyAny>>,
+    aligner: Py<PyAny>,
+    num_threads: u16,
+    chunk_size: usize,
+    mito_dna: Vec<String>,
+    temp_dir: Option<PathBuf>,
+}
+
+#[pymethods]
+impl AlignmentJob {
+    /// Run one configured output sink and return the complete QC report.
+    ///
+    /// Parameters
+    /// ----------
+    /// sink : precellar.sinks.BamSink | precellar.sinks.FragmentsSink | precellar.sinks.GeneQuantificationSink
+    ///     Configured output sink.
+    ///
+    /// Returns
+    /// -------
+    /// dict
+    ///     QC sections for FASTQ annotation, alignment, and the selected sink.
+    ///
+    /// Raises
+    /// ------
+    /// RuntimeError
+    ///     If the job has already been consumed.
+    /// TypeError
+    ///     If `sink` is not a supported sink type.
+    ///
+    /// Anti-Patterns
+    /// -------------
+    /// - Do not pass an output path directly. Configure it on the sink.
+    /// - Do not call `run_sink` twice on the same job.
+    ///
+    /// Examples
+    /// --------
+    ///     import precellar
+    ///
+    ///     assay = precellar.Assay("assay.yaml")
+    ///     assay.update_read("R1", fastq="R1.fastq.gz")
+    ///     assay.update_read("R2", fastq="R2.fastq.gz")
+    ///     job = precellar.FastqPipeline(assay, modality="rna").align_with(
+    ///         precellar.aligners.Star("/references/STAR")
+    ///     )
+    ///     report = job.run_sink(
+    ///         precellar.sinks.BamSink("aligned.bam")
+    ///     )
+    pub fn run_sink<'py>(&mut self, py: Python<'py>, sink: Bound<'py, PyAny>) -> Result<Py<PyAny>> {
+        if let Ok(sink) = sink.extract::<PyRef<'_, BamSink>>() {
+            return self.take_state()?.run_sink(py, &*sink);
+        }
+        if let Ok(sink) = sink.extract::<PyRef<'_, FragmentsSink>>() {
+            return self.take_state()?.run_sink(py, &*sink);
+        }
+        if let Ok(sink) = sink.extract::<PyRef<'_, GeneQuantificationSink>>() {
+            return self.take_state()?.run_sink(py, &*sink);
+        }
+        Err(pyo3::exceptions::PyTypeError::new_err(
+            "sink must be precellar.sinks.BamSink, precellar.sinks.FragmentsSink, or precellar.sinks.GeneQuantificationSink",
+        )
+        .into())
+    }
+}
+
+impl AlignmentJob {
+    fn take_state(&mut self) -> Result<AlignmentJobState> {
+        self.state
+            .take()
+            .ok_or_else(|| anyhow::anyhow!("this alignment job has already been consumed"))
+    }
+}
+
+impl AlignmentJobState {
+    fn run_sink<'py, S: AlignmentSink>(self, py: Python<'py>, sink: &S) -> Result<Py<PyAny>> {
+        let strandedness = sink.strandedness(&self.assays, self.modality)?;
+        let mut aligner = AlignerRef::try_from(self.aligner.bind(py).clone())?;
+        let header = aligner.header();
+        let transcript_annotator = if sink.needs_transcriptome() {
+            aligner.transcript_annotator(strandedness)
+        } else {
+            None
+        };
+
+        let mut plan =
+            FastqPlan::new(self.assays, self.modality).with_barcode_config(self.barcode_config);
+        if let Some(middleware) = self.middleware {
+            let middleware = middleware
+                .bind(py)
+                .extract::<PyRef<'_, crate::middleware::FloatingBarcodeStage>>()
+                .map_err(|_| {
+                    anyhow::anyhow!(
+                        "middleware must be a precellar.middleware.tfseq.FloatingBarcodeStage"
+                    )
+                })?;
+            plan = middleware.configure_plan(plan, self.num_threads as usize)?;
+        }
+
+        let execution = plan.build(true, self.num_threads as usize * self.chunk_size)?;
+        log::info!(
+            "Aligning {} reads to reference genome ...",
+            execution.read_summary()
+        );
+        let alignments = AlignmentRunner::new(&mut aligner, self.num_threads)
+            .with_mito_dna(self.mito_dna.iter().cloned())
+            .stream(execution);
+        let mut alignments = AlignProgressBar::new(alignments);
+        let mut context = AlignmentContext {
+            num_threads: self.num_threads,
+            mito_dna: self.mito_dna,
+            temp_dir: self.temp_dir,
+            transcript_annotator,
+        };
+        let output_qc = sink.consume(py, &header, &mut alignments, &mut context)?;
+        let report = alignments.finish()?;
+        let report = assemble_report(
+            report,
+            output_qc.map(|report| (report.name, report.metrics)),
+        );
+        Ok(value_into_pyobject(report, py).unbind())
+    }
+}
+
+pub(crate) struct AlignProgressBar<'a, A> {
     pb: ProgressBar,
     alignments: AlignmentResult<'a, A>,
 }
 
 impl<'a, A> AlignProgressBar<'a, A> {
-    fn new(alignments: AlignmentResult<'a, A>) -> AlignProgressBar<'a, A> {
+    fn new(alignments: AlignmentResult<'a, A>) -> Self {
         let pb = ProgressBar::new(alignments.num_records() as u64);
-        let sty = ProgressStyle::with_template(
+        let style = ProgressStyle::with_template(
             "{percent}%|{wide_bar:.cyan/blue}| {human_pos:>}/{human_len:} [{elapsed}<{eta}, {per_sec}]",
         )
         .unwrap();
-        pb.set_style(sty);
-        AlignProgressBar {
+        pb.set_style(style);
+        Self {
             pb: pb.with_finish(ProgressFinish::Abandon),
             alignments,
         }
@@ -464,72 +580,55 @@ impl<A: Aligner> Iterator for AlignProgressBar<'_, A> {
     }
 }
 
+fn assemble_report(
+    report: precellar::align::RunReport,
+    output_qc: Option<(String, Value)>,
+) -> Value {
+    let mut qc_metrics = Map::new();
+    if let Some((name, metrics)) = output_qc {
+        qc_metrics.insert(name, metrics);
+    }
+    for middleware in report.fastq.middleware {
+        qc_metrics.insert(middleware.name, middleware.metrics);
+    }
+    qc_metrics.insert("fastq".to_owned(), report.fastq.fastq.to_json());
+    qc_metrics.insert("alignment".to_owned(), report.alignment.to_json());
+    Value::Object(qc_metrics)
+}
+
 fn value_into_pyobject<'py>(val: Value, py: Python<'py>) -> Bound<'py, PyAny> {
     match val {
         Value::Null => py.None().into_bound(py),
-        Value::Bool(b) => pyo3::types::PyBool::new(py, b)
+        Value::Bool(value) => pyo3::types::PyBool::new(py, value)
             .into_pyobject(py)
             .unwrap()
             .into_bound()
             .into_any(),
-        Value::Number(num) => {
-            if let Some(n) = num.as_i64() {
-                n.into_pyobject(py).unwrap().into_any()
-            } else if let Some(n) = num.as_u64() {
-                n.into_pyobject(py).unwrap().into_any()
-            } else if let Some(n) = num.as_f64() {
-                pyo3::types::PyFloat::new(py, n)
-                    .into_pyobject(py)
-                    .unwrap()
-                    .into_any()
+        Value::Number(number) => {
+            if let Some(value) = number.as_i64() {
+                value.into_pyobject(py).unwrap().into_any()
+            } else if let Some(value) = number.as_u64() {
+                value.into_pyobject(py).unwrap().into_any()
+            } else if let Some(value) = number.as_f64() {
+                value.into_pyobject(py).unwrap().into_any()
             } else {
                 panic!("invalid number type")
             }
         }
-        Value::String(s) => pyo3::types::PyString::new(py, &s)
-            .into_pyobject(py)
-            .unwrap()
-            .into_any(),
-        Value::Array(vec) => {
+        Value::String(value) => value.into_pyobject(py).unwrap().into_any(),
+        Value::Array(values) => {
             let list = pyo3::types::PyList::empty(py);
-            for v in vec {
-                list.append(value_into_pyobject(v, py)).unwrap();
+            for value in values {
+                list.append(value_into_pyobject(value, py)).unwrap();
             }
-            list.into_pyobject(py).unwrap().into_any()
+            list.into_any()
         }
-        Value::Object(map) => {
+        Value::Object(values) => {
             let dict = PyDict::new(py);
-            for (key, value) in map {
+            for (key, value) in values {
                 dict.set_item(key, value_into_pyobject(value, py)).unwrap();
             }
-            dict.into_pyobject(py).unwrap().into_any()
+            dict.into_any()
         }
     }
-}
-
-#[inline]
-fn write_alignments<'a>(
-    py: Python<'a>,
-    output: PathBuf,
-    header: &'a sam::Header,
-    alignments: impl Iterator<Item = Vec<(Option<MultiMapR>, Option<MultiMapR>)>> + 'a,
-) -> Result<()> {
-    let mut writer = noodles::bam::io::writer::Builder::default().build_from_path(output)?;
-    writer.write_header(&header)?;
-
-    alignments.for_each(move |data| {
-        py.check_signals().unwrap();
-        data.iter().for_each(|(a, b)| {
-            a.as_ref().map(|x| {
-                x.iter()
-                    .for_each(|x| writer.write_alignment_record(&header, x).unwrap())
-            });
-            b.as_ref().map(|x| {
-                x.iter()
-                    .for_each(|x| writer.write_alignment_record(&header, x).unwrap())
-            });
-        });
-    });
-
-    Ok(())
 }

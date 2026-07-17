@@ -26,13 +26,17 @@ pip install 'git+https://github.com/regulatory-genomics/precellar.git'
 
 ## Examples
 
+Alignment uses the chainable `FastqPipeline -> AlignmentJob -> terminal output`
+API. See [Alignment Pipeline API](docs/alignment_pipeline.md) for complete
+configuration, middleware, output, QC, and migration documentation.
+
 Each example dataset below contains approximately 2.5 million fastq records.
 
 > [!NOTE]
 > You need to **change the paths to the reference genome** in the examples below.
 > The reference genome should be downloaded and indexed before running the examples.
 > STAR genome index for human and mouse can be downloaded from [here](https://www.10xgenomics.com/support/software/cell-ranger/downloads#reference-downloads).
-> BWA-MEM2 and MiniBWA genome indexes can be built using the `make_bwa_index` and `make_minibwa_index` functions.
+> BWA-MEM2 and MiniBWA genome indexes can be built using the `make_bwa_mem2_index` and `make_minibwa_index` functions.
 
 ### Gene Expression
 
@@ -49,12 +53,13 @@ assay.add_illumina_reads('rna')
 assay.update_read('rna-R1', fastq=data['R1'])
 assay.update_read('rna-R2', fastq=data['R2'])
 
-rna_qc = precellar.align(
-    assay,
-    precellar.aligners.STAR("STAR_reference/refdata-gex-GRCm39-2024-A"), 
-    output="gene_matrix.h5ad",
-    output_type="gene_quantification",
-    num_threads=8,
+rna_qc = (
+    precellar.FastqPipeline(assay)
+    .align_with(
+        precellar.aligners.Star("STAR_reference/refdata-gex-GRCm39-2024-A"),
+        num_threads=8,
+    )
+    .run_sink(precellar.sinks.GeneQuantificationSink("gene_matrix.h5ad"))
 )
 print(rna_qc)
 ```
@@ -74,13 +79,13 @@ data = precellar.examples.sci_rna_seq3()
 assay.update_read('R1', fastq=data['R1'])
 assay.update_read('R2', fastq=data['R2'])
 
-rna_qc = precellar.align(
-    assay,
-    precellar.aligners.STAR("STAR_reference/refdata-gex-GRCm39-2024-A"), 
-    modality="rna",
-    output="gene_matrix.h5ad",
-    output_type="gene_quantification",
-    num_threads=8,
+rna_qc = (
+    precellar.FastqPipeline(assay, modality="rna")
+    .align_with(
+        precellar.aligners.Star("STAR_reference/refdata-gex-GRCm39-2024-A"),
+        num_threads=8,
+    )
+    .run_sink(precellar.sinks.GeneQuantificationSink("gene_matrix.h5ad"))
 )
 print(rna_qc)
 ```
@@ -101,13 +106,13 @@ assay.add_illumina_reads(modality='rna')
 assay.update_read('rna-R1', fastq=data['R1'])
 assay.update_read('rna-R2', fastq=data['R2'])
 
-rna_qc = precellar.align(
-    assay,
-    precellar.aligners.STAR("STAR_reference/refdata-gex-GRCm39-2024-A"), 
-    modality="rna",
-    output="gene_matrix.h5ad",
-    output_type="gene_quantification",
-    num_threads=8,
+rna_qc = (
+    precellar.FastqPipeline(assay, modality="rna")
+    .align_with(
+        precellar.aligners.Star("STAR_reference/refdata-gex-GRCm39-2024-A"),
+        num_threads=8,
+    )
+    .run_sink(precellar.sinks.GeneQuantificationSink("gene_matrix.h5ad"))
 )
 print(rna_qc)
 ```
@@ -126,13 +131,13 @@ data = precellar.examples.dnbelabc4_rna_v1()
 assay.update_read('R1', fastq=data['R1'])
 assay.update_read('R2', fastq=data['R2'])
 
-rna_qc = precellar.align(
-    assay,
-    precellar.aligners.STAR("STAR_reference/refdata-gex-GRCh38-2024-A"), 
-    modality="rna",
-    output="gene_matrix.h5ad",
-    output_type="gene_quantification",
-    num_threads=8,
+rna_qc = (
+    precellar.FastqPipeline(assay, modality="rna")
+    .align_with(
+        precellar.aligners.Star("STAR_reference/refdata-gex-GRCh38-2024-A"),
+        num_threads=8,
+    )
+    .run_sink(precellar.sinks.GeneQuantificationSink("gene_matrix.h5ad"))
 )
 print(rna_qc)
 ```
@@ -154,12 +159,13 @@ assay.add_illumina_reads('atac', forward_strand_workflow=True)
 assay.update_read('atac-I2', fastq=data['I2'])
 assay.update_read('atac-R1', fastq=data['R1'])
 assay.update_read('atac-R2', fastq=data['R2'])
-atac_qc = precellar.align(
-    assay,
-    precellar.aligners.BWAMEM2("/data/Public/BWA_MEM2_index/GRCh38"),
-    output='fragments.tsv.zst',
-    output_type='fragment',
-    num_threads=8,
+atac_qc = (
+    precellar.FastqPipeline(assay)
+    .align_with(
+        precellar.aligners.BwaMem2("/data/Public/BWA_MEM2_index/GRCh38"),
+        num_threads=8,
+    )
+    .run_sink(precellar.sinks.FragmentsSink("fragments.tsv.zst"))
 )
 print(atac_qc)
 ```
@@ -178,12 +184,13 @@ data = precellar.examples.dnbelabc4_atac_v1()
 assay.update_read('R1', fastq=data['R1'])
 assay.update_read('R2', fastq=data['R2'])
 
-qc = precellar.align(
-    assay,
-    precellar.aligners.BWAMEM2("/data/Public/BWA_MEM2_index/GRCh38"),
-    output='fragments.tsv.zst',
-    output_type='fragment',
-    num_threads=8,
+qc = (
+    precellar.FastqPipeline(assay)
+    .align_with(
+        precellar.aligners.BwaMem2("/data/Public/BWA_MEM2_index/GRCh38"),
+        num_threads=8,
+    )
+    .run_sink(precellar.sinks.FragmentsSink("fragments.tsv.zst"))
 )
 print(qc)
 ```
@@ -203,13 +210,13 @@ data = precellar.examples.dsc_atac()
 assay.update_read('R1', fastq=data['R1'])
 assay.update_read('R2', fastq=data['R2'])
 
-atac_qc = precellar.align(
-    assay,
-    precellar.aligners.BWAMEM2("/data/Public/BWA_MEM2_index/GRCm39"),
-    modality="atac",
-    output='fragments.tsv.zst',
-    output_type='fragment',
-    num_threads=8,
+atac_qc = (
+    precellar.FastqPipeline(assay, modality="atac")
+    .align_with(
+        precellar.aligners.BwaMem2("/data/Public/BWA_MEM2_index/GRCm39"),
+        num_threads=8,
+    )
+    .run_sink(precellar.sinks.FragmentsSink("fragments.tsv.zst"))
 )
 print(atac_qc)
 ```
@@ -230,13 +237,13 @@ assay.update_read('I2', fastq=data['I2'])
 assay.update_read('R1', fastq=data['R1'])
 assay.update_read('R2', fastq=data['R2'])
 
-atac_qc = precellar.align(
-    assay,
-    precellar.aligners.BWAMEM2("BWA_MEM2_index/Zea_mays"),
-    modality="atac",
-    output='fragments.tsv.zst',
-    output_type='fragment',
-    num_threads=8,
+atac_qc = (
+    precellar.FastqPipeline(assay, modality="atac")
+    .align_with(
+        precellar.aligners.BwaMem2("BWA_MEM2_index/Zea_mays"),
+        num_threads=8,
+    )
+    .run_sink(precellar.sinks.FragmentsSink("fragments.tsv.zst"))
 )
 print(atac_qc)
 ```
@@ -264,23 +271,23 @@ assay.update_read('atac-I2', fastq=data['atac-I2'])
 assay.update_read('atac-R1', fastq=data['atac-R1'])
 assay.update_read('atac-R2', fastq=data['atac-R2'])
 
-rna_qc = precellar.align(
-    assay,
-    precellar.aligners.STAR("STAR_reference/refdata-gex-GRCm39-2024-A"), 
-    modality="rna",
-    output="gene_matrix.h5ad",
-    output_type="gene_quantification",
-    num_threads=8,
+rna_qc = (
+    precellar.FastqPipeline(assay, modality="rna")
+    .align_with(
+        precellar.aligners.Star("STAR_reference/refdata-gex-GRCm39-2024-A"),
+        num_threads=8,
+    )
+    .run_sink(precellar.sinks.GeneQuantificationSink("gene_matrix.h5ad"))
 )
 print(rna_qc)
 
-atac_qc = precellar.align(
-    assay,
-    precellar.aligners.BWAMEM2("/data/Public/BWA_MEM2_index/GRCm39"),
-    modality="atac",
-    output='fragments.tsv.zst',
-    output_type='fragment',
-    num_threads=8,
+atac_qc = (
+    precellar.FastqPipeline(assay, modality="atac")
+    .align_with(
+        precellar.aligners.BwaMem2("/data/Public/BWA_MEM2_index/GRCm39"),
+        num_threads=8,
+    )
+    .run_sink(precellar.sinks.FragmentsSink("fragments.tsv.zst"))
 )
 print(atac_qc)
 ```
@@ -305,23 +312,23 @@ assay.update_read('atac-I1', fastq=data['atac-I1'])
 assay.update_read('atac-R1', fastq=data['atac-R1'])
 assay.update_read('atac-R2', fastq=data['atac-R2'])
 
-rna_qc = precellar.align(
-    assay,
-    precellar.aligners.STAR("/data/Public/STAR_reference/refdata-gex-GRCh38-2024-A/star/"), 
-    modality="rna",
-    output="gene_matrix.h5ad",
-    output_type="gene_quantification",
-    num_threads=8,
+rna_qc = (
+    precellar.FastqPipeline(assay, modality="rna")
+    .align_with(
+        precellar.aligners.Star("/data/Public/STAR_reference/refdata-gex-GRCh38-2024-A/star/"),
+        num_threads=8,
+    )
+    .run_sink(precellar.sinks.GeneQuantificationSink("gene_matrix.h5ad"))
 )
 print(rna_qc)
 
-atac_qc = precellar.align(
-    assay,
-    precellar.aligners.BWAMEM2("/data/Public/BWA_MEM2_index/GRCh38"),
-    modality="atac",
-    output='fragments.tsv.zst',
-    output_type='fragment',
-    num_threads=8,
+atac_qc = (
+    precellar.FastqPipeline(assay, modality="atac")
+    .align_with(
+        precellar.aligners.BwaMem2("/data/Public/BWA_MEM2_index/GRCh38"),
+        num_threads=8,
+    )
+    .run_sink(precellar.sinks.FragmentsSink("fragments.tsv.zst"))
 )
 print(atac_qc)
 ```
@@ -345,23 +352,23 @@ assay.update_read('atac-I1', fastq=data['atac-I1'])
 assay.update_read('atac-R1', fastq=data['atac-R1'])
 assay.update_read('atac-R2', fastq=data['atac-R2'])
 
-rna_qc = precellar.align(
-    assay,
-    precellar.aligners.STAR("/data/Public/STAR_reference/GRCm39/"), 
-    modality="rna",
-    output="gene_matrix.h5ad",
-    output_type="gene_quantification",
-    num_threads=8,
+rna_qc = (
+    precellar.FastqPipeline(assay, modality="rna")
+    .align_with(
+        precellar.aligners.Star("/data/Public/STAR_reference/GRCm39/"),
+        num_threads=8,
+    )
+    .run_sink(precellar.sinks.GeneQuantificationSink("gene_matrix.h5ad"))
 )
 print(rna_qc)
 
-atac_qc = precellar.align(
-    assay,
-    precellar.aligners.BWAMEM2("/data/Public/BWA_MEM2_index/GRCm39"),
-    modality="atac",
-    output='fragments.tsv.zst',
-    output_type='fragment',
-    num_threads=8,
+atac_qc = (
+    precellar.FastqPipeline(assay, modality="atac")
+    .align_with(
+        precellar.aligners.BwaMem2("/data/Public/BWA_MEM2_index/GRCm39"),
+        num_threads=8,
+    )
+    .run_sink(precellar.sinks.FragmentsSink("fragments.tsv.zst"))
 )
 print(atac_qc)
 ```
@@ -387,23 +394,23 @@ assay.update_read('atac-I2', fastq=data['atac-I2'])
 assay.update_read('atac-R1', fastq=data['atac-R1'])
 assay.update_read('atac-R2', fastq=data['atac-R2'])
 
-rna_qc = precellar.align(
-    assay,
-    precellar.aligners.STAR("STAR_reference/refdata-gex-GRCm39-2024-A"), 
-    modality="rna",
-    output="gene_matrix.h5ad",
-    output_type="gene_quantification",
-    num_threads=8,
+rna_qc = (
+    precellar.FastqPipeline(assay, modality="rna")
+    .align_with(
+        precellar.aligners.Star("STAR_reference/refdata-gex-GRCm39-2024-A"),
+        num_threads=8,
+    )
+    .run_sink(precellar.sinks.GeneQuantificationSink("gene_matrix.h5ad"))
 )
 print(rna_qc)
 
-atac_qc = precellar.align(
-    assay,
-    precellar.aligners.BWAMEM2("/data/Public/BWA_MEM2_index/GRCm39"),
-    modality="atac",
-    output='fragments.tsv.zst',
-    output_type='fragment',
-    num_threads=8,
+atac_qc = (
+    precellar.FastqPipeline(assay, modality="atac")
+    .align_with(
+        precellar.aligners.BwaMem2("/data/Public/BWA_MEM2_index/GRCm39"),
+        num_threads=8,
+    )
+    .run_sink(precellar.sinks.FragmentsSink("fragments.tsv.zst"))
 )
 print(atac_qc)
 ```

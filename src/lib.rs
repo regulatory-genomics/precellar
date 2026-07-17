@@ -3,6 +3,7 @@ mod aligners;
 mod examples;
 mod middleware;
 mod pyseqspec;
+mod sinks;
 mod utils;
 
 use anyhow::Result;
@@ -112,14 +113,16 @@ fn precellar(m: &Bound<'_, PyModule>) -> PyResult<()> {
 
     m.add_class::<pyseqspec::Assay>()?;
 
-    m.add_function(wrap_pyfunction!(align::make_bwa_index, m)?)?;
+    m.add_function(wrap_pyfunction!(align::make_bwa_mem2_index, m)?)?;
     m.add_function(wrap_pyfunction!(align::make_minibwa_index, m)?)?;
     m.add_function(wrap_pyfunction!(align::make_minimap2_index, m)?)?;
-    m.add_function(wrap_pyfunction!(align::align, m)?)?;
+    m.add_class::<align::FastqPipeline>()?;
+    m.add_class::<align::AlignmentJob>()?;
     m.add_function(wrap_pyfunction!(make_fastq, m)?)?;
 
     utils::register_utils(m)?;
     middleware::register_middleware(m)?;
+    sinks::register_sinks(m)?;
     aligners::register_aligners(m)?;
     examples::register_examples(m)?;
 
