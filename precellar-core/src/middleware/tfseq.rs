@@ -3,6 +3,7 @@
 use super::{AnnotatedFastqBatch, FastqStage, MiddlewareQcReport};
 use crate::align::AnnotatedFastq;
 use crate::barcode::{BarcodeCorrectOptions, Whitelist, WhitelistBuilder};
+use crate::utils::get_directional_umi_mapping;
 use crate::utils::insertion_extractor::InsertionExtractor;
 use anyhow::Result;
 use bitcode::{Decode, Encode};
@@ -115,7 +116,7 @@ impl FloatingBarcodeTable {
             entry.barcode_1.make_ascii_uppercase();
             entry.barcode_2.make_ascii_uppercase();
             if !is_dna(&entry.barcode_1) || !is_dna(&entry.barcode_2) {
-                anyhow::bail!("barcode table barcodes must be non-empty DNA sequences");
+                anyhow::bail!("barcode table barcodes contain invalid DNA sequences: {}", String::from_utf8_lossy(&entry.barcode_1));
             }
             if entry.barcode_1.len() != expected_lens[0]
                 || entry.barcode_2.len() != expected_lens[1]
@@ -486,6 +487,15 @@ where
             }
         }
 
+        for umis in matches.values_mut() {
+            let umi_counts = std::mem::take(umis).into_iter().collect::<HashMap<_, _>>();
+            let umi_mapping = get_directional_umi_mapping(&umi_counts);
+            for (umi, count) in umi_counts {
+                let corrected_umi = umi_mapping.get(&umi).unwrap_or(&umi).clone();
+                *umis.entry(corrected_umi).or_default() += count;
+            }
+        }
+
         self.output
             .write_all(b"cell_barcode\tname_1\tname_2\tumi_counts\n")?;
         for (key, umis) in matches {
@@ -654,6 +664,56 @@ mod tests {
         assert_eq!(
             stage.into_output(),
             b"cell_barcode\tname_1\tname_2\tumi_counts\nAAAA\tTF1\tSITE1\t:1\nCCCC\tTF1\tSITE1\tUMI1:1;UMI2:2\n"
+        );
+    }
+
+    #[test]
+    fn corrects_umis_and_preserves_read_counts() {
+        let mut stage = FloatingBarcodeStage::new(
+            true,
+            extractor(),
+            table(),
+            BarcodeCorrectOptions::default(),
+            Vec::new(),
+        )
+        .unwrap();
+        let sequence = full_sequence();
+        stage
+            .process(vec![
+                record_with_metadata(sequence, Some(b"CELL"), Some(b"AAAA")),
+                record_with_metadata(sequence, Some(b"CELL"), Some(b"AAAA")),
+                record_with_metadata(sequence, Some(b"CELL"), Some(b"AAAT")),
+            ])
+            .unwrap();
+        stage.finish().unwrap();
+        assert_eq!(
+            stage.into_output(),
+            b"cell_barcode\tname_1\tname_2\tumi_counts\nCELL\tTF1\tSITE1\tAAAA:3\n"
+        );
+    }
+
+    #[test]
+    fn corrects_umis_within_each_cell_and_barcode_group() {
+        let mut stage = FloatingBarcodeStage::new(
+            true,
+            extractor(),
+            table(),
+            BarcodeCorrectOptions::default(),
+            Vec::new(),
+        )
+        .unwrap();
+        let sequence = full_sequence();
+        stage
+            .process(vec![
+                record_with_metadata(sequence, Some(b"CELL1"), Some(b"AAAT")),
+                record_with_metadata(sequence, Some(b"CELL2"), Some(b"AAAA")),
+                record_with_metadata(sequence, Some(b"CELL2"), Some(b"AAAA")),
+            ])
+            .unwrap();
+        stage.finish().unwrap();
+        assert_eq!(
+            stage.into_output(),
+            b"cell_barcode\tname_1\tname_2\tumi_counts\nCELL1\tTF1\tSITE1\tAAAT:1\nCELL2\tTF1\tSITE1\tAAAA:2\n"
         );
     }
 

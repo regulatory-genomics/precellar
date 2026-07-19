@@ -4,6 +4,7 @@ use bed_utils::bed::{BEDLike, MergeBed};
 use indexmap::IndexMap;
 use itertools::Itertools;
 
+use crate::utils::get_directional_umi_mapping;
 use crate::{fragment::Fragment, transcriptome::TxAlignment};
 
 type GeneIndex = usize;
@@ -119,7 +120,7 @@ impl<'a> GeneCounter<'a> {
                     }
                 });
 
-                let umi_mapping = get_umi_mapping(&aln_with_umi);
+                let umi_mapping = get_directional_umi_mapping(&aln_with_umi);
                 let mut aln_without_umi = Vec::new();
 
                 let mut umi_group = HashMap::new();
@@ -187,47 +188,4 @@ impl<'a> GeneCounter<'a> {
             .iter()
             .flat_map(|(_, umi_group)| umi_group.iter().flat_map(|reads| reads.to_fragments()))
     }
-}
-
-/// Returns a map from each UMI to its corrected UMI by correcting Hamming-distance-one UMIs.
-fn get_umi_mapping(umi_count: &HashMap<Vec<u8>, u64>) -> HashMap<Vec<u8>, Vec<u8>> {
-    let nucs = b"ACGT";
-
-    let mut corrections = HashMap::new();
-
-    for (umi, orig_count) in umi_count {
-        let mut test_umi = umi.clone();
-
-        let mut best_dest_count = *orig_count;
-        let mut best_dest_umi = umi.to_vec();
-
-        for pos in 0..umi.len() {
-            // Try each nucleotide at this position
-            for test_char in nucs {
-                if *test_char == umi[pos] {
-                    // Skip the identitical nucleotide
-                    continue;
-                }
-                test_umi[pos] = *test_char;
-
-                // Test for the existence of this mutated UMI
-                let test_count = *umi_count.get(&test_umi).unwrap_or(&0);
-
-                // If there's a 1-HD UMI w/ greater count, move to that UMI.
-                // If there's a 1-HD UMI w/ equal count, move to the lexicographically larger UMI.
-                if test_count > best_dest_count
-                    || (test_count == best_dest_count && test_umi > best_dest_umi)
-                {
-                    best_dest_umi = test_umi.clone();
-                    best_dest_count = test_count;
-                }
-            }
-            // Reset this position to the unmutated sequence
-            test_umi[pos] = umi[pos];
-        }
-        if *umi != best_dest_umi {
-            corrections.insert(umi.to_vec(), best_dest_umi);
-        }
-    }
-    corrections
 }

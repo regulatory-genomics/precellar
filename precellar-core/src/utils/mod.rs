@@ -1,4 +1,7 @@
 pub mod insertion_extractor;
+mod umi;
+
+pub(crate) use umi::get_directional_umi_mapping;
 
 use std::ops::Range;
 
