@@ -288,7 +288,6 @@ impl FastqPipeline {
     ///         output="floating.tsv.gz",
     ///         barcode_table="barcodes.tsv",
     ///         flanks=["ACGT", "TGCA", "GACT"],
-    ///         expected_lens=[8, 8],
     ///     )
     ///     job = (
     ///         precellar.FastqPipeline(assay, modality="rna")

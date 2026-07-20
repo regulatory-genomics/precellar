@@ -15,7 +15,7 @@
 
 use aho_corasick::{AhoCorasick, AhoCorasickBuilder};
 use anyhow::{bail, Result};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 
 /// Metadata for one k-mer occurrence in a fixed sequence.
@@ -48,7 +48,7 @@ pub struct InsertionExtractor {
     automaton: Option<AhoCorasick>,
     seeds: Vec<Vec<Seed>>,
     flanks: Vec<Vec<u8>>,
-    expected_lens: Vec<usize>,
+    length_profiles: Vec<Vec<usize>>,
     kmer_size: usize,
     max_fixed_edit_rate: f64,
     max_alignment_edits: usize,
@@ -58,26 +58,38 @@ impl InsertionExtractor {
     /// Builds an extractor for an ordered fixed-sequence template.
     ///
     /// `flanks` contains the fixed sequences in template order. There must be
-    /// one entry in `expected_lens` for every gap between adjacent fixed
-    /// sequences. The insertion lengths are exact. Fixed-sequence alignment
-    /// permits substitutions and gaps. The global edit rate is calculated as
-    /// edits divided by observed fixed-sequence bases.
+    /// `length_profiles` contains ordered insertion-length profiles. Every
+    /// profile must contain one exact length for each gap between adjacent
+    /// fixed sequences. Profiles are attempted in order. Fixed-sequence
+    /// alignment permits substitutions and gaps. The global edit rate is
+    /// calculated as edits divided by observed fixed-sequence bases.
     /// Insertions themselves are extracted as contiguous read ranges.
     pub fn new(
         flanks: Vec<String>,
-        expected_lens: Vec<usize>,
+        length_profiles: Vec<Vec<usize>>,
         kmer_size: usize,
         max_fixed_edit_rate: f64,
     ) -> Result<Self> {
         if flanks.len() < 2 {
             bail!("at least two fixed sequences are required");
         }
-        if expected_lens.len() != flanks.len() - 1 {
-            bail!(
-                "expected_lens must contain one length per insertion gap (expected {}, got {})",
-                flanks.len() - 1,
-                expected_lens.len()
-            );
+        if length_profiles.is_empty() {
+            bail!("length_profiles must contain at least one insertion-length profile");
+        }
+        let num_gaps = flanks.len() - 1;
+        let mut unique_profiles = HashSet::new();
+        for (index, profile) in length_profiles.iter().enumerate() {
+            if profile.len() != num_gaps {
+                bail!(
+                    "length profile {} must contain one length per insertion gap (expected {}, got {})",
+                    index + 1,
+                    num_gaps,
+                    profile.len()
+                );
+            }
+            if !unique_profiles.insert(profile) {
+                bail!("length profile {} duplicates an earlier profile", index + 1);
+            }
         }
         if kmer_size == 0 {
             bail!("kmer_size must be greater than zero");
@@ -132,7 +144,7 @@ impl InsertionExtractor {
             automaton,
             seeds: seeds_by_pattern,
             flanks,
-            expected_lens,
+            length_profiles,
             kmer_size,
             max_fixed_edit_rate,
             max_alignment_edits,
@@ -141,12 +153,12 @@ impl InsertionExtractor {
 
     /// Returns the number of insertion gaps in the template.
     pub fn num_gaps(&self) -> usize {
-        self.expected_lens.len()
+        self.flanks.len() - 1
     }
 
-    /// Returns the configured insertion lengths in template order.
-    pub fn expected_lens(&self) -> &[usize] {
-        &self.expected_lens
+    /// Returns the ordered insertion-length profiles.
+    pub fn length_profiles(&self) -> &[Vec<usize>] {
+        &self.length_profiles
     }
 
     /// Extracts all insertion sequences from the first successful template
@@ -170,10 +182,14 @@ impl InsertionExtractor {
         for matched in automaton.find_overlapping_iter(read_seq) {
             let pattern_seeds = self.seeds.get(matched.pattern().as_usize())?;
             for &seed in pattern_seeds {
-                if let Some(placements) = self.extend_from_seed(read_seq, matched, seed) {
-                    let ranges = self.insertion_ranges(read_seq.len(), &placements);
-                    if !ranges.is_empty() {
-                        return Some(ranges);
+                for lengths in &self.length_profiles {
+                    if let Some(placements) =
+                        self.extend_from_seed(read_seq, matched, seed, lengths)
+                    {
+                        let ranges = self.insertion_ranges(read_seq.len(), &placements, lengths);
+                        if !ranges.is_empty() {
+                            return Some(ranges);
+                        }
                     }
                 }
             }
@@ -186,6 +202,7 @@ impl InsertionExtractor {
         read: &[u8],
         matched: aho_corasick::Match,
         seed: Seed,
+        lengths: &[usize],
     ) -> Option<Vec<Placement>> {
         let fixed = self.flanks.get(seed.fixed_index)?;
         let seed_end = matched.end();
@@ -223,8 +240,7 @@ impl InsertionExtractor {
 
         while current.fixed_index > 0 {
             let gap_index = current.fixed_index - 1;
-            let Some(expected_end) = current.start.checked_sub(self.expected_lens[gap_index])
-            else {
+            let Some(expected_end) = current.start.checked_sub(lengths[gap_index]) else {
                 break;
             };
             if expected_end == 0 {
@@ -262,7 +278,7 @@ impl InsertionExtractor {
 
         while current.fixed_index + 1 < self.flanks.len() {
             let gap_index = current.fixed_index;
-            let expected_start = current.end.checked_add(self.expected_lens[gap_index])?;
+            let expected_start = current.end.checked_add(lengths[gap_index])?;
             if expected_start >= read.len() {
                 break;
             }
@@ -336,6 +352,7 @@ impl InsertionExtractor {
         &self,
         read_len: usize,
         placements: &[Placement],
+        lengths: &[usize],
     ) -> Vec<(usize, Range<usize>)> {
         let first = placements.first().expect("seed creates a placement");
         let last = placements.last().expect("seed creates a placement");
@@ -344,8 +361,8 @@ impl InsertionExtractor {
         if first.fixed_index > 0 {
             let index = first.fixed_index - 1;
             let end = first.start;
-            let start = end.saturating_sub(self.expected_lens[index]);
-            if end - start == self.expected_lens[index] && start < end {
+            let start = end.saturating_sub(lengths[index]);
+            if end - start == lengths[index] && start < end {
                 ranges.push((index, start..end));
             }
         }
@@ -353,9 +370,7 @@ impl InsertionExtractor {
         for pair in placements.windows(2) {
             let left = pair[0];
             let right = pair[1];
-            if left.end < right.start
-                && right.start - left.end == self.expected_lens[left.fixed_index]
-            {
+            if left.end < right.start && right.start - left.end == lengths[left.fixed_index] {
                 ranges.push((left.fixed_index, left.end..right.start));
             }
         }
@@ -363,10 +378,8 @@ impl InsertionExtractor {
         if last.fixed_index + 1 < self.flanks.len() {
             let index = last.fixed_index;
             let start = last.end;
-            let end = start
-                .saturating_add(self.expected_lens[index])
-                .min(read_len);
-            if end - start == self.expected_lens[index] && start < end {
+            let end = start.saturating_add(lengths[index]).min(read_len);
+            if end - start == lengths[index] && start < end {
                 ranges.push((index, start..end));
             }
         }
@@ -530,7 +543,7 @@ mod tests {
     fn extractor() -> InsertionExtractor {
         InsertionExtractor::new(
             vec!["ACGTCAGTGGCA".into(), "TTGGAACCTTGG".into()],
-            vec![4],
+            vec![vec![4]],
             12,
             0.1,
         )
@@ -583,7 +596,7 @@ mod tests {
     fn extracts_multiple_insertions() {
         let extractor = InsertionExtractor::new(
             vec!["AAAA".into(), "CCCC".into(), "GGGG".into()],
-            vec![2, 3],
+            vec![vec![2, 3]],
             3,
             0.0,
         )
@@ -595,10 +608,76 @@ mod tests {
     }
 
     #[test]
+    fn extracts_using_multiple_length_profiles() {
+        let extractor = InsertionExtractor::new(
+            vec!["AAAA".into(), "CCCC".into()],
+            vec![vec![2], vec![4]],
+            3,
+            0.0,
+        )
+        .unwrap();
+        assert_eq!(
+            extractor.extract_ranges(b"AAAATTCCCC"),
+            Some(vec![(0, 4..6)])
+        );
+        assert_eq!(
+            extractor.extract_ranges(b"AAAAGGGGCCCC"),
+            Some(vec![(0, 4..8)])
+        );
+    }
+
+    #[test]
+    fn tries_length_profiles_in_configured_order() {
+        let shorter_first = InsertionExtractor::new(
+            vec!["AAAA".into(), "CCCC".into()],
+            vec![vec![2], vec![4]],
+            3,
+            0.0,
+        )
+        .unwrap();
+        let longer_first = InsertionExtractor::new(
+            vec!["AAAA".into(), "CCCC".into()],
+            vec![vec![4], vec![2]],
+            3,
+            0.0,
+        )
+        .unwrap();
+
+        assert_eq!(
+            shorter_first.extract_ranges(b"AAAATTCCCC"),
+            Some(vec![(0, 4..6)])
+        );
+        assert_eq!(
+            longer_first.extract_ranges(b"AAAATTCCCC"),
+            Some(vec![(0, 4..8)])
+        );
+    }
+
+    #[test]
+    fn does_not_mix_lengths_between_profiles() {
+        let extractor = InsertionExtractor::new(
+            vec!["AAAA".into(), "CCCC".into(), "GGGG".into()],
+            vec![vec![2, 3], vec![4, 5]],
+            3,
+            0.0,
+        )
+        .unwrap();
+        assert_eq!(
+            extractor.extract_ranges(b"AAAATTCCCCTTTGGGG"),
+            Some(vec![(0, 4..6), (1, 10..13)])
+        );
+        assert_eq!(
+            extractor.extract_ranges(b"AAAATTTTCCCCAAAAAGGGG"),
+            Some(vec![(0, 4..8), (1, 12..17)])
+        );
+        assert_eq!(extractor.extract_ranges(b"TTTAAAATTCCCCAAAAAGGGGTTT"), None);
+    }
+
+    #[test]
     fn omits_truncated_edge_insertions_but_keeps_full_insertions() {
         let extractor = InsertionExtractor::new(
             vec!["AAAA".into(), "CCCC".into(), "GGGG".into()],
-            vec![2, 3],
+            vec![vec![2, 3]],
             3,
             0.0,
         )
@@ -616,7 +695,8 @@ mod tests {
     #[test]
     fn a_failed_seed_does_not_block_a_later_seed() {
         let extractor =
-            InsertionExtractor::new(vec!["AAAA".into(), "CCCC".into()], vec![2], 3, 0.0).unwrap();
+            InsertionExtractor::new(vec!["AAAA".into(), "CCCC".into()], vec![vec![2]], 3, 0.0)
+                .unwrap();
         assert_eq!(
             extractor.extract_ranges(b"AAATTTAAAATTCCCC"),
             Some(vec![(0, 10..12)])
@@ -627,7 +707,7 @@ mod tests {
     fn missing_template_ends_are_allowed() {
         let extractor = InsertionExtractor::new(
             vec!["AAAA".into(), "CCCC".into(), "GGGG".into()],
-            vec![2, 3],
+            vec![vec![2, 3]],
             3,
             0.0,
         )
@@ -641,7 +721,8 @@ mod tests {
     #[test]
     fn infers_an_insertion_from_one_observed_boundary() {
         let extractor =
-            InsertionExtractor::new(vec!["AAAA".into(), "CCCC".into()], vec![4], 3, 0.0).unwrap();
+            InsertionExtractor::new(vec!["AAAA".into(), "CCCC".into()], vec![vec![4]], 3, 0.0)
+                .unwrap();
         assert_eq!(extractor.extract_ranges(b"AAAAGGGG"), Some(vec![(0, 4..8)]));
         assert_eq!(extractor.extract_ranges(b"GGGGCCCC"), Some(vec![(0, 0..4)]));
     }
@@ -650,7 +731,7 @@ mod tests {
     fn rejects_a_missing_internal_fixed_sequence() {
         let extractor = InsertionExtractor::new(
             vec!["AAAA".into(), "CCCC".into(), "GGGG".into()],
-            vec![2, 2],
+            vec![vec![2, 2]],
             3,
             0.0,
         )
@@ -661,7 +742,8 @@ mod tests {
     #[test]
     fn permits_gaps_in_fixed_sequence_alignment() {
         let extractor =
-            InsertionExtractor::new(vec!["AAAA".into(), "CCCC".into()], vec![2], 3, 0.2).unwrap();
+            InsertionExtractor::new(vec!["AAAA".into(), "CCCC".into()], vec![vec![2]], 3, 0.2)
+                .unwrap();
         assert_eq!(
             extractor.extract_ranges(b"AAAATTCCACC"),
             Some(vec![(0, 4..6)])
@@ -672,7 +754,7 @@ mod tests {
     fn applies_global_edit_rate_across_both_directions() {
         let extractor = InsertionExtractor::new(
             vec!["AAAA".into(), "CCCC".into(), "GGGG".into()],
-            vec![2, 2],
+            vec![vec![2, 2]],
             3,
             0.1,
         )
@@ -686,22 +768,45 @@ mod tests {
 
     #[test]
     fn rejects_invalid_template_configuration() {
-        assert!(InsertionExtractor::new(vec!["AAAA".into()], vec![], 3, 0.0).is_err());
+        assert!(InsertionExtractor::new(vec!["AAAA".into()], vec![vec![]], 3, 0.0).is_err());
         assert!(
             InsertionExtractor::new(vec!["AAAA".into(), "CCCC".into()], vec![], 3, 0.0).is_err()
         );
+        assert!(InsertionExtractor::new(
+            vec!["AAAA".into(), "CCCC".into(), "GGGG".into()],
+            vec![vec![2]],
+            3,
+            0.0
+        )
+        .is_err());
+        assert!(InsertionExtractor::new(
+            vec!["AAAA".into(), "CCCC".into()],
+            vec![vec![2], vec![2]],
+            3,
+            0.0
+        )
+        .is_err());
         assert!(
-            InsertionExtractor::new(vec!["AAAA".into(), "CCCC".into()], vec![2], 5, 0.0).is_err()
-        );
-        assert!(
-            InsertionExtractor::new(vec!["AAAA".into(), "CCCC".into()], vec![2], 3, -0.1).is_err()
-        );
-        assert!(
-            InsertionExtractor::new(vec!["AAAA".into(), "CCCC".into()], vec![2], 3, 1.1).is_err()
-        );
-        assert!(
-            InsertionExtractor::new(vec!["AAAA".into(), "CCCC".into()], vec![2], 3, f64::NAN)
+            InsertionExtractor::new(vec!["AAAA".into(), "CCCC".into()], vec![vec![2]], 5, 0.0)
                 .is_err()
         );
+        assert!(InsertionExtractor::new(
+            vec!["AAAA".into(), "CCCC".into()],
+            vec![vec![2]],
+            3,
+            -0.1
+        )
+        .is_err());
+        assert!(
+            InsertionExtractor::new(vec!["AAAA".into(), "CCCC".into()], vec![vec![2]], 3, 1.1)
+                .is_err()
+        );
+        assert!(InsertionExtractor::new(
+            vec!["AAAA".into(), "CCCC".into()],
+            vec![vec![2]],
+            3,
+            f64::NAN
+        )
+        .is_err());
     }
 }

@@ -78,62 +78,66 @@ enum ProcessedFloatingBarcode {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FloatingBarcodeEntry {
-    pub name_1: Vec<u8>,
-    pub name_2: Vec<u8>,
+    pub name: Vec<u8>,
     pub barcode_1: Vec<u8>,
     pub barcode_2: Vec<u8>,
 }
 
 impl FloatingBarcodeEntry {
-    pub fn new<N1, N2, B1, B2>(name_1: N1, name_2: N2, barcode_1: B1, barcode_2: B2) -> Self
+    pub fn new<N, B1, B2>(name: N, barcode_1: B1, barcode_2: B2) -> Self
     where
-        N1: Into<Vec<u8>>,
-        N2: Into<Vec<u8>>,
+        N: Into<Vec<u8>>,
         B1: Into<Vec<u8>>,
         B2: Into<Vec<u8>>,
     {
         Self {
-            name_1: name_1.into(),
-            name_2: name_2.into(),
+            name: name.into(),
             barcode_1: barcode_1.into(),
             barcode_2: barcode_2.into(),
         }
     }
 }
 
+/// Floating-barcode entries and their inferred insertion-length profiles.
 #[derive(Clone)]
 pub struct FloatingBarcodeTable {
     entries: Vec<FloatingBarcodeEntry>,
-    expected_lens: [usize; 2],
+    length_profiles: Vec<Vec<usize>>,
     barcode_1_rows: HashMap<Vec<u8>, Option<usize>>,
     barcode_2_rows: HashMap<Vec<u8>, Option<usize>>,
     pair_rows: HashMap<Vec<u8>, HashMap<Vec<u8>, usize>>,
 }
 
 impl FloatingBarcodeTable {
-    pub fn new(mut entries: Vec<FloatingBarcodeEntry>, expected_lens: &[usize]) -> Result<Self> {
-        if expected_lens.len() != 2 {
-            anyhow::bail!("barcode tables require exactly two insertion gaps");
-        }
+    /// Builds a table and records each unique barcode-length pair in first-seen order.
+    pub fn new(mut entries: Vec<FloatingBarcodeEntry>) -> Result<Self> {
         if entries.is_empty() {
             anyhow::bail!("barcode_table must contain at least one row");
         }
 
-        let expected_lens = [expected_lens[0], expected_lens[1]];
+        let mut length_profiles = Vec::new();
+        let mut name_rows = HashMap::new();
         let mut barcode_1_rows = HashMap::new();
         let mut barcode_2_rows = HashMap::new();
         let mut pair_rows: HashMap<Vec<u8>, HashMap<Vec<u8>, usize>> = HashMap::new();
         for (index, entry) in entries.iter_mut().enumerate() {
-            if entry.name_1.is_empty() || entry.name_2.is_empty() {
+            if entry.name.is_empty() {
                 anyhow::bail!("barcode table names must not be empty");
             }
             if entry
-                .name_1
+                .name
                 .iter()
-                .chain(&entry.name_2)
                 .any(|byte| matches!(byte, b'\t' | b'\n' | b'\r' | 0..=31))
             {
                 anyhow::bail!("barcode table names must not contain control characters");
+            }
+            if let Some(first_index) = name_rows.insert(entry.name.clone(), index) {
+                anyhow::bail!(
+                    "barcode table row {} has duplicate name '{}' first seen on row {}",
+                    index + 1,
+                    String::from_utf8_lossy(&entry.name),
+                    first_index + 1
+                );
             }
             entry.barcode_1.make_ascii_uppercase();
             entry.barcode_2.make_ascii_uppercase();
@@ -143,17 +147,9 @@ impl FloatingBarcodeTable {
                     String::from_utf8_lossy(&entry.barcode_1)
                 );
             }
-            if entry.barcode_1.len() != expected_lens[0]
-                || entry.barcode_2.len() != expected_lens[1]
-            {
-                anyhow::bail!(
-                    "barcode table row {} has lengths ({}, {}), expected ({}, {})",
-                    index + 1,
-                    entry.barcode_1.len(),
-                    entry.barcode_2.len(),
-                    expected_lens[0],
-                    expected_lens[1]
-                );
+            let profile = vec![entry.barcode_1.len(), entry.barcode_2.len()];
+            if !length_profiles.contains(&profile) {
+                length_profiles.push(profile);
             }
 
             insert_unique_index(&mut barcode_1_rows, &entry.barcode_1, index);
@@ -170,15 +166,15 @@ impl FloatingBarcodeTable {
 
         Ok(Self {
             entries,
-            expected_lens,
+            length_profiles,
             barcode_1_rows,
             barcode_2_rows,
             pair_rows,
         })
     }
 
-    pub fn expected_lens(&self) -> &[usize; 2] {
-        &self.expected_lens
+    pub fn length_profiles(&self) -> &[Vec<usize>] {
+        &self.length_profiles
     }
 
     fn resolve(
@@ -239,10 +235,10 @@ where
         correction_options: BarcodeCorrectOptions,
         output: W,
     ) -> Result<Self> {
-        if extractor.expected_lens() != &barcode_table.expected_lens()[..] {
-            anyhow::bail!("barcode table lengths do not match extractor insertion lengths");
+        if extractor.length_profiles() != barcode_table.length_profiles() {
+            anyhow::bail!("barcode table length profiles do not match extractor length profiles");
         }
-        let num_insertions = extractor.expected_lens().len();
+        let num_insertions = extractor.num_gaps();
         let valid_barcodes = [
             barcode_table
                 .entries
@@ -313,14 +309,12 @@ where
 
     fn write_result(
         output: &mut W,
-        (cell_barcode, name_1, name_2): (Vec<u8>, Vec<u8>, Vec<u8>),
+        (cell_barcode, name): (Vec<u8>, Vec<u8>),
         umis: BTreeMap<Vec<u8>, u64>,
     ) -> std::io::Result<()> {
         output.write_all(&cell_barcode)?;
         output.write_all(b"\t")?;
-        output.write_all(&name_1)?;
-        output.write_all(b"\t")?;
-        output.write_all(&name_2)?;
+        output.write_all(&name)?;
         output.write_all(b"\t")?;
         for (index, (umi, count)) in umis.into_iter().enumerate() {
             if index > 0 {
@@ -384,7 +378,7 @@ where
         whitelists: &[Whitelist],
         barcode_table: &FloatingBarcodeTable,
         correction_options: &BarcodeCorrectOptions,
-    ) -> Option<(Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>)> {
+    ) -> Option<(Vec<u8>, Vec<u8>, Vec<u8>)> {
         let PendingFloatingBarcode {
             barcode,
             umi,
@@ -408,7 +402,7 @@ where
             floating_barcodes[0].as_deref(),
             floating_barcodes[1].as_deref(),
         )?;
-        Some((barcode, entry.name_1.clone(), entry.name_2.clone(), umi))
+        Some((barcode, entry.name.clone(), umi))
     }
 }
 
@@ -520,9 +514,9 @@ where
                     .collect::<Vec<_>>()
             });
             self.qc.num_matched += resolved.len() as u64;
-            for (barcode, name_1, name_2, umi) in resolved {
+            for (barcode, name, umi) in resolved {
                 *matches
-                    .entry((barcode, name_1, name_2))
+                    .entry((barcode, name))
                     .or_default()
                     .entry(umi)
                     .or_default() += 1;
@@ -538,8 +532,7 @@ where
             }
         }
 
-        self.output
-            .write_all(b"cell_barcode\tname_1\tname_2\tumi_counts\n")?;
+        self.output.write_all(b"cell_barcode\tname\tumi_counts\n")?;
         for (key, umis) in matches {
             Self::write_result(&mut self.output, key, umis)?;
         }
@@ -599,7 +592,7 @@ mod tests {
     fn extractor() -> InsertionExtractor {
         InsertionExtractor::new(
             vec!["AAAA".into(), "CCCC".into(), "GGGG".into()],
-            vec![2, 3],
+            vec![vec![2, 3]],
             3,
             0.0,
         )
@@ -607,15 +600,56 @@ mod tests {
     }
 
     fn table() -> FloatingBarcodeTable {
-        FloatingBarcodeTable::new(
-            vec![FloatingBarcodeEntry::new("TF1", "SITE1", "TT", "AAA")],
-            &[2, 3],
-        )
-        .unwrap()
+        FloatingBarcodeTable::new(vec![FloatingBarcodeEntry::new("TF1", "TT", "AAA")]).unwrap()
     }
 
     fn full_sequence() -> &'static [u8] {
         b"AAAATTCCCCAAAGGGG"
+    }
+
+    #[test]
+    fn infers_unique_length_profiles_in_table_order() {
+        let table = FloatingBarcodeTable::new(vec![
+            FloatingBarcodeEntry::new("TF1", "TT", "AAA"),
+            FloatingBarcodeEntry::new("TF2", "GGGG", "CCCCC"),
+            FloatingBarcodeEntry::new("TF3", "AA", "GGG"),
+        ])
+        .unwrap();
+
+        assert_eq!(table.length_profiles(), &[vec![2, 3], vec![4, 5]]);
+    }
+
+    #[test]
+    fn processes_barcode_rows_with_different_length_profiles() {
+        let table = FloatingBarcodeTable::new(vec![
+            FloatingBarcodeEntry::new("TF1", "TT", "AAA"),
+            FloatingBarcodeEntry::new("TF2", "TTTT", "AAAAA"),
+        ])
+        .unwrap();
+        let extractor = InsertionExtractor::new(
+            vec!["AAAA".into(), "CCCC".into(), "GGGG".into()],
+            table.length_profiles().to_vec(),
+            3,
+            0.0,
+        )
+        .unwrap();
+        let mut stage = FloatingBarcodeStage::new(
+            true,
+            extractor,
+            table,
+            BarcodeCorrectOptions::default(),
+            Vec::new(),
+        )
+        .unwrap();
+
+        stage
+            .process(vec![record(b"AAAATTTTCCCCAAAAAGGGG")])
+            .unwrap();
+        stage.finish().unwrap();
+        assert_eq!(
+            stage.into_output(),
+            b"cell_barcode\tname\tumi_counts\nCELL\tTF2\t:1\n"
+        );
     }
 
     #[test]
@@ -666,7 +700,7 @@ mod tests {
         stage.finish().unwrap();
         assert_eq!(
             stage.into_output(),
-            b"cell_barcode\tname_1\tname_2\tumi_counts\nCELL\tTF1\tSITE1\t:1\n"
+            b"cell_barcode\tname\tumi_counts\nCELL\tTF1\t:1\n"
         );
     }
 
@@ -675,11 +709,7 @@ mod tests {
         let mut stage = FloatingBarcodeStage::new(
             true,
             extractor(),
-            FloatingBarcodeTable::new(
-                vec![FloatingBarcodeEntry::new("TF2", "SITE2", "GG", "CCC")],
-                &[2, 3],
-            )
-            .unwrap(),
+            FloatingBarcodeTable::new(vec![FloatingBarcodeEntry::new("TF2", "GG", "CCC")]).unwrap(),
             BarcodeCorrectOptions::default(),
             Vec::new(),
         )
@@ -688,10 +718,7 @@ mod tests {
         let forwarded = stage.process(vec![record(full_sequence())]).unwrap();
         assert!(forwarded.is_empty());
         stage.finish().unwrap();
-        assert_eq!(
-            stage.into_output(),
-            b"cell_barcode\tname_1\tname_2\tumi_counts\n"
-        );
+        assert_eq!(stage.into_output(), b"cell_barcode\tname\tumi_counts\n");
     }
 
     #[test]
@@ -710,10 +737,7 @@ mod tests {
         stage.process(vec![record]).unwrap();
         assert_eq!(stage.qc().frac_valid_cell_barcode(), 0.0);
         stage.finish().unwrap();
-        assert_eq!(
-            stage.into_output(),
-            b"cell_barcode\tname_1\tname_2\tumi_counts\n"
-        );
+        assert_eq!(stage.into_output(), b"cell_barcode\tname\tumi_counts\n");
     }
 
     #[test]
@@ -738,7 +762,7 @@ mod tests {
         stage.finish().unwrap();
         assert_eq!(
             stage.into_output(),
-            b"cell_barcode\tname_1\tname_2\tumi_counts\nAAAA\tTF1\tSITE1\t:1\nCCCC\tTF1\tSITE1\tUMI1:1;UMI2:2\n"
+            b"cell_barcode\tname\tumi_counts\nAAAA\tTF1\t:1\nCCCC\tTF1\tUMI1:1;UMI2:2\n"
         );
     }
 
@@ -763,7 +787,7 @@ mod tests {
         stage.finish().unwrap();
         assert_eq!(
             stage.into_output(),
-            b"cell_barcode\tname_1\tname_2\tumi_counts\nCELL\tTF1\tSITE1\tAAAA:3\n"
+            b"cell_barcode\tname\tumi_counts\nCELL\tTF1\tAAAA:3\n"
         );
     }
 
@@ -793,7 +817,7 @@ mod tests {
         stage.finish().unwrap();
         assert_eq!(
             stage.into_output(),
-            b"cell_barcode\tname_1\tname_2\tumi_counts\nCELL\tTF1\tSITE1\tAAGT:7\n"
+            b"cell_barcode\tname\tumi_counts\nCELL\tTF1\tAAGT:7\n"
         );
     }
 
@@ -818,7 +842,7 @@ mod tests {
         stage.finish().unwrap();
         assert_eq!(
             stage.into_output(),
-            b"cell_barcode\tname_1\tname_2\tumi_counts\nCELL1\tTF1\tSITE1\tAAAT:1\nCELL2\tTF1\tSITE1\tAAAA:2\n"
+            b"cell_barcode\tname\tumi_counts\nCELL1\tTF1\tAAAT:1\nCELL2\tTF1\tAAAA:2\n"
         );
     }
 
@@ -858,7 +882,7 @@ mod tests {
     fn writes_multiple_insertions_as_one_combined_key() {
         let extractor = InsertionExtractor::new(
             vec!["AAAA".into(), "CCCC".into(), "GGGG".into()],
-            vec![2, 3],
+            vec![vec![2, 3]],
             3,
             0.0,
         )
@@ -880,7 +904,7 @@ mod tests {
         stage.finish().unwrap();
         assert_eq!(
             stage.into_output(),
-            b"cell_barcode\tname_1\tname_2\tumi_counts\nCELL\tTF1\tSITE1\t:1\n"
+            b"cell_barcode\tname\tumi_counts\nCELL\tTF1\t:1\n"
         );
     }
 
@@ -888,7 +912,7 @@ mod tests {
     fn writes_dash_for_an_unavailable_insertion() {
         let extractor = InsertionExtractor::new(
             vec!["AAAA".into(), "CCCC".into(), "GGGG".into()],
-            vec![2, 3],
+            vec![vec![2, 3]],
             3,
             0.0,
         )
@@ -911,7 +935,7 @@ mod tests {
         stage.finish().unwrap();
         assert_eq!(
             stage.into_output(),
-            b"cell_barcode\tname_1\tname_2\tumi_counts\nCELL\tTF1\tSITE1\t:2\n"
+            b"cell_barcode\tname\tumi_counts\nCELL\tTF1\t:2\n"
         );
     }
 
@@ -919,7 +943,7 @@ mod tests {
     fn writes_a_read_when_at_least_one_insertion_corrects() {
         let extractor = InsertionExtractor::new(
             vec!["AAAA".into(), "CCCC".into(), "GGGG".into()],
-            vec![2, 3],
+            vec![vec![2, 3]],
             3,
             0.0,
         )
@@ -939,13 +963,26 @@ mod tests {
         assert_eq!(stage.qc().num_matched, 1);
         assert_eq!(
             stage.into_output(),
-            b"cell_barcode\tname_1\tname_2\tumi_counts\nCELL\tTF1\tSITE1\t:1\n"
+            b"cell_barcode\tname\tumi_counts\nCELL\tTF1\t:1\n"
         );
     }
 
     #[test]
     fn rejects_an_empty_barcode_table() {
-        assert!(FloatingBarcodeTable::new(Vec::new(), &[2, 3]).is_err());
+        assert!(FloatingBarcodeTable::new(Vec::new()).is_err());
+    }
+
+    #[test]
+    fn rejects_duplicate_barcode_table_names() {
+        let error = FloatingBarcodeTable::new(vec![
+            FloatingBarcodeEntry::new("TF1", "TT", "AAA"),
+            FloatingBarcodeEntry::new("TF1", "GG", "CCC"),
+        ])
+        .err()
+        .expect("duplicate names must be rejected");
+
+        assert!(error.to_string().contains("duplicate name 'TF1'"));
+        assert!(error.to_string().contains("row 2"));
     }
 
     #[test]
@@ -953,13 +990,10 @@ mod tests {
         let mut stage = FloatingBarcodeStage::new(
             true,
             extractor(),
-            FloatingBarcodeTable::new(
-                vec![
-                    FloatingBarcodeEntry::new("TF1", "SITE1", "TT", "AAA"),
-                    FloatingBarcodeEntry::new("TF2", "SITE2", "TT", "CCC"),
-                ],
-                &[2, 3],
-            )
+            FloatingBarcodeTable::new(vec![
+                FloatingBarcodeEntry::new("TF1", "TT", "AAA"),
+                FloatingBarcodeEntry::new("TF2", "TT", "CCC"),
+            ])
             .unwrap(),
             BarcodeCorrectOptions::default(),
             Vec::new(),
@@ -969,10 +1003,7 @@ mod tests {
         stage.process(vec![record(b"AAAATTCCCC")]).unwrap();
         stage.finish().unwrap();
         assert_eq!(stage.qc().num_matched, 0);
-        assert_eq!(
-            stage.into_output(),
-            b"cell_barcode\tname_1\tname_2\tumi_counts\n"
-        );
+        assert_eq!(stage.into_output(), b"cell_barcode\tname\tumi_counts\n");
     }
 
     #[test]
@@ -989,9 +1020,6 @@ mod tests {
         let forwarded = stage.process(vec![record(b"GATTGATTGATT")]).unwrap();
         assert_eq!(forwarded.len(), 1);
         stage.finish().unwrap();
-        assert_eq!(
-            stage.into_output(),
-            b"cell_barcode\tname_1\tname_2\tumi_counts\n"
-        );
+        assert_eq!(stage.into_output(), b"cell_barcode\tname\tumi_counts\n");
     }
 }
