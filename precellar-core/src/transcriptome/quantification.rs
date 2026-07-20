@@ -12,7 +12,7 @@ use indicatif::{ProgressBar, ProgressStyle};
 use itertools::Itertools;
 use log::info;
 use nalgebra_sparse::CsrMatrix;
-use noodles::sam::Header;
+use noodles_sam::Header;
 use polars::df;
 use rayon::{iter::ParallelIterator, slice::ParallelSlice};
 

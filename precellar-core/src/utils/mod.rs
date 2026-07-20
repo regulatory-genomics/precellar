@@ -7,7 +7,7 @@ use std::ops::Range;
 
 use anyhow::{anyhow, Result};
 use bstr::ByteSlice;
-use noodles::fastq;
+use noodles_fastq as fastq;
 use regex::Regex;
 use std::sync::mpsc::{sync_channel, Receiver};
 use std::thread::JoinHandle;

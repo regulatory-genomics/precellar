@@ -1,11 +1,11 @@
 //! Wrapper for community minimap2 crate to provide Minimap2Aligner interface
 
 use anyhow::Result;
-use noodles::fastq;
-use noodles::sam::alignment::record::cigar::op::Kind;
-use noodles::sam::alignment::record::cigar::Op;
-use noodles::sam::alignment::record::Flags;
-use noodles::sam::{self, alignment::record_buf::RecordBuf};
+use noodles_fastq as fastq;
+use noodles_sam::alignment::record::cigar::op::Kind;
+use noodles_sam::alignment::record::cigar::Op;
+use noodles_sam::alignment::record::Flags;
+use noodles_sam::{self as sam, alignment::record_buf::RecordBuf};
 use std::path::PathBuf;
 
 /// Default maximum insert size for paired-end reads (used for proper pair detection)
@@ -200,7 +200,7 @@ impl Minimap2Aligner {
 
 /// Build SAM header from minimap2 index
 fn build_header(aligner: &minimap2::Aligner<minimap2::Built>) -> sam::Header {
-    use noodles::sam::header::record::value::{map::ReferenceSequence, Map};
+    use noodles_sam::header::record::value::{map::ReferenceSequence, Map};
     use std::ffi::CStr;
     use std::num::NonZeroUsize;
 
@@ -233,7 +233,7 @@ fn build_header(aligner: &minimap2::Aligner<minimap2::Built>) -> sam::Header {
 /// Primary mapping info extracted for mate field
 struct MappingInfo {
     ref_id: Option<usize>,
-    pos: Option<noodles::core::Position>,
+    pos: Option<noodles_core::Position>,
     end_pos: i64, // 1-based end position (inclusive)
     is_reverse: bool,
     is_mapped: bool,
@@ -249,7 +249,7 @@ fn extract_mapping_info(mappings: &[minimap2::Mapping], header: &sam::Header) ->
             .target_name
             .as_ref()
             .and_then(|name| header.reference_sequences().get_index_of(name.as_bytes()));
-        let pos = noodles::core::Position::try_from(primary.target_start as usize + 1).ok();
+        let pos = noodles_core::Position::try_from(primary.target_start as usize + 1).ok();
         // target_end is 0-based exclusive, so it equals 1-based inclusive end position
         let end_pos = primary.target_end as i64;
         let is_reverse = primary.strand == minimap2::Strand::Reverse;
@@ -382,17 +382,17 @@ fn mapping_to_record_buf(
     let mut record_buf = RecordBuf::default();
 
     // Set flags
-    let mut flags = noodles::sam::alignment::record::Flags::empty();
+    let mut flags = noodles_sam::alignment::record::Flags::empty();
     let is_reverse = mapping.strand == minimap2::Strand::Reverse;
 
     if is_reverse {
-        flags |= noodles::sam::alignment::record::Flags::REVERSE_COMPLEMENTED;
+        flags |= noodles_sam::alignment::record::Flags::REVERSE_COMPLEMENTED;
     }
     if !mapping.is_primary {
-        flags |= noodles::sam::alignment::record::Flags::SECONDARY;
+        flags |= noodles_sam::alignment::record::Flags::SECONDARY;
     }
     if mapping.is_supplementary {
-        flags |= noodles::sam::alignment::record::Flags::SUPPLEMENTARY;
+        flags |= noodles_sam::alignment::record::Flags::SUPPLEMENTARY;
     }
     *record_buf.flags_mut() = flags;
 
@@ -414,13 +414,13 @@ fn mapping_to_record_buf(
     }
 
     // Set alignment start position (1-based)
-    if let Ok(pos) = noodles::core::Position::try_from(mapping.target_start as usize + 1) {
+    if let Ok(pos) = noodles_core::Position::try_from(mapping.target_start as usize + 1) {
         *record_buf.alignment_start_mut() = Some(pos);
     }
 
     // Set mapping quality (mapq is u32, but needs to be u8 for MappingQuality)
     let mapq_u8 = mapping.mapq.min(255) as u8;
-    if let Ok(mq) = noodles::sam::alignment::record::MappingQuality::try_from(mapq_u8) {
+    if let Ok(mq) = noodles_sam::alignment::record::MappingQuality::try_from(mapq_u8) {
         *record_buf.mapping_quality_mut() = Some(mq);
     }
 
@@ -431,16 +431,16 @@ fn mapping_to_record_buf(
         // Add alignment score if available
         if let Some(score) = alignment.alignment_score {
             record_buf.data_mut().insert(
-                noodles::sam::alignment::record::data::field::tag::Tag::ALIGNMENT_SCORE,
-                noodles::sam::alignment::record_buf::data::field::value::Value::Int32(score),
+                noodles_sam::alignment::record::data::field::tag::Tag::ALIGNMENT_SCORE,
+                noodles_sam::alignment::record_buf::data::field::value::Value::Int32(score),
             );
         }
 
         // Add MD tag if available
         if let Some(ref md) = alignment.md {
             record_buf.data_mut().insert(
-                noodles::sam::alignment::record::data::field::tag::Tag::MISMATCHED_POSITIONS,
-                noodles::sam::alignment::record_buf::data::field::value::Value::String(
+                noodles_sam::alignment::record::data::field::tag::Tag::MISMATCHED_POSITIONS,
+                noodles_sam::alignment::record_buf::data::field::value::Value::String(
                     md.clone().into(),
                 ),
             );
@@ -449,10 +449,10 @@ fn mapping_to_record_buf(
         // Add CS tag if available (minimap2-specific difference string)
         if let Some(ref cs) = alignment.cs {
             // CS tag uses lowercase 'cs' - need to create custom tag
-            let cs_tag = noodles::sam::alignment::record::data::field::tag::Tag::new(b'c', b's');
+            let cs_tag = noodles_sam::alignment::record::data::field::tag::Tag::new(b'c', b's');
             record_buf.data_mut().insert(
                 cs_tag,
-                noodles::sam::alignment::record_buf::data::field::value::Value::String(
+                noodles_sam::alignment::record_buf::data::field::value::Value::String(
                     cs.clone().into(),
                 ),
             );
@@ -499,7 +499,7 @@ fn create_unmapped_record(record: &fastq::Record, is_paired: bool, is_first: boo
     *unmapped.sequence_mut() = record.sequence().to_vec().into();
 
     // Set MAPQ=0 for unmapped reads (SAM convention)
-    if let Ok(mq) = noodles::sam::alignment::record::MappingQuality::try_from(0u8) {
+    if let Ok(mq) = noodles_sam::alignment::record::MappingQuality::try_from(0u8) {
         *unmapped.mapping_quality_mut() = Some(mq);
     }
 
@@ -601,9 +601,10 @@ fn set_cigar(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use noodles::sam::alignment::io::Write;
-    use noodles::sam::alignment::record::Cigar as CigarTrait;
-    use noodles::{fastq, sam};
+    use noodles_fastq as fastq;
+    use noodles_sam as sam;
+    use noodles_sam::alignment::io::Write;
+    use noodles_sam::alignment::record::Cigar as CigarTrait;
     use std::fs::File;
     use std::io::BufReader;
 

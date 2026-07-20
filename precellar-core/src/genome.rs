@@ -2,7 +2,7 @@ use std::ops::Range;
 
 use bed_utils::bed::{GenomicRange, Strand};
 use indexmap::IndexMap;
-use noodles::sam;
+use noodles_sam as sam;
 use polars::{frame::DataFrame, prelude::Column, series::Series};
 
 use crate::fragment::Fragment;

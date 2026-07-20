@@ -39,7 +39,7 @@ use anyhow::Result;
 use bstr::BString;
 use itertools::Itertools;
 use log::{debug, info};
-use noodles::fastq;
+use noodles_fastq as fastq;
 use rayon::iter::ParallelIterator;
 use rayon::slice::ParallelSlice;
 use seqspec::{Assay, FastqReader, Modality, SegmentInfo, SplitError};
@@ -392,7 +392,7 @@ pub struct AlignmentResult<'a, A> {
     aligner: &'a mut A,
     execution: FastqExecution,
     qc: QcAlign,
-    header: noodles::sam::Header,
+    header: noodles_sam::Header,
     num_threads: u16,
     num_records: usize,
     num_processed: usize,

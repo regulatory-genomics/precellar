@@ -2,8 +2,8 @@ use std::collections::HashMap;
 
 use anyhow::Result;
 use bitcode::{Decode, Encode};
-use noodles::sam;
-use noodles::sam::alignment::{record::cigar::op::Kind, record_buf::RecordBuf};
+use noodles_sam as sam;
+use noodles_sam::alignment::{record::cigar::op::Kind, record_buf::RecordBuf};
 
 use bed_utils::bed::{map::GIntervalMap, GenomicRange};
 use itertools::Itertools;

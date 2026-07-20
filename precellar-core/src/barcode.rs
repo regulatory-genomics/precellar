@@ -4,7 +4,7 @@ use indexmap::IndexMap;
 use indicatif::{ProgressBar, ProgressDrawTarget, ProgressIterator, ProgressStyle};
 use itertools::Itertools;
 use log::{info, warn};
-use noodles::sam::alignment::{
+use noodles_sam::alignment::{
     record::data::field::{Tag, Value},
     Record,
 };

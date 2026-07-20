@@ -8,7 +8,7 @@ use bed_utils::{
 use bitcode::{Decode, Encode};
 use dedups::AlignmentInfo;
 use itertools::Itertools;
-use noodles::sam::{
+use noodles_sam::{
     alignment::{record::Flags, Record},
     Header,
 };

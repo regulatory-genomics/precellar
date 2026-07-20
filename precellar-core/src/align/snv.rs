@@ -2,7 +2,7 @@ use anyhow::{bail, Result};
 use bitcode::{Decode, Encode};
 use bstr::ByteSlice;
 use lexical::parse_partial;
-use noodles::sam::alignment::{
+use noodles_sam::alignment::{
     record::{cigar::op::Kind, data::field::Tag, Cigar},
     record_buf::data::field::Value,
     RecordBuf,
@@ -367,7 +367,7 @@ mod tests {
 
     use super::*;
     use bstr::BString;
-    use noodles::sam::{
+    use noodles_sam::{
         self as sam,
         header::record::value::{map::ReferenceSequence, Map},
     };
@@ -440,8 +440,8 @@ mod tests {
         let rec: Vec<_> = sam
             .into_iter()
             .map(|x| {
-                let r = noodles::sam::Record::try_from(x.as_bytes())?;
-                let r = noodles::sam::alignment::RecordBuf::try_from_alignment_record(&header, &r)?;
+                let r = noodles_sam::Record::try_from(x.as_bytes())?;
+                let r = noodles_sam::alignment::RecordBuf::try_from_alignment_record(&header, &r)?;
                 Ok(r)
             })
             .collect::<Result<_>>()?;

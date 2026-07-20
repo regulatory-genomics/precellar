@@ -559,7 +559,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use noodles::fastq;
+    use noodles_fastq as fastq;
 
     fn record_with_metadata(
         sequence: &[u8],

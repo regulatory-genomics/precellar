@@ -1,7 +1,7 @@
 use anyhow::{bail, Result};
 use futures::StreamExt;
 use itertools::Itertools;
-use noodles::fastq::{self, io::Writer};
+use noodles_fastq::{self as fastq, io::Writer};
 use precellar::utils::strip_fastq;
 use pyo3::{prelude::*, types::PyDict};
 use regex::Regex;

@@ -1,8 +1,8 @@
 use anyhow::Result;
 use itertools::Itertools;
-use noodles::bam;
-use noodles::fastq::{self, io::Writer};
-use noodles::sam::alignment::record::data::field::{Tag, Value};
+use noodles_bam as bam;
+use noodles_fastq::{self as fastq, io::Writer};
+use noodles_sam::alignment::record::data::field::{Tag, Value};
 use precellar::utils::rev_compl_fastq_record;
 use pyo3::prelude::*;
 use rayon::slice::ParallelSliceMut;

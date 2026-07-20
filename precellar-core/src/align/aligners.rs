@@ -8,14 +8,14 @@ use crate::barcode::{get_barcode, get_umi};
 use anyhow::{bail, ensure, Result};
 pub use bwa_mem2::BurrowsWheelerAligner;
 pub use minibwa::{Index as MiniBwaIndex, MiniBwaSR, Options as MiniBwaOptions};
-use noodles::sam::alignment::Record;
+use noodles_sam::alignment::Record;
 pub use star_aligner::StarAligner;
 
 use log;
-use noodles::fastq;
-use noodles::sam;
-use noodles::sam::alignment::record::data::field::tag::Tag;
-use noodles::sam::alignment::record_buf::{data::field::value::Value, RecordBuf};
+use noodles_fastq as fastq;
+use noodles_sam as sam;
+use noodles_sam::alignment::record::data::field::tag::Tag;
+use noodles_sam::alignment::record_buf::{data::field::value::Value, RecordBuf};
 use rayon::iter::ParallelIterator;
 use rayon::slice::ParallelSlice;
 

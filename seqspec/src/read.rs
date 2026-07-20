@@ -6,7 +6,7 @@ pub use segment::{Segment, SegmentInfo, SegmentInfoElem, SplitError};
 use anyhow::{bail, Result};
 use file_download::download::Downloader;
 use indexmap::IndexMap;
-use noodles::fastq;
+use noodles_fastq as fastq;
 use serde::{Deserialize, Serialize, Serializer};
 use std::io::{BufRead, BufReader};
 use std::ops::{Deref, DerefMut};

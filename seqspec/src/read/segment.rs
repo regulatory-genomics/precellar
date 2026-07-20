@@ -1,6 +1,6 @@
 use std::ops::Range;
 
-use noodles::fastq::{self, record::Definition};
+use noodles_fastq::{self as fastq, record::Definition};
 
 use crate::{
     utils::{hamming_distance, rev_compl},

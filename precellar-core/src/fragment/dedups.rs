@@ -21,10 +21,10 @@
 use anyhow::{Context, Result};
 use bitcode::{Decode, Encode};
 use itertools::Itertools;
-use noodles::sam::alignment::record::Cigar;
-use noodles::sam::alignment::record::{cigar::op::Kind, Flags};
-use noodles::sam::alignment::RecordBuf;
-use noodles::sam::Header;
+use noodles_sam::alignment::record::Cigar;
+use noodles_sam::alignment::record::{cigar::op::Kind, Flags};
+use noodles_sam::alignment::RecordBuf;
+use noodles_sam::Header;
 use std::collections::HashMap;
 use std::hash::Hash;
 
@@ -325,7 +325,7 @@ impl<T> RemoveDuplicates for T where T: Iterator<Item = AlignmentInfo> + Sized {
 mod tests {
     use super::*;
     use bstr::BString;
-    use noodles::sam::{
+    use noodles_sam::{
         self as sam,
         header::record::value::{map::ReferenceSequence, Map},
     };
@@ -344,8 +344,8 @@ mod tests {
             .build();
 
         let sam = "1\t99\tchr1\t10003\t0\t4H50M2H\t=\t10083\t129\tCCCCTAACCCTAACCCTAACCCTAACCCTAACCCTAACCCTAACCCTAAC\tFFFF:FFFFF:FF:FF:FFFFFFFFFFFFFFFFF,FF:FF,FFFFFFFFF\tMD:Z:0A49";
-        let rec = noodles::sam::Record::try_from(sam.as_bytes())?;
-        let rec = noodles::sam::alignment::RecordBuf::try_from_alignment_record(&header, &rec)?;
+        let rec = noodles_sam::Record::try_from(sam.as_bytes())?;
+        let rec = noodles_sam::alignment::RecordBuf::try_from_alignment_record(&header, &rec)?;
 
         let ali = AlignmentMini::new(&rec, true)?;
 

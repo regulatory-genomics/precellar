@@ -4,8 +4,8 @@ use crate::transcriptome::TxAlignment;
 
 use anyhow::Result;
 use bed_utils::bed::BEDLike;
-use noodles::sam;
-use noodles::sam::alignment::{record::data::field::tag::Tag, Record};
+use noodles_sam as sam;
+use noodles_sam::alignment::{record::data::field::tag::Tag, Record};
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
 

@@ -2,7 +2,7 @@ use anyhow::{bail, Result};
 use bwa_mem2::{AlignerOpts, BurrowsWheelerAligner, FMIndex};
 use log::warn;
 use minibwa::{Index as MiniBwaIndex, MiniBwaSR, Options as MiniBwaOptions};
-use noodles::sam::Header;
+use noodles_sam::Header;
 use precellar::align::{Minimap2Aligner, Minimap2Opts};
 use precellar::{
     align::{Aligner, AlignmentInput},
@@ -75,7 +75,7 @@ impl<'py> TryFrom<Bound<'py, PyAny>> for AlignerRef<'py> {
 }
 
 impl Aligner for AlignerRef<'_> {
-    fn header(&self) -> noodles::sam::Header {
+    fn header(&self) -> noodles_sam::Header {
         self.header()
     }
 

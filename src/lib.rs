@@ -7,7 +7,7 @@ mod sinks;
 mod utils;
 
 use anyhow::Result;
-use noodles::fastq;
+use noodles_fastq as fastq;
 use pyo3::prelude::*;
 use std::io::Write;
 use std::{io::BufWriter, path::PathBuf, str::FromStr};

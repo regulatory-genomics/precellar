@@ -1,7 +1,7 @@
 use crate::align::AlignProgressBar;
 use crate::aligners::AlignerRef;
 use anyhow::{bail, Result};
-use noodles::sam::{self, alignment::io::Write};
+use noodles_sam::{self as sam, alignment::io::Write};
 use precellar::{
     align::MultiMapR,
     fragment::{IntoFragOpts, IntoFragments},
@@ -101,7 +101,7 @@ fn write_alignments<'a>(
     header: &'a sam::Header,
     alignments: impl Iterator<Item = Vec<(Option<MultiMapR>, Option<MultiMapR>)>> + 'a,
 ) -> Result<()> {
-    let mut writer = noodles::bam::io::writer::Builder::default().build_from_path(output)?;
+    let mut writer = noodles_bam::io::writer::Builder::default().build_from_path(output)?;
     writer.write_header(header)?;
     for data in alignments {
         py.check_signals()?;
