@@ -19,15 +19,37 @@ pub struct FloatingBarcodeQc {
     pub num_records: u64,
     pub num_extracted: u64,
     pub num_matched: u64,
+    pub num_extracted_single: Vec<u64>,
+    pub num_extracted_all: u64,
+    pub num_extracted_with_valid_cell_barcode: u64,
 }
 
 impl FloatingBarcodeQc {
+    pub fn frac_valid_cell_barcode(&self) -> f64 {
+        if self.num_extracted == 0 {
+            0.0
+        } else {
+            self.num_extracted_with_valid_cell_barcode as f64 / self.num_extracted as f64
+        }
+    }
+
     pub fn to_json(&self) -> serde_json::Value {
-        json!({
+        let mut metrics = json!({
             "num_records": self.num_records,
             "num_extracted": self.num_extracted,
             "num_matched": self.num_matched,
-        })
+            "num_extracted_all": self.num_extracted_all,
+            "frac_valid_cell_barcode": self.frac_valid_cell_barcode(),
+        });
+        if let Some(metrics) = metrics.as_object_mut() {
+            for (index, count) in self.num_extracted_single.iter().enumerate() {
+                metrics.insert(
+                    format!("num_extracted_single_{}", index + 1),
+                    (*count).into(),
+                );
+            }
+        }
+        metrics
     }
 }
 
@@ -220,6 +242,7 @@ where
         if extractor.expected_lens() != &barcode_table.expected_lens()[..] {
             anyhow::bail!("barcode table lengths do not match extractor insertion lengths");
         }
+        let num_insertions = extractor.expected_lens().len();
         let valid_barcodes = [
             barcode_table
                 .entries
@@ -245,7 +268,10 @@ where
             )?),
             output,
             thread_pool: rayon::ThreadPoolBuilder::new().num_threads(1).build()?,
-            qc: FloatingBarcodeQc::default(),
+            qc: FloatingBarcodeQc {
+                num_extracted_single: vec![0; num_insertions],
+                ..FloatingBarcodeQc::default()
+            },
             finished: false,
         })
     }
@@ -413,6 +439,19 @@ where
                     insertions,
                 } => {
                     self.qc.num_extracted += 1;
+                    if barcode.is_some() {
+                        self.qc.num_extracted_with_valid_cell_barcode += 1;
+                    }
+                    if insertions.len() == 1 {
+                        let insertion_index = insertions[0].insertion_index;
+                        *self
+                            .qc
+                            .num_extracted_single
+                            .get_mut(insertion_index)
+                            .expect("extractor returned an invalid insertion index") += 1;
+                    } else if insertions.len() == self.qc.num_extracted_single.len() {
+                        self.qc.num_extracted_all += 1;
+                    }
                     for insertion in &insertions {
                         self.whitelist_builders
                             .as_mut()
@@ -580,6 +619,37 @@ mod tests {
     }
 
     #[test]
+    fn serializes_position_specific_extraction_qc() {
+        let qc = FloatingBarcodeQc {
+            num_records: 10,
+            num_extracted: 9,
+            num_matched: 8,
+            num_extracted_single: vec![1, 2, 3],
+            num_extracted_all: 4,
+            num_extracted_with_valid_cell_barcode: 6,
+        };
+
+        assert_eq!(
+            qc.to_json(),
+            json!({
+                "num_records": 10,
+                "num_extracted": 9,
+                "num_matched": 8,
+                "num_extracted_single_1": 1,
+                "num_extracted_single_2": 2,
+                "num_extracted_single_3": 3,
+                "num_extracted_all": 4,
+                "frac_valid_cell_barcode": 6.0 / 9.0,
+            })
+        );
+    }
+
+    #[test]
+    fn valid_cell_barcode_fraction_is_zero_without_extracted_reads() {
+        assert_eq!(FloatingBarcodeQc::default().frac_valid_cell_barcode(), 0.0);
+    }
+
+    #[test]
     fn removes_extracted_reads_and_writes_corrected_barcode() {
         let mut stage = FloatingBarcodeStage::new(
             true,
@@ -592,6 +662,7 @@ mod tests {
 
         let forwarded = stage.process(vec![record(full_sequence())]).unwrap();
         assert!(forwarded.is_empty());
+        assert_eq!(stage.qc().frac_valid_cell_barcode(), 1.0);
         stage.finish().unwrap();
         assert_eq!(
             stage.into_output(),
@@ -637,6 +708,7 @@ mod tests {
         record.barcode.as_mut().unwrap().corrected = None;
 
         stage.process(vec![record]).unwrap();
+        assert_eq!(stage.qc().frac_valid_cell_barcode(), 0.0);
         stage.finish().unwrap();
         assert_eq!(
             stage.into_output(),
@@ -750,7 +822,7 @@ mod tests {
         );
     }
 
-    fn run_with_threads(num_threads: usize) -> (Vec<u8>, Vec<Vec<u8>>, (u64, u64, u64)) {
+    fn run_with_threads(num_threads: usize) -> (Vec<u8>, Vec<Vec<u8>>, serde_json::Value) {
         let mut stage = FloatingBarcodeStage::new(
             true,
             extractor(),
@@ -773,8 +845,7 @@ mod tests {
             .filter_map(|record| record.read1.map(|read| read.sequence().to_vec()))
             .collect();
         stage.finish().unwrap();
-        let qc = stage.qc();
-        let metrics = (qc.num_records, qc.num_extracted, qc.num_matched);
+        let metrics = stage.qc().to_json();
         (stage.into_output(), forwarded, metrics)
     }
 
@@ -804,6 +875,8 @@ mod tests {
         let forwarded = stage.process(vec![record(b"AAAATTCCCCAAAGGGG")]).unwrap();
         assert!(forwarded.is_empty());
         assert_eq!(stage.qc().num_extracted, 1);
+        assert_eq!(stage.qc().num_extracted_single, vec![0, 0]);
+        assert_eq!(stage.qc().num_extracted_all, 1);
         stage.finish().unwrap();
         assert_eq!(
             stage.into_output(),
@@ -833,6 +906,8 @@ mod tests {
             .process(vec![record(b"AAAATTCCCCA"), record(b"TCCCCAAAGGGG")])
             .unwrap();
         assert_eq!(stage.qc().num_extracted, 2);
+        assert_eq!(stage.qc().num_extracted_single, vec![1, 1]);
+        assert_eq!(stage.qc().num_extracted_all, 0);
         stage.finish().unwrap();
         assert_eq!(
             stage.into_output(),
