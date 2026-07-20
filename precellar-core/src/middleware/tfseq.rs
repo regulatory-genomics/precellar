@@ -116,7 +116,10 @@ impl FloatingBarcodeTable {
             entry.barcode_1.make_ascii_uppercase();
             entry.barcode_2.make_ascii_uppercase();
             if !is_dna(&entry.barcode_1) || !is_dna(&entry.barcode_2) {
-                anyhow::bail!("barcode table barcodes contain invalid DNA sequences: {}", String::from_utf8_lossy(&entry.barcode_1));
+                anyhow::bail!(
+                    "barcode table barcodes contain invalid DNA sequences: {}",
+                    String::from_utf8_lossy(&entry.barcode_1)
+                );
             }
             if entry.barcode_1.len() != expected_lens[0]
                 || entry.barcode_2.len() != expected_lens[1]
@@ -689,6 +692,36 @@ mod tests {
         assert_eq!(
             stage.into_output(),
             b"cell_barcode\tname_1\tname_2\tumi_counts\nCELL\tTF1\tSITE1\tAAAA:3\n"
+        );
+    }
+
+    #[test]
+    fn resolves_transitive_umi_corrections_to_the_root() {
+        let mut stage = FloatingBarcodeStage::new(
+            true,
+            extractor(),
+            table(),
+            BarcodeCorrectOptions::default(),
+            Vec::new(),
+        )
+        .unwrap();
+        let sequence = full_sequence();
+        let mut records = Vec::new();
+        for (umi, count) in [
+            (b"AAAA".as_slice(), 1),
+            (b"AAAT".as_slice(), 2),
+            (b"AAGT".as_slice(), 4),
+        ] {
+            for _ in 0..count {
+                records.push(record_with_metadata(sequence, Some(b"CELL"), Some(umi)));
+            }
+        }
+
+        stage.process(records).unwrap();
+        stage.finish().unwrap();
+        assert_eq!(
+            stage.into_output(),
+            b"cell_barcode\tname_1\tname_2\tumi_counts\nCELL\tTF1\tSITE1\tAAGT:7\n"
         );
     }
 

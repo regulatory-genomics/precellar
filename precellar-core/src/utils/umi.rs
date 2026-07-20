@@ -41,55 +41,76 @@ pub(crate) fn get_umi_mapping(umi_count: &HashMap<Vec<u8>, u64>) -> HashMap<Vec<
 
 /// Returns a directional, transitive UMI correction map.
 ///
-/// A lower-count UMI is attached to a one-edit neighbor only when the neighbor has a
-/// strictly greater count and satisfies `parent_count >= 2 * child_count - 1`. Mappings
-/// are then resolved to their final root.
+/// A higher-count UMI has a directional edge to each one-edit neighbor satisfying
+/// `parent_count >= 2 * child_count - 1`. Roots are processed by descending abundance,
+/// and each reachable UMI is assigned to the first root that reaches it. Equal-count,
+/// empty, non-ACGT, and zero-count UMIs are left uncorrected.
 pub(crate) fn get_directional_umi_mapping(
     umi_count: &HashMap<Vec<u8>, u64>,
 ) -> HashMap<Vec<u8>, Vec<u8>> {
     let nucs = b"ACGT";
-    let mut direct_mapping = HashMap::new();
+    let mut children: HashMap<Vec<u8>, Vec<Vec<u8>>> = HashMap::new();
 
     for (umi, child_count) in umi_count {
-        let mut test_umi = umi.clone();
-        let threshold = child_count.saturating_mul(2).saturating_sub(1);
-        let mut best_parent: Option<(u64, Vec<u8>)> = None;
+        if *child_count > 0 && is_canonical_umi(umi) {
+            let mut test_umi = umi.clone();
 
-        for pos in 0..umi.len() {
-            for test_char in nucs {
-                if *test_char == umi[pos] {
-                    continue;
-                }
-                test_umi[pos] = *test_char;
+            for pos in 0..umi.len() {
+                for test_char in nucs {
+                    if *test_char != umi[pos] {
+                        test_umi[pos] = *test_char;
 
-                if let Some(&parent_count) = umi_count.get(&test_umi) {
-                    if parent_count > *child_count && parent_count >= threshold {
-                        let candidate = (parent_count, test_umi.clone());
-                        if best_parent.as_ref().is_none_or(|best| candidate > *best) {
-                            best_parent = Some(candidate);
+                        if let Some(&parent_count) = umi_count.get(&test_umi) {
+                            if is_directional_parent(parent_count, *child_count) {
+                                children
+                                    .entry(test_umi.clone())
+                                    .or_default()
+                                    .push(umi.clone());
+                            }
                         }
                     }
                 }
+                test_umi[pos] = umi[pos];
             }
-            test_umi[pos] = umi[pos];
         }
+    }
 
-        if let Some((_, parent)) = best_parent {
-            direct_mapping.insert(umi.clone(), parent);
+    let mut roots = umi_count.keys().collect::<Vec<_>>();
+    roots.sort_unstable_by(|a, b| umi_count[*b].cmp(&umi_count[*a]).then_with(|| b.cmp(a)));
+
+    let mut assigned = HashMap::new();
+    for root in roots {
+        if !assigned.contains_key(root) {
+            let mut stack = vec![root.as_slice()];
+            while let Some(umi) = stack.pop() {
+                if !assigned.contains_key(umi) {
+                    assigned.insert(umi.to_vec(), root.clone());
+                    if let Some(next) = children.get(umi) {
+                        stack.extend(next.iter().map(Vec::as_slice));
+                    }
+                }
+            }
         }
     }
 
     let mut corrections = HashMap::new();
-    for umi in umi_count.keys() {
-        let mut root = umi;
-        while let Some(parent) = direct_mapping.get(root) {
-            root = parent;
-        }
-        if root != umi {
-            corrections.insert(umi.clone(), root.clone());
+    for (umi, root) in assigned {
+        if umi != root {
+            corrections.insert(umi, root);
         }
     }
     corrections
+}
+
+fn is_canonical_umi(umi: &[u8]) -> bool {
+    !umi.is_empty()
+        && umi
+            .iter()
+            .all(|base| matches!(base, b'A' | b'C' | b'G' | b'T'))
+}
+
+fn is_directional_parent(parent_count: u64, child_count: u64) -> bool {
+    parent_count > child_count && child_count <= parent_count / 2 + parent_count % 2
 }
 
 #[cfg(test)]
@@ -152,6 +173,67 @@ mod tests {
     }
 
     #[test]
+    fn directional_mapping_uses_highest_reachable_root() {
+        let entries = [
+            (b"AAAA".to_vec(), 3),
+            (b"AAAC".to_vec(), 6),
+            (b"AAAG".to_vec(), 5),
+            (b"AATG".to_vec(), 10),
+        ];
+        let counts = HashMap::from(entries.clone());
+        let mapping = get_directional_umi_mapping(&counts);
+
+        assert_eq!(mapping.get(b"AAAA" as &[u8]), Some(&b"AATG".to_vec()));
+        assert_eq!(mapping.get(b"AAAG" as &[u8]), Some(&b"AATG".to_vec()));
+        assert!(!mapping.contains_key(b"AAAC" as &[u8]));
+
+        let reversed = entries.into_iter().rev().collect::<HashMap<_, _>>();
+        assert_eq!(mapping, get_directional_umi_mapping(&reversed));
+    }
+
+    #[test]
+    fn directional_mapping_enforces_abundance_threshold() {
+        let counts = HashMap::from([
+            (b"AAAA".to_vec(), 2),
+            (b"AAAT".to_vec(), 3),
+            (b"CCCC".to_vec(), 3),
+            (b"CCCT".to_vec(), 4),
+        ]);
+        let mapping = get_directional_umi_mapping(&counts);
+
+        assert_eq!(mapping.get(b"AAAA" as &[u8]), Some(&b"AAAT".to_vec()));
+        assert!(!mapping.contains_key(b"CCCC" as &[u8]));
+    }
+
+    #[test]
+    fn directional_mapping_leaves_invalid_umis_uncorrected() {
+        let counts = HashMap::from([
+            (Vec::new(), 1),
+            (b"NAAA".to_vec(), 1),
+            (b"aaaa".to_vec(), 1),
+            (b"AAAA".to_vec(), 10),
+            (b"CCCC".to_vec(), 0),
+            (b"CCCT".to_vec(), 10),
+        ]);
+        let mapping = get_directional_umi_mapping(&counts);
+
+        assert!(!mapping.contains_key(b"" as &[u8]));
+        assert!(!mapping.contains_key(b"NAAA" as &[u8]));
+        assert!(!mapping.contains_key(b"aaaa" as &[u8]));
+        assert!(!mapping.contains_key(b"CCCC" as &[u8]));
+    }
+
+    #[test]
+    fn directional_mapping_handles_threshold_without_overflow() {
+        let counts = HashMap::from([
+            (b"AAAA".to_vec(), u64::MAX / 2 + 2),
+            (b"AAAT".to_vec(), u64::MAX),
+        ]);
+
+        assert!(get_directional_umi_mapping(&counts).is_empty());
+    }
+
+    #[test]
     fn uses_lexicographically_larger_umi_on_equal_count() {
         let counts = HashMap::from([
             (b"AAAA".to_vec(), 1),
@@ -183,8 +265,11 @@ mod tests {
     fn directional_mapping_corrects_complete_tfseq_example() {
         let counts = parse_counts(TFSEQ_UMI_COUNTS);
         let mapping = get_directional_umi_mapping(&counts);
-        let expected = parse_counts("AAGTGGTTTT:45;AAGTGTATTT:91;ATACAATTGG:1;ATCACCCCCG:4;ATCACTCTCG:1;ATCACTGTGG:138;ATGCCGACAT:1;ATGCCGTCTT:109;ATTCGCCCGC:14;GAATGGCGCG:5;GATATTCCTT:1;GGACCTAGGT:103;GTTAAACTAT:22;TACGTCAATG:1;TCTAACGCAT:21;TGTCAGATAA:195;TTATATAAAT:32");
+        let expected = parse_counts("AAGTGGTTTT:41;AAGTGTATTT:95;ATACAATTGG:1;ATCACCCCCG:4;ATCACTCTCG:1;ATCACTGTGG:138;ATGCCGACAT:1;ATGCCGTCTT:109;ATTCGCCCGC:14;GAATGGCGCG:5;GATATTCCTT:1;GGACCTAGGT:103;GTTAAACTAT:22;TACGTCAATG:1;TCTAACGCAT:21;TGTCAGATAA:195;TTATATAAAT:32");
 
         assert_eq!(apply_mapping(&counts, &mapping), expected);
+        assert!(mapping
+            .values()
+            .all(|destination| !mapping.contains_key(destination)));
     }
 }
