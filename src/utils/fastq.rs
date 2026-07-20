@@ -13,6 +13,107 @@ use std::{
 };
 use tokio::runtime::Runtime;
 
+/// Trim fastq reads to a maximum length.
+///
+/// Reads longer than `length` are truncated from the 3' end. Reads that are
+/// already shorter than or equal to `length` are written unchanged. Sequence
+/// and quality scores are always truncated together.
+///
+/// Parameters
+/// ----------
+/// in_fq: str
+///     File path or URL to the input fastq file.
+/// out_fq: Path
+///     File path to the output fastq file.
+/// length: int
+///     Maximum read length. Must be greater than zero.
+/// compression: Literal['gzip', 'zst'] | None
+///     Compression algorithm to use. If None, the compression algorithm is inferred from the output file extension.
+/// compression_level: int | None
+///     Compression level to use.
+/// input_compression: Literal['gzip', 'zst'] | None
+///     Compression algorithm of the input fastq file. This must be specified
+///     when reading a compressed fastq file from a URL.
+/// num_threads: int
+///     Number of threads to use for compression.
+///
+/// Examples
+/// --------
+/// >>> from precellar.utils import trim_fastq
+/// >>> trim_fastq("reads.fastq.gz", "trimmed.fastq.zst", 50)
+#[pyfunction]
+#[pyo3(
+    signature = (
+        in_fq,
+        out_fq,
+        length,
+        *,
+        compression=None,
+        compression_level=None,
+        input_compression=None,
+        num_threads=16,
+    ),
+    text_signature = "(in_fq, out_fq, length, *, compression=None, compression_level=None, input_compression=None, num_threads=16)",
+)]
+pub fn trim_fastq(
+    py: Python<'_>,
+    in_fq: &str,
+    out_fq: PathBuf,
+    length: usize,
+    compression: Option<&str>,
+    compression_level: Option<u32>,
+    input_compression: Option<&str>,
+    num_threads: u32,
+) -> Result<()> {
+    if length == 0 {
+        bail!("length must be greater than zero");
+    }
+    if is_url(in_fq) && input_compression.is_none() {
+        log::warn!("The input source is URL and input_compression is None");
+    }
+
+    let compression = compression
+        .map(Compression::from_str)
+        .transpose()
+        .map_err(anyhow::Error::msg)?
+        .or((&out_fq).try_into().ok());
+    let input_compression = input_compression
+        .map(Compression::from_str)
+        .transpose()
+        .map_err(anyhow::Error::msg)?;
+    let mut writer = Writer::new(BufWriter::new(create_file(
+        out_fq,
+        compression,
+        compression_level,
+        num_threads,
+    )?));
+
+    Runtime::new()?.block_on(async {
+        let reader = open_file_async(in_fq, input_compression).await?;
+        let mut reader = fastq::r#async::io::Reader::new(tokio::io::BufReader::new(reader));
+        let mut records = reader.records();
+        let mut count = 0u64;
+
+        while let Some(record) = records.next().await {
+            if count % 1_000_000 == 0 {
+                py.check_signals()?;
+            }
+
+            let mut record = record?;
+            trim_record(&mut record, length);
+            writer.write_record(&record)?;
+            count += 1;
+        }
+
+        anyhow::Ok(())
+    })
+}
+
+fn trim_record(record: &mut fastq::Record, length: usize) {
+    record.sequence_mut().truncate(length);
+    record.quality_scores_mut().truncate(length);
+}
+
 /// Remove barcode from the read names of fastq records.
 ///
 /// The old practice of storing barcodes in read names is not recommended. This
@@ -510,6 +611,38 @@ fn gen_unique_barcodes(n: usize) -> Vec<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_trim_record_truncates_sequence_and_quality() {
+        let mut record = fastq::Record::new(
+            fastq::record::Definition::new("read1", "description"),
+            b"ACGTAC".to_vec(),
+            b"ABCDEF".to_vec(),
+        );
+        let definition = record.definition().clone();
+
+        trim_record(&mut record, 4);
+
+        assert_eq!(record.definition(), &definition);
+        assert_eq!(record.sequence(), b"ACGT");
+        assert_eq!(record.quality_scores(), b"ABCD");
+    }
+
+    #[test]
+    fn test_trim_record_leaves_short_and_exact_reads_unchanged() {
+        for sequence in [b"AC".as_slice(), b"ACGT".as_slice()] {
+            let mut record = fastq::Record::new(
+                fastq::record::Definition::new("read1", ""),
+                sequence.to_vec(),
+                vec![b'I'; sequence.len()],
+            );
+            let expected = record.clone();
+
+            trim_record(&mut record, 4);
+
+            assert_eq!(record, expected);
+        }
+    }
 
     #[test]
     fn test_gen_unique_barcodes() {
