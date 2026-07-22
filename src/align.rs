@@ -1,7 +1,7 @@
 use crate::aligners::AlignerRef;
 use crate::pyseqspec::extract_assays;
 use crate::sinks::{
-    AlignmentContext, AlignmentSink, BamSink, FragmentsSink, GeneQuantificationSink,
+    AlignmentContext, AlignmentSink, BamSink, FragmentsSink, GeneQuantificationSink, NullSink,
 };
 use anyhow::{bail, Result};
 use indicatif::{ProgressBar, ProgressFinish, ProgressStyle};
@@ -437,7 +437,7 @@ impl AlignmentJob {
     ///
     /// Parameters
     /// ----------
-    /// sink : precellar.sinks.BamSink | precellar.sinks.FragmentsSink | precellar.sinks.GeneQuantificationSink
+    /// sink : precellar.sinks.NullSink | precellar.sinks.BamSink | precellar.sinks.FragmentsSink | precellar.sinks.GeneQuantificationSink
     ///     Configured output sink.
     ///
     /// Returns
@@ -471,6 +471,9 @@ impl AlignmentJob {
     ///         precellar.sinks.BamSink("aligned.bam")
     ///     )
     pub fn run_sink<'py>(&mut self, py: Python<'py>, sink: Bound<'py, PyAny>) -> Result<Py<PyAny>> {
+        if let Ok(sink) = sink.extract::<PyRef<'_, NullSink>>() {
+            return self.take_state()?.run_sink(py, &*sink);
+        }
         if let Ok(sink) = sink.extract::<PyRef<'_, BamSink>>() {
             return self.take_state()?.run_sink(py, &*sink);
         }
@@ -481,7 +484,7 @@ impl AlignmentJob {
             return self.take_state()?.run_sink(py, &*sink);
         }
         Err(pyo3::exceptions::PyTypeError::new_err(
-            "sink must be precellar.sinks.BamSink, precellar.sinks.FragmentsSink, or precellar.sinks.GeneQuantificationSink",
+            "sink must be precellar.sinks.NullSink, precellar.sinks.BamSink, precellar.sinks.FragmentsSink, or precellar.sinks.GeneQuantificationSink",
         )
         .into())
     }

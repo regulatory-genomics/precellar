@@ -42,19 +42,22 @@ impl GenomeBaseIndex {
     }
 
     pub fn get_chrom_sizes(&self) -> DataFrame {
-        DataFrame::new(self.chrom_sizes.len(), vec![
-            Column::new(
-                "reference_seq_name".into(),
-                self.chrom_sizes
-                    .iter()
-                    .map(|x| x.0.clone())
-                    .collect::<Series>(),
-            ),
-            Column::new(
-                "reference_seq_length".into(),
-                self.chrom_sizes.iter().map(|x| x.1).collect::<Series>(),
-            ),
-        ])
+        DataFrame::new(
+            self.chrom_sizes.len(),
+            vec![
+                Column::new(
+                    "reference_seq_name".into(),
+                    self.chrom_sizes
+                        .iter()
+                        .map(|x| x.0.clone())
+                        .collect::<Series>(),
+                ),
+                Column::new(
+                    "reference_seq_length".into(),
+                    self.chrom_sizes.iter().map(|x| x.1).collect::<Series>(),
+                ),
+            ],
+        )
         .unwrap()
     }
 

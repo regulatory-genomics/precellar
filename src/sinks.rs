@@ -121,6 +121,33 @@ fn write_alignments<'a>(
     Ok(())
 }
 
+#[pyclass(module = "precellar.sinks", name = "NullSink")]
+pub(crate) struct NullSink;
+
+#[pymethods]
+impl NullSink {
+    /// Create a sink that discards all alignment output.
+    #[new]
+    fn new() -> Self {
+        Self
+    }
+}
+
+impl AlignmentSink for NullSink {
+    fn consume<'py, 'stream>(
+        &self,
+        py: Python<'py>,
+        _header: &sam::Header,
+        alignments: &mut AlignProgressBar<'stream, AlignerRef<'py>>,
+        _context: &mut AlignmentContext,
+    ) -> Result<Option<OutputReport>> {
+        for _ in alignments {
+            py.check_signals()?;
+        }
+        Ok(None)
+    }
+}
+
 #[pyclass(module = "precellar.sinks", name = "BamSink")]
 pub(crate) struct BamSink {
     output: PathBuf,
@@ -319,6 +346,7 @@ impl AlignmentSink for GeneQuantificationSink {
 
 pub(crate) fn register_sinks(parent: &Bound<'_, PyModule>) -> PyResult<()> {
     let sinks = PyModule::new(parent.py(), "sinks")?;
+    sinks.add_class::<NullSink>()?;
     sinks.add_class::<BamSink>()?;
     sinks.add_class::<FragmentsSink>()?;
     sinks.add_class::<GeneQuantificationSink>()?;

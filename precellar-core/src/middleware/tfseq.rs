@@ -219,6 +219,7 @@ pub struct FloatingBarcodeStage<W> {
     correction_options: BarcodeCorrectOptions,
     pending: Option<bed_utils::extsort::ExternalChunkBuilder<PendingFloatingBarcode>>,
     output: W,
+    output_num_umis: bool,
     thread_pool: rayon::ThreadPool,
     qc: FloatingBarcodeQc,
     finished: bool,
@@ -263,6 +264,7 @@ where
                 2,
             )?),
             output,
+            output_num_umis: false,
             thread_pool: rayon::ThreadPoolBuilder::new().num_threads(1).build()?,
             qc: FloatingBarcodeQc {
                 num_extracted_single: vec![0; num_insertions],
@@ -290,6 +292,11 @@ where
         Ok(self)
     }
 
+    pub fn with_output_num_umis(mut self, output_num_umis: bool) -> Self {
+        self.output_num_umis = output_num_umis;
+        self
+    }
+
     fn selected_sequence<'a>(
         use_read1: bool,
         record: &'a AnnotatedFastq,
@@ -311,11 +318,16 @@ where
         output: &mut W,
         (cell_barcode, name): (Vec<u8>, Vec<u8>),
         umis: BTreeMap<Vec<u8>, u64>,
+        output_num_umis: bool,
     ) -> std::io::Result<()> {
         output.write_all(&cell_barcode)?;
         output.write_all(b"\t")?;
         output.write_all(&name)?;
         output.write_all(b"\t")?;
+        if output_num_umis {
+            writeln!(output, "{}", umis.len())?;
+            return Ok(());
+        }
         for (index, (umi, count)) in umis.into_iter().enumerate() {
             if index > 0 {
                 output.write_all(b";")?;
@@ -532,9 +544,13 @@ where
             }
         }
 
-        self.output.write_all(b"cell_barcode\tname\tumi_counts\n")?;
+        if self.output_num_umis {
+            self.output.write_all(b"cell_barcode\tname\tnum_umis\n")?;
+        } else {
+            self.output.write_all(b"cell_barcode\tname\tumi_counts\n")?;
+        }
         for (key, umis) in matches {
-            Self::write_result(&mut self.output, key, umis)?;
+            Self::write_result(&mut self.output, key, umis, self.output_num_umis)?;
         }
         self.output.flush()?;
         self.finished = true;
@@ -789,6 +805,50 @@ mod tests {
             stage.into_output(),
             b"cell_barcode\tname\tumi_counts\nCELL\tTF1\tAAAA:3\n"
         );
+    }
+
+    #[test]
+    fn outputs_number_of_corrected_distinct_umis() {
+        let mut stage = FloatingBarcodeStage::new(
+            true,
+            extractor(),
+            table(),
+            BarcodeCorrectOptions::default(),
+            Vec::new(),
+        )
+        .unwrap()
+        .with_output_num_umis(true);
+        let sequence = full_sequence();
+        stage
+            .process(vec![
+                record_with_metadata(sequence, Some(b"CELL"), Some(b"AAAA")),
+                record_with_metadata(sequence, Some(b"CELL"), Some(b"AAAA")),
+                record_with_metadata(sequence, Some(b"CELL"), Some(b"AAAT")),
+                record_with_metadata(sequence, Some(b"EMPTY"), None),
+                record_with_metadata(sequence, Some(b"EMPTY"), None),
+            ])
+            .unwrap();
+        stage.finish().unwrap();
+        assert_eq!(
+            stage.into_output(),
+            b"cell_barcode\tname\tnum_umis\nCELL\tTF1\t1\nEMPTY\tTF1\t1\n"
+        );
+    }
+
+    #[test]
+    fn outputs_num_umis_header_without_matches() {
+        let mut stage = FloatingBarcodeStage::new(
+            true,
+            extractor(),
+            table(),
+            BarcodeCorrectOptions::default(),
+            Vec::new(),
+        )
+        .unwrap()
+        .with_output_num_umis(true);
+
+        stage.finish().unwrap();
+        assert_eq!(stage.into_output(), b"cell_barcode\tname\tnum_umis\n");
     }
 
     #[test]

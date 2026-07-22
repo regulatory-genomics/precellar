@@ -30,6 +30,7 @@ pub struct FloatingBarcodeStage {
     max_barcode_mismatch: usize,
     confidence_threshold: f64,
     max_expected_errors: f64,
+    output_num_umis: bool,
 }
 
 #[pymethods]
@@ -40,7 +41,7 @@ impl FloatingBarcodeStage {
             output, barcode_table, flanks, *,
             use_read1=false, kmer_size=15, max_fixed_edit_rate=0.1,
             max_barcode_mismatch=1, confidence_threshold=0.9,
-            max_expected_errors=None,
+            max_expected_errors=None, output_num_umis=true,
         )
     )]
     #[allow(clippy::too_many_arguments)]
@@ -54,6 +55,7 @@ impl FloatingBarcodeStage {
         max_barcode_mismatch: usize,
         confidence_threshold: f64,
         max_expected_errors: Option<f64>,
+        output_num_umis: bool,
     ) -> Result<Self> {
         if kmer_size == 0 {
             bail!("kmer_size must be greater than zero");
@@ -88,6 +90,7 @@ impl FloatingBarcodeStage {
             max_barcode_mismatch,
             confidence_threshold,
             max_expected_errors: max_expected_errors.unwrap_or(f64::MAX),
+            output_num_umis,
         })
     }
 }
@@ -152,7 +155,8 @@ impl FloatingBarcodeStage {
             barcode_table,
             correction_options,
             output,
-        )?;
+        )?
+        .with_output_num_umis(self.output_num_umis);
         Ok(plan.with_stage(stage.with_num_threads(num_threads)?))
     }
 }
