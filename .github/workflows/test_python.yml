@@ -43,6 +43,9 @@ jobs:
     - name: Install the project
       run: uv sync --all-groups
 
+    - name: Run Python tests
+      run: uv run pytest
+
   build-wheel:
     needs: build-and-test
     if: ${{ startsWith(github.ref, 'refs/tags/') || contains(github.event.head_commit.message, '[wheel]') }}

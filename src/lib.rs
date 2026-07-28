@@ -113,9 +113,6 @@ fn precellar(m: &Bound<'_, PyModule>) -> PyResult<()> {
 
     m.add_class::<pyseqspec::Assay>()?;
 
-    m.add_function(wrap_pyfunction!(align::make_bwa_mem2_index, m)?)?;
-    m.add_function(wrap_pyfunction!(align::make_minibwa_index, m)?)?;
-    m.add_function(wrap_pyfunction!(align::make_minimap2_index, m)?)?;
     m.add_class::<align::FastqPipeline>()?;
     m.add_class::<align::AlignmentJob>()?;
     m.add_function(wrap_pyfunction!(make_fastq, m)?)?;

@@ -1,6 +1,6 @@
-use anyhow::{bail, Result};
+use crate::align::parse_minimap2_preset;
+use anyhow::{bail, Context, Result};
 use bwa_mem2::{AlignerOpts, BurrowsWheelerAligner, FMIndex};
-use log::warn;
 use minibwa::{Index as MiniBwaIndex, MiniBwaSR, Options as MiniBwaOptions};
 use noodles_sam::Header;
 use precellar::align::{Minimap2Aligner, Minimap2Opts};
@@ -151,7 +151,12 @@ impl STAR {
     Parameters
     ----------
     index_path : str
-        The path to the BWA-MEM2 index directory.
+        The path prefix for the BWA-MEM2 index files.
+    fasta : str | None
+        Reference FASTA used to build the index when `<index_path>.0123` does not exist.
+    build_if_missing : bool
+        Build a persistent index when `<index_path>.0123` does not exist. Requires `fasta`.
+        Defaults to `True`.
 */
 #[pyclass(name = "BwaMem2")]
 #[repr(transparent)]
@@ -175,13 +180,36 @@ impl DerefMut for BWAMEM2 {
 impl BWAMEM2 {
     #[new]
     #[pyo3(
-        signature = (index_path),
-        text_signature = "(index_path)",
+        signature = (index_path, *, fasta=None, build_if_missing=true),
+        text_signature = "(index_path, *, fasta=None, build_if_missing=True)",
     )]
-    pub fn new(index_path: PathBuf) -> Result<Self> {
-        let aligner =
-            BurrowsWheelerAligner::new(FMIndex::read(index_path).unwrap(), AlignerOpts::default());
-        Ok(BWAMEM2(aligner))
+    pub fn new(
+        index_path: PathBuf,
+        fasta: Option<PathBuf>,
+        build_if_missing: bool,
+    ) -> Result<Self> {
+        let sentinel = path_with_suffix(&index_path, ".0123");
+        let index = if sentinel.exists() {
+            FMIndex::read(&index_path)?
+        } else {
+            if !build_if_missing {
+                bail!(
+                    "BWA-MEM2 index does not exist at '{}'. Provide a prebuilt index or set build_if_missing=True with fasta=...",
+                    index_path.display()
+                );
+            }
+            let fasta = fasta.context("fasta is required when build_if_missing=True")?;
+            log::info!(
+                "Creating BWA-MEM2 index for fasta: {:?} with prefix: {:?}",
+                fasta,
+                index_path
+            );
+            FMIndex::new(fasta, &index_path)?
+        };
+        Ok(BWAMEM2(BurrowsWheelerAligner::new(
+            index,
+            AlignerOpts::default(),
+        )))
     }
 
     /// The maximum number of occurrences of a seed in the reference.
@@ -223,6 +251,12 @@ impl BWAMEM2 {
     }
 }
 
+fn path_with_suffix(path: &std::path::Path, suffix: &str) -> PathBuf {
+    let mut value = path.as_os_str().to_os_string();
+    value.push(suffix);
+    value.into()
+}
+
 /** The MiniBWA aligner.
 
     MiniBWA is a fast short-read aligner and successor to BWA-MEM. It is used to
@@ -232,6 +266,13 @@ impl BWAMEM2 {
     ----------
     index_prefix : str
         The path prefix for the MiniBWA index files, without the .l2b or .mbw extension.
+    fasta : str | None
+        Reference FASTA used to build the index when it cannot be loaded.
+    build_if_missing : bool
+        Build a persistent index when the index cannot be loaded. Requires `fasta`.
+        Defaults to `True`.
+    num_threads : int
+        Number of threads used for index construction. Defaults to 8.
     preset : str | None
         Optional minibwa preset. Available presets are 'sr', 'lr', and 'adap'.
     methylation : bool
@@ -259,14 +300,51 @@ impl DerefMut for MINIBWA {
 impl MINIBWA {
     #[new]
     #[pyo3(
-        signature = (index_prefix, *, preset=None, methylation=false),
-        text_signature = "(index_prefix, *, preset=None, methylation=False)",
+        signature = (index_prefix, *, fasta=None, build_if_missing=true, num_threads=8, preset=None, methylation=false),
+        text_signature = "(index_prefix, *, fasta=None, build_if_missing=True, num_threads=8, preset=None, methylation=False)",
     )]
-    pub fn new(index_prefix: PathBuf, preset: Option<&str>, methylation: bool) -> Result<Self> {
-        let index = MiniBwaIndex::load(index_prefix, methylation)?;
+    pub fn new(
+        index_prefix: PathBuf,
+        fasta: Option<PathBuf>,
+        build_if_missing: bool,
+        num_threads: i32,
+        preset: Option<&str>,
+        methylation: bool,
+    ) -> Result<Self> {
         let options = match preset {
             Some(preset) => MiniBwaOptions::preset(preset)?,
             None => MiniBwaOptions::default(),
+        };
+        let index = match MiniBwaIndex::load(&index_prefix, methylation) {
+            Ok(index) => index,
+            Err(load_error) if !build_if_missing => bail!(
+                "Failed to load MiniBWA index at '{}': {}. Provide a loadable index or set build_if_missing=True with fasta=...",
+                index_prefix.display(),
+                load_error
+            ),
+            Err(load_error) => {
+                let fasta = fasta.with_context(|| {
+                    format!(
+                        "Failed to load MiniBWA index at '{}': {}. fasta is required when build_if_missing=True",
+                        index_prefix.display(),
+                        load_error
+                    )
+                })?;
+                log::info!(
+                    "Creating MiniBWA index for fasta: {:?} with prefix: {:?}",
+                    fasta,
+                    index_prefix
+                );
+                MiniBwaIndex::build(fasta, &index_prefix, num_threads, methylation).with_context(
+                    || {
+                        format!(
+                            "Failed to build MiniBWA index at '{}' after loading failed: {}",
+                            index_prefix.display(),
+                            load_error
+                        )
+                    },
+                )?
+            }
         };
         Ok(MINIBWA(MiniBwaSR::new(index, options)?))
     }
@@ -281,6 +359,11 @@ impl MINIBWA {
     ----------
     index_path : str
         The path to the Minimap2 index file (.mmi).
+    fasta : str | None
+        Reference FASTA used to build `index_path` when it does not exist.
+    build_if_missing : bool
+        Build a persistent index when `index_path` does not exist. Requires `fasta`.
+        Defaults to `True`.
     preset : str
         The minimap2 preset to use. Available presets:
         - Long Reads DNA Mapping:
@@ -304,22 +387,20 @@ impl MINIBWA {
           - 'ava-ont': ONT all-vs-all overlap
 */
 #[pyclass(name = "Minimap2")]
-pub struct MINIMAP2 {
-    aligner: Minimap2Aligner,
-    _temp_index: Option<tempfile::TempPath>, // To hold temporary index if created from FASTA
-}
+#[repr(transparent)]
+pub struct MINIMAP2(Minimap2Aligner);
 
 impl Deref for MINIMAP2 {
     type Target = Minimap2Aligner;
 
     fn deref(&self) -> &Self::Target {
-        &self.aligner
+        &self.0
     }
 }
 
 impl DerefMut for MINIMAP2 {
     fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.aligner
+        &mut self.0
     }
 }
 
@@ -327,59 +408,47 @@ impl DerefMut for MINIMAP2 {
 impl MINIMAP2 {
     #[new]
     #[pyo3(
-        signature = (index_path, *, preset="map-ont"),
-        text_signature = "(index_path, *, preset='map-ont')",
+        signature = (index_path, *, fasta=None, build_if_missing=true, preset="map-ont"),
+        text_signature = "(index_path, *, fasta=None, build_if_missing=True, preset='map-ont')",
     )]
-    pub fn new(index_path: PathBuf, preset: &str) -> Result<Self> {
-        let preset = match preset.to_lowercase().as_str() {
-            // Long Reads DNA Mapping
-            "map-ont" => minimap2::Preset::MapOnt,
-            "map-pb" => minimap2::Preset::MapPb,
-            "map-hifi" => minimap2::Preset::MapHifi,
-            // "map-iclr" => minimap2::Preset::MapIclr, // Mentioned in minimap2, but not supported by minimap2-rs
-            "lr:hq" => minimap2::Preset::LrHq, 
-            // Spliced / RNA-seq Alignment
-            "splice" => minimap2::Preset::Splice,
-            "splice:hq" => minimap2::Preset::SpliceHq,
-            "splice:sr" => minimap2::Preset::SpliceSr,
-            // Long Assembly to Reference Mapping
-            "asm5" => minimap2::Preset::Asm5,
-            "asm10" => minimap2::Preset::Asm10,
-            "asm20" => minimap2::Preset::Asm20,
-            // Short Reads Mapping
-            "short" => minimap2::Preset::Short,
-            "sr" => minimap2::Preset::Sr,
-            // All-vs-All overlap Mapping
-            "ava-pb" => minimap2::Preset::AvaPb,
-            "ava-ont" => minimap2::Preset::AvaOnt,
-            _ => bail!(
-                "Invalid preset '{}'. Valid presets: map-ont, map-pb, map-hifi, lr:hq, splice, splice:hq, splice:sr, asm5, asm10, asm20, short, sr, ava-pb, ava-ont",
-                preset
-            ),
-        };
+    pub fn new(
+        index_path: PathBuf,
+        fasta: Option<PathBuf>,
+        build_if_missing: bool,
+        preset: &str,
+    ) -> Result<Self> {
+        let preset = parse_minimap2_preset(preset)?;
 
-        let _temp_index = if is_fasta_file(&index_path) {
-            let tmp = tempfile::NamedTempFile::new()?.into_temp_path();
-            warn!(
-                "Provided index path is a FASTA file. Creating temporary minimap2 index at {:?}.",
-                tmp
+        if is_fasta_file(&index_path) {
+            bail!(
+                "Minimap2 index_path must point to an index file, not a FASTA. Pass the output index path as index_path and use fasta=... with build_if_missing=True"
             );
-            warn!("This may take a few minutes. To save time in the future, consider pre-building the minimap2 index.");
+        }
+
+        if !index_path.exists() {
+            if !build_if_missing {
+                bail!(
+                    "Minimap2 index does not exist at '{}'. Provide a prebuilt index or set build_if_missing=True with fasta=...",
+                    index_path.display()
+                );
+            }
+            let fasta = fasta.context("fasta is required when build_if_missing=True")?;
+            let output_index = index_path
+                .to_str()
+                .context("Minimap2 index path must be valid UTF-8")?;
+            log::info!(
+                "Creating minimap2 index for fasta: {:?} with preset: {:?}",
+                fasta,
+                preset
+            );
             minimap2::Aligner::builder()
                 .preset(preset.clone())
-                .with_index(&index_path, Some(tmp.to_path_buf().to_str().unwrap()))
-                .map_err(|e| anyhow::anyhow!("Failed to create minimap2 index: {}", e))?;
-            Some(tmp)
-        } else {
-            None
-        };
-        let index = _temp_index.as_ref().map_or(index_path, |x| x.to_path_buf());
-        let opts = Minimap2Opts::new(index).with_preset(preset);
+                .with_index(&fasta, Some(output_index))
+                .map_err(|error| anyhow::anyhow!("Failed to create minimap2 index: {}", error))?;
+        }
 
-        Ok(Self {
-            aligner: Minimap2Aligner::new(opts)?,
-            _temp_index,
-        })
+        let opts = Minimap2Opts::new(index_path).with_preset(preset);
+        Ok(Self(Minimap2Aligner::new(opts)?))
     }
 
     /// Get the currently configured preset name.
@@ -390,29 +459,32 @@ impl MINIMAP2 {
     ///     The preset name, or None if using default (map-ont).
     #[getter]
     pub fn get_preset(&self) -> Option<String> {
-        self.aligner
+        self.0
             .get_opts()
             .preset()
             .map(|p| format!("{:?}", p).to_lowercase())
     }
 }
 
-fn is_fasta_file(path: impl AsRef<std::path::Path>) -> bool {
-    let mut path = path.as_ref().to_path_buf();
-    if let Some(ext) = path.extension() {
-        if ext.to_str().unwrap().to_lowercase().as_str() == "gz" {
-            path = path.with_extension("");
-        }
-    }
-
-    if let Some(ext) = path.extension() {
-        match ext.to_str().unwrap().to_lowercase().as_str() {
-            "fa" | "fasta" | "fna" | "ffn" | "faa" | "frn" => true,
-            _ => false,
-        }
+fn is_fasta_file(path: &std::path::Path) -> bool {
+    let path = if path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("gz"))
+    {
+        path.with_extension("")
     } else {
-        false
-    }
+        path.to_path_buf()
+    };
+
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| {
+            matches!(
+                extension.to_ascii_lowercase().as_str(),
+                "fa" | "fasta" | "fna" | "ffn" | "faa" | "frn"
+            )
+        })
 }
 
 #[pymodule]

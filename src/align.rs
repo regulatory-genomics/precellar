@@ -5,7 +5,6 @@ use crate::sinks::{
 };
 use anyhow::{bail, Result};
 use indicatif::{ProgressBar, ProgressFinish, ProgressStyle};
-use log::info;
 use precellar::align::{Aligner, AlignmentResult, AlignmentRunner};
 use precellar::align::{BarcodeCorrectionConfig, FastqPlan, MultiMapR};
 use precellar::qc::Metric;
@@ -16,60 +15,8 @@ use seqspec::Modality;
 use serde_json::{Map, Value};
 use std::{path::PathBuf, str::FromStr};
 
-/// Create a genome index from a fasta file.
-///
-/// Parameters
-/// ----------
-///
-/// fasta: Path
-///    File path to the fasta file.
-/// genome_prefix: Path
-///   File path to the genome index.
-#[pyfunction]
-pub fn make_bwa_mem2_index(fasta: PathBuf, genome_prefix: PathBuf) -> Result<()> {
-    bwa_mem2::FMIndex::new(fasta, genome_prefix)?;
-    Ok(())
-}
-
-/// Create a minibwa index from a FASTA file.
-///
-/// Parameters
-/// ----------
-///
-/// fasta: Path
-///    File path to the FASTA file.
-/// index_prefix: Path
-///    File path prefix for the minibwa index files.
-/// num_threads: int
-///    The number of threads to use when building the index.
-/// methylation: bool
-///    Whether to build a methylation-aware index.
-#[pyfunction]
-#[pyo3(
-    signature = (fasta, index_prefix, *, num_threads=8, methylation=false),
-    text_signature = "(fasta, index_prefix, *, num_threads=8, methylation=False)",
-)]
-pub fn make_minibwa_index(
-    fasta: PathBuf,
-    index_prefix: PathBuf,
-    num_threads: i32,
-    methylation: bool,
-) -> Result<()> {
-    minibwa::build_index(fasta, index_prefix, num_threads, methylation)?;
-    Ok(())
-}
-
-/// Create a minimap2 index from a FASTA file.
-///
-/// `preset` selects the minimap2 read or alignment model. See the Python API
-/// documentation for the list of supported presets.
-#[pyfunction]
-#[pyo3(
-    signature = (fasta, output_index, *, preset="map-ont"),
-    text_signature = "(fasta, output_index, *, preset='map-ont')",
-)]
-pub fn make_minimap2_index(fasta: PathBuf, output_index: PathBuf, preset: &str) -> Result<()> {
-    let preset = match preset.to_lowercase().as_str() {
+pub(crate) fn parse_minimap2_preset(preset: &str) -> Result<minimap2::Preset> {
+    Ok(match preset.to_lowercase().as_str() {
         "map-ont" => minimap2::Preset::MapOnt,
         "map-pb" => minimap2::Preset::MapPb,
         "map-hifi" => minimap2::Preset::MapHifi,
@@ -88,20 +35,7 @@ pub fn make_minimap2_index(fasta: PathBuf, output_index: PathBuf, preset: &str) 
             "Invalid preset '{}'. Valid presets: map-ont, map-pb, map-hifi, lr:hq, splice, splice:hq, splice:sr, asm5, asm10, asm20, short, sr, ava-pb, ava-ont",
             preset,
         ),
-    };
-
-    info!(
-        "Creating minimap2 index for fasta: {:?} with preset: {:?}",
-        fasta, preset
-    );
-    minimap2::Aligner::builder()
-        .preset(preset)
-        .with_index(
-            fasta.to_str().unwrap(),
-            Some(output_index.to_str().unwrap()),
-        )
-        .map_err(|error| anyhow::anyhow!("Failed to create minimap2 index: {}", error))?;
-    Ok(())
+    })
 }
 
 /// A reusable configuration for reading and annotating assay FASTQs.

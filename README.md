@@ -36,7 +36,7 @@ Each example dataset below contains approximately 2.5 million fastq records.
 > You need to **change the paths to the reference genome** in the examples below.
 > The reference genome should be downloaded and indexed before running the examples.
 > STAR genome index for human and mouse can be downloaded from [here](https://www.10xgenomics.com/support/software/cell-ranger/downloads#reference-downloads).
-> BWA-MEM2 and MiniBWA genome indexes can be built using the `make_bwa_mem2_index` and `make_minibwa_index` functions.
+> BWA-MEM2, MiniBWA, and Minimap2 indexes can be built by their aligner constructors when `fasta` is provided.
 
 ### Gene Expression
 
