@@ -19,6 +19,7 @@ pub struct FloatingBarcodeQc {
     pub num_records: u64,
     pub num_extracted: u64,
     pub num_matched: u64,
+    pub num_umi_duplicates: u64,
     pub num_extracted_single: Vec<u64>,
     pub num_extracted_all: u64,
     pub num_extracted_with_valid_cell_barcode: u64,
@@ -33,6 +34,14 @@ impl FloatingBarcodeQc {
         }
     }
 
+    pub fn frac_duplicates(&self) -> f64 {
+        if self.num_matched == 0 {
+            0.0
+        } else {
+            self.num_umi_duplicates as f64 / self.num_matched as f64
+        }
+    }
+
     pub fn to_json(&self) -> serde_json::Value {
         let mut metrics = json!({
             "num_records": self.num_records,
@@ -40,6 +49,7 @@ impl FloatingBarcodeQc {
             "num_matched": self.num_matched,
             "num_extracted_all": self.num_extracted_all,
             "frac_valid_cell_barcode": self.frac_valid_cell_barcode(),
+            "frac_duplicates": self.frac_duplicates(),
         });
         if let Some(metrics) = metrics.as_object_mut() {
             for (index, count) in self.num_extracted_single.iter().enumerate() {
@@ -543,6 +553,8 @@ where
                 *umis.entry(corrected_umi).or_default() += count;
             }
         }
+        let num_unique_umis = matches.values().map(|umis| umis.len() as u64).sum::<u64>();
+        self.qc.num_umi_duplicates = self.qc.num_matched - num_unique_umis;
 
         if self.output_num_umis {
             self.output.write_all(b"cell_barcode\tname\tnum_umis\n")?;
@@ -674,6 +686,7 @@ mod tests {
             num_records: 10,
             num_extracted: 9,
             num_matched: 8,
+            num_umi_duplicates: 2,
             num_extracted_single: vec![1, 2, 3],
             num_extracted_all: 4,
             num_extracted_with_valid_cell_barcode: 6,
@@ -690,6 +703,7 @@ mod tests {
                 "num_extracted_single_3": 3,
                 "num_extracted_all": 4,
                 "frac_valid_cell_barcode": 6.0 / 9.0,
+                "frac_duplicates": 2.0 / 8.0,
             })
         );
     }
@@ -697,6 +711,11 @@ mod tests {
     #[test]
     fn valid_cell_barcode_fraction_is_zero_without_extracted_reads() {
         assert_eq!(FloatingBarcodeQc::default().frac_valid_cell_barcode(), 0.0);
+    }
+
+    #[test]
+    fn duplicate_fraction_is_zero_without_matches() {
+        assert_eq!(FloatingBarcodeQc::default().frac_duplicates(), 0.0);
     }
 
     #[test]
@@ -801,6 +820,9 @@ mod tests {
             ])
             .unwrap();
         stage.finish().unwrap();
+        assert_eq!(stage.qc().num_matched, 3);
+        assert_eq!(stage.qc().num_umi_duplicates, 2);
+        assert_eq!(stage.qc().frac_duplicates(), 2.0 / 3.0);
         assert_eq!(
             stage.into_output(),
             b"cell_barcode\tname\tumi_counts\nCELL\tTF1\tAAAA:3\n"
