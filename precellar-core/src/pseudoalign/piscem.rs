@@ -1,5 +1,7 @@
 use crate::align::AnnotatedFastq;
 use anyhow::{ensure, Context, Result};
+use cf1_rs::{cf_build, CfInput};
+use piscem_rs::index::build::{build_index, BuildConfig};
 use piscem_rs::index::contig_table::ContigTable;
 use piscem_rs::index::reference_index::ReferenceIndex;
 use piscem_rs::mapping::cache::MappingCache;
@@ -14,7 +16,399 @@ use piscem_rs::mapping::sketch_hit_simple::SketchHitInfoSimple;
 use piscem_rs::mapping::streaming_query::PiscemStreamingQuery;
 use rayon::prelude::*;
 use sshash_lib::{dispatch_on_k, Dictionary, Kmer, KmerBits};
-use std::path::Path;
+use std::path::{Path, PathBuf};
+
+/// Configuration for building a piscem index from transcript sequences.
+#[derive(Debug, Clone)]
+pub struct PiscemIndexBuildOptions {
+    pub k: usize,
+    pub m: usize,
+    pub num_threads: usize,
+    pub build_ec_table: bool,
+    pub work_dir: Option<PathBuf>,
+    pub keep_intermediate_dbg: bool,
+    pub overwrite: bool,
+    pub ram_limit_gib: Option<usize>,
+}
+
+impl Default for PiscemIndexBuildOptions {
+    fn default() -> Self {
+        Self {
+            k: 31,
+            m: 19,
+            num_threads: 8,
+            build_ec_table: true,
+            work_dir: None,
+            keep_intermediate_dbg: false,
+            overwrite: false,
+            ram_limit_gib: None,
+        }
+    }
+}
+
+/// Configuration for constructing a spliced+intronic reference and piscem index.
+#[derive(Debug, Clone)]
+pub struct SpliciIndexBuildOptions {
+    pub read_length: i64,
+    pub flank_trim_length: i64,
+    pub deduplicate_sequences: bool,
+    pub extra_spliced: Option<PathBuf>,
+    pub extra_unspliced: Option<PathBuf>,
+    pub gff3: bool,
+    pub piscem: PiscemIndexBuildOptions,
+}
+
+impl Default for SpliciIndexBuildOptions {
+    fn default() -> Self {
+        Self {
+            read_length: 91,
+            flank_trim_length: 5,
+            deduplicate_sequences: false,
+            extra_spliced: None,
+            extra_unspliced: None,
+            gff3: false,
+            piscem: PiscemIndexBuildOptions::default(),
+        }
+    }
+}
+
+/// Paths produced by [`build_splici_index`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SpliciIndex {
+    pub reference_fasta: PathBuf,
+    pub transcript_to_gene: PathBuf,
+    pub gene_id_to_name: PathBuf,
+    pub reference_metadata: PathBuf,
+    pub index_prefix: PathBuf,
+}
+
+/// Build a spliced+intronic reference from a genome and annotation, then index it with piscem.
+pub fn build_splici_index(
+    genome_fasta: impl AsRef<Path>,
+    annotation: impl AsRef<Path>,
+    output_dir: impl AsRef<Path>,
+    options: SpliciIndexBuildOptions,
+) -> Result<SpliciIndex> {
+    let genome_fasta = genome_fasta.as_ref();
+    let annotation = annotation.as_ref();
+    let output_dir = output_dir.as_ref();
+    ensure!(
+        genome_fasta.is_file(),
+        "genome FASTA does not exist or is not a file: {}",
+        genome_fasta.display()
+    );
+    ensure!(
+        annotation.is_file(),
+        "gene annotation does not exist or is not a file: {}",
+        annotation.display()
+    );
+    ensure!(
+        !output_dir.as_os_str().is_empty(),
+        "splici output directory must not be empty"
+    );
+    ensure!(
+        options.read_length > 0,
+        "splici read_length must be greater than zero"
+    );
+    ensure!(
+        options.flank_trim_length >= 0 && options.flank_trim_length <= options.read_length,
+        "splici flank_trim_length must be nonnegative and no greater than read_length"
+    );
+    for (label, path) in [
+        ("extra spliced FASTA", options.extra_spliced.as_deref()),
+        ("extra unspliced FASTA", options.extra_unspliced.as_deref()),
+    ] {
+        if let Some(path) = path {
+            ensure!(
+                path.is_file(),
+                "{} does not exist or is not a file: {}",
+                label,
+                path.display()
+            );
+        }
+    }
+
+    let reference_dir = output_dir.join("ref");
+    let index_dir = output_dir.join("index");
+    let result = SpliciIndex {
+        reference_fasta: reference_dir.join("roers_ref.fa"),
+        transcript_to_gene: index_dir.join("t2g_3col.tsv"),
+        gene_id_to_name: index_dir.join("gene_id_to_name.tsv"),
+        reference_metadata: reference_dir.join("roers_make-ref.json"),
+        index_prefix: index_dir.join("piscem_idx"),
+    };
+    let reference_t2g = reference_dir.join("t2g_3col.tsv");
+    let reference_gene_names = reference_dir.join("gene_id_to_name.tsv");
+
+    let reference_artifacts = vec![
+        result.reference_fasta.clone(),
+        reference_t2g.clone(),
+        reference_gene_names.clone(),
+        result.reference_metadata.clone(),
+        reference_dir.join("duplicate_entries.tsv"),
+        result.transcript_to_gene.clone(),
+        result.gene_id_to_name.clone(),
+    ];
+    let mut expected_artifacts = reference_artifacts.clone();
+    expected_artifacts.extend(index_artifacts(&result.index_prefix));
+    let cfish_prefix = append_suffix(&result.index_prefix, "_cfish");
+    expected_artifacts.extend([
+        append_suffix(&cfish_prefix, ".cf_seg"),
+        append_suffix(&cfish_prefix, ".cf_seq"),
+        append_suffix(&cfish_prefix, ".json"),
+    ]);
+    let existing = expected_artifacts.iter().find(|path| path.exists());
+    ensure!(
+        existing.is_none() || options.piscem.overwrite,
+        "splici reference or index artifacts already exist in {} (for example {}); set piscem.overwrite=true to replace them",
+        output_dir.display(),
+        existing.unwrap_or(&result.reference_fasta).display()
+    );
+    if options.piscem.overwrite {
+        for path in reference_artifacts.iter().filter(|path| path.exists()) {
+            std::fs::remove_file(path).with_context(|| {
+                format!(
+                    "failed to remove existing splici artifact {}",
+                    path.display()
+                )
+            })?;
+        }
+    }
+
+    std::fs::create_dir_all(&reference_dir).with_context(|| {
+        format!(
+            "failed to create splici reference directory {}",
+            reference_dir.display()
+        )
+    })?;
+    std::fs::create_dir_all(&index_dir).with_context(|| {
+        format!(
+            "failed to create splici index directory {}",
+            index_dir.display()
+        )
+    })?;
+
+    roers::make_ref(roers::AugRefOpts {
+        genome: genome_fasta.to_path_buf(),
+        genes: annotation.to_path_buf(),
+        out_dir: reference_dir,
+        aug_type: Some(vec![roers::AugType::Intronic]),
+        no_transcript: false,
+        read_length: options.read_length,
+        flank_trim_length: options.flank_trim_length,
+        no_flanking_merge: false,
+        filename_prefix: "roers_ref".to_string(),
+        dedup_seqs: options.deduplicate_sequences,
+        extra_spliced: options.extra_spliced,
+        extra_unspliced: options.extra_unspliced,
+        gff3: options.gff3,
+    })
+    .with_context(|| {
+        format!(
+            "failed to construct splici reference from {} and {}",
+            genome_fasta.display(),
+            annotation.display()
+        )
+    })?;
+
+    for path in [
+        &result.reference_fasta,
+        &reference_t2g,
+        &reference_gene_names,
+        &result.reference_metadata,
+    ] {
+        ensure!(
+            path.is_file(),
+            "roers did not produce expected splici artifact {}",
+            path.display()
+        );
+    }
+
+    build_transcriptome_index(
+        &result.reference_fasta,
+        &result.index_prefix,
+        options.piscem,
+    )?;
+    std::fs::copy(&reference_t2g, &result.transcript_to_gene).with_context(|| {
+        format!(
+            "failed to copy transcript-to-gene mapping to {}",
+            result.transcript_to_gene.display()
+        )
+    })?;
+    std::fs::copy(&reference_gene_names, &result.gene_id_to_name).with_context(|| {
+        format!(
+            "failed to copy gene-name mapping to {}",
+            result.gene_id_to_name.display()
+        )
+    })?;
+
+    Ok(result)
+}
+
+/// Build a mapper-compatible piscem index directly from a transcriptome FASTA.
+pub fn build_transcriptome_index(
+    transcriptome_fasta: impl AsRef<Path>,
+    output_prefix: impl AsRef<Path>,
+    options: PiscemIndexBuildOptions,
+) -> Result<PathBuf> {
+    validate_build_options(&options)?;
+    let transcriptome_fasta = transcriptome_fasta.as_ref();
+    let output_prefix = output_prefix.as_ref();
+    ensure!(
+        transcriptome_fasta.is_file(),
+        "transcriptome FASTA does not exist or is not a file: {}",
+        transcriptome_fasta.display()
+    );
+    ensure!(
+        !output_prefix.as_os_str().is_empty(),
+        "piscem output prefix must not be empty"
+    );
+
+    if let Some(parent) = output_prefix.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent).with_context(|| {
+                format!(
+                    "failed to create piscem output directory {}",
+                    parent.display()
+                )
+            })?;
+        }
+    }
+
+    let cfish_prefix = append_suffix(output_prefix, "_cfish");
+    let mut artifacts = index_artifacts(output_prefix);
+    artifacts.extend([
+        append_suffix(&cfish_prefix, ".cf_seg"),
+        append_suffix(&cfish_prefix, ".cf_seq"),
+        append_suffix(&cfish_prefix, ".json"),
+    ]);
+    let existing: Vec<_> = artifacts.iter().filter(|path| path.exists()).collect();
+    if !existing.is_empty() {
+        ensure!(
+            options.overwrite,
+            "piscem index or intermediate artifacts already exist for prefix {} (for example {}); set overwrite=true to replace them",
+            output_prefix.display(),
+            existing[0].display()
+        );
+        for path in existing {
+            std::fs::remove_file(path).with_context(|| {
+                format!("failed to remove existing artifact {}", path.display())
+            })?;
+        }
+    }
+
+    let work_dir = options
+        .work_dir
+        .clone()
+        .unwrap_or_else(|| append_suffix(output_prefix, "_work.noindex"));
+    std::fs::create_dir_all(&work_dir).with_context(|| {
+        format!(
+            "failed to create piscem work directory {}",
+            work_dir.display()
+        )
+    })?;
+
+    let graph = cf_build()
+        .input(CfInput::Files(vec![transcriptome_fasta.to_path_buf()]))
+        .output_prefix(cfish_prefix.clone())
+        .k(options.k)
+        .threads(options.num_threads)
+        .work_dir(work_dir.clone())
+        .maybe_memory_budget_gb(options.ram_limit_gib.map(|value| value as f64))
+        .call()
+        .with_context(|| {
+            format!(
+                "failed to build compacted de Bruijn graph from {}",
+                transcriptome_fasta.display()
+            )
+        })?;
+
+    build_index(&BuildConfig {
+        input_prefix: cfish_prefix,
+        output_prefix: output_prefix.to_path_buf(),
+        k: options.k,
+        m: options.m,
+        build_ec_table: options.build_ec_table,
+        num_threads: options.num_threads,
+        canonical: true,
+        seed: 1,
+        single_mphf: false,
+        emit_tiny: Some(false),
+        tmp_dir: Some(work_dir.join("sshash_tmp")),
+        ram_limit_gib: options.ram_limit_gib,
+    })
+    .with_context(|| {
+        format!(
+            "failed to build piscem index at {} from {}",
+            output_prefix.display(),
+            transcriptome_fasta.display()
+        )
+    })?;
+
+    ReferenceIndex::load(output_prefix, options.build_ec_table, false).with_context(|| {
+        format!(
+            "built piscem index at {} could not be reloaded",
+            output_prefix.display()
+        )
+    })?;
+
+    if !options.keep_intermediate_dbg {
+        for path in [&graph.seg_file, &graph.seq_file] {
+            if let Err(error) = std::fs::remove_file(path) {
+                log::warn!(
+                    "failed to remove piscem graph intermediate {}: {}",
+                    path.display(),
+                    error
+                );
+            }
+        }
+    }
+
+    Ok(output_prefix.to_path_buf())
+}
+
+fn validate_build_options(options: &PiscemIndexBuildOptions) -> Result<()> {
+    ensure!(
+        (3..=31).contains(&options.k) && options.k % 2 == 1,
+        "piscem index k-mer size must be an odd value from 3 through 31"
+    );
+    ensure!(
+        options.m > 0 && options.m < options.k,
+        "piscem minimizer length must be greater than zero and less than the k-mer size"
+    );
+    ensure!(
+        options.num_threads > 0,
+        "piscem index num_threads must be greater than zero"
+    );
+    ensure!(
+        options.ram_limit_gib != Some(0),
+        "piscem index ram_limit_gib must be greater than zero"
+    );
+    Ok(())
+}
+
+fn append_suffix(path: &Path, suffix: &str) -> PathBuf {
+    let mut value = path.as_os_str().to_os_string();
+    value.push(suffix);
+    value.into()
+}
+
+fn index_artifacts(prefix: &Path) -> Vec<PathBuf> {
+    [
+        "ssi",
+        "ssi.mphf",
+        "ctab",
+        "refinfo",
+        "ectab",
+        "tdct",
+        "tct",
+        "poison",
+        "poison.json",
+    ]
+    .into_iter()
+    .map(|extension| prefix.with_extension(extension))
+    .collect()
+}
 
 /// How piscem advances between informative k-mers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -544,7 +938,6 @@ mod tests {
     use super::*;
     use crate::align::Barcode;
     use noodles_fastq as fastq;
-    use piscem_rs::index::build::{build_index, BuildConfig};
     use piscem_rs::index::poison_table::{LabeledPoisonOcc, PoisonTable};
     use piscem_rs::mapping::kmer_value::CanonicalKmer;
     use std::io::BufWriter;
@@ -607,6 +1000,189 @@ mod tests {
         })
         .unwrap();
         (dir, output_prefix)
+    }
+
+    #[test]
+    fn builds_transcriptome_index_from_fasta() {
+        let dir = tempfile::tempdir().unwrap();
+        let fasta = dir.path().join("transcripts.fa");
+        let output_prefix = dir.path().join("index/transcriptome");
+        std::fs::write(
+            &fasta,
+            ">tx0\nACGTTGCACTGATCGTACGATTCGACCTGATCGTAGCACT\n>tx1\nTTGACCGTACCTAGGCTAACCGTATGCTAGCATCGATGCA\n",
+        )
+        .unwrap();
+
+        let built_prefix = build_transcriptome_index(
+            &fasta,
+            &output_prefix,
+            PiscemIndexBuildOptions {
+                k: 5,
+                m: 3,
+                num_threads: 1,
+                ram_limit_gib: Some(1),
+                ..PiscemIndexBuildOptions::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(built_prefix, output_prefix);
+        let mapper = PiscemMapper::open(
+            &built_prefix,
+            PiscemOptions {
+                num_threads: 1,
+                load_poison: false,
+                ..PiscemOptions::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(mapper.num_targets(), 2);
+        let mut targets: Vec<_> = (0..mapper.num_targets())
+            .map(|target_id| {
+                (
+                    mapper.target_name(target_id).unwrap(),
+                    mapper.target_length(target_id).unwrap(),
+                )
+            })
+            .collect();
+        targets.sort_unstable();
+        assert_eq!(targets, vec![("tx0", 40), ("tx1", 40)]);
+        assert!(mapper.has_ec_table());
+
+        let mapped = mapper.map_reads(vec![annotated_record(
+            Some(Some(b"AAAA")),
+            Some(b"CCCC"),
+            Some(b"ACGTTGCACTGATCGTACGATTCGACCTGATCGTAGCACT"),
+            None,
+        )]);
+        assert_eq!(mapped.records[0].status, PseudoalignmentStatus::Mapped);
+        assert!(mapped.records[0]
+            .hits
+            .iter()
+            .any(|hit| mapper.target_name(hit.target_id as usize) == Some("tx0")));
+        assert!(built_prefix.with_extension("ssi").exists());
+        assert!(built_prefix.with_extension("ctab").exists());
+        assert!(built_prefix.with_extension("refinfo").exists());
+        assert!(built_prefix.with_extension("ectab").exists());
+
+        let cfish_prefix = append_suffix(&built_prefix, "_cfish");
+        assert!(!append_suffix(&cfish_prefix, ".cf_seg").exists());
+        assert!(!append_suffix(&cfish_prefix, ".cf_seq").exists());
+        assert!(append_suffix(&cfish_prefix, ".json").exists());
+    }
+
+    #[test]
+    fn builds_splici_index_from_genome_and_gtf() {
+        let dir = tempfile::tempdir().unwrap();
+        let genome = dir.path().join("genome.fa");
+        let gtf = dir.path().join("genes.gtf");
+        let output = dir.path().join("splici");
+        std::fs::write(
+            &genome,
+            ">chr1\nACGTTGCACTGATCGTACGATTCGACCTGATCGTAGCACTTTGACCGTACCTAGGCTAACCGTATGCTAGCATCGATGCAGGTTACCGATGCTAGCTAGGCA\n",
+        )
+        .unwrap();
+        std::fs::write(
+            &gtf,
+            concat!(
+                "chr1\ttest\texon\t1\t20\t.\t+\t.\tgene_id \"g1\"; transcript_id \"tx1\"; gene_name \"Gene1\"; exon_number \"1\";\n",
+                "chr1\ttest\texon\t41\t60\t.\t+\t.\tgene_id \"g1\"; transcript_id \"tx1\"; gene_name \"Gene1\"; exon_number \"2\";\n",
+            ),
+        )
+        .unwrap();
+
+        let built = build_splici_index(
+            &genome,
+            &gtf,
+            &output,
+            SpliciIndexBuildOptions {
+                read_length: 10,
+                flank_trim_length: 5,
+                piscem: PiscemIndexBuildOptions {
+                    k: 5,
+                    m: 3,
+                    num_threads: 1,
+                    ram_limit_gib: Some(1),
+                    ..PiscemIndexBuildOptions::default()
+                },
+                ..SpliciIndexBuildOptions::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(built.reference_fasta, output.join("ref/roers_ref.fa"));
+        assert_eq!(built.index_prefix, output.join("index/piscem_idx"));
+        assert!(built.reference_metadata.is_file());
+        assert!(built.transcript_to_gene.is_file());
+        assert!(built.gene_id_to_name.is_file());
+        let t2g = std::fs::read_to_string(&built.transcript_to_gene).unwrap();
+        assert!(t2g.lines().any(|line| line == "tx1\tg1\tS"));
+        assert!(t2g.lines().any(|line| line == "g1-I1\tg1\tU"));
+        assert_eq!(
+            std::fs::read_to_string(&built.gene_id_to_name).unwrap(),
+            "g1\tGene1\n"
+        );
+
+        let mapper = PiscemMapper::open(
+            &built.index_prefix,
+            PiscemOptions {
+                num_threads: 1,
+                load_poison: false,
+                ..PiscemOptions::default()
+            },
+        )
+        .unwrap();
+        let mut target_names: Vec<_> = (0..mapper.num_targets())
+            .map(|target_id| mapper.target_name(target_id).unwrap())
+            .collect();
+        target_names.sort_unstable();
+        assert_eq!(target_names, vec!["g1-I1", "tx1"]);
+    }
+
+    #[test]
+    fn validates_transcriptome_index_build_options() {
+        let mut options = PiscemIndexBuildOptions::default();
+        options.k = 32;
+        assert!(validate_build_options(&options).is_err());
+
+        options.k = 31;
+        options.m = 31;
+        assert!(validate_build_options(&options).is_err());
+
+        options.m = 19;
+        options.num_threads = 0;
+        assert!(validate_build_options(&options).is_err());
+
+        options.num_threads = 1;
+        options.ram_limit_gib = Some(0);
+        assert!(validate_build_options(&options).is_err());
+    }
+
+    #[test]
+    fn refuses_to_replace_existing_transcriptome_index_artifacts() {
+        let dir = tempfile::tempdir().unwrap();
+        let fasta = dir.path().join("transcripts.fa");
+        let output_prefix = dir.path().join("transcriptome.index");
+        std::fs::write(&fasta, ">tx0\nACGTTGCACTGATCGTACGA\n").unwrap();
+        std::fs::write(output_prefix.with_extension("ssi"), b"existing").unwrap();
+
+        let error = build_transcriptome_index(
+            fasta,
+            &output_prefix,
+            PiscemIndexBuildOptions {
+                k: 5,
+                m: 3,
+                num_threads: 1,
+                ..PiscemIndexBuildOptions::default()
+            },
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("overwrite=true"));
+        assert_eq!(
+            std::fs::read(output_prefix.with_extension("ssi")).unwrap(),
+            b"existing"
+        );
     }
 
     #[test]

@@ -3,6 +3,8 @@
 mod piscem;
 
 pub use piscem::{
-    PiscemBatch, PiscemMapper, PiscemOptions, PiscemStats, Pseudoalignment, PseudoalignmentHit,
-    PseudoalignmentStatus, PseudoalignmentType, SkippingStrategy,
+    build_splici_index, build_transcriptome_index, PiscemBatch, PiscemIndexBuildOptions,
+    PiscemMapper, PiscemOptions, PiscemStats, Pseudoalignment, PseudoalignmentHit,
+    PseudoalignmentStatus, PseudoalignmentType, SkippingStrategy, SpliciIndex,
+    SpliciIndexBuildOptions,
 };
