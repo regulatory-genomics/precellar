@@ -6,7 +6,7 @@ pub use segment::{Segment, SegmentInfo, SegmentInfoElem, SplitError};
 use anyhow::{bail, Result};
 use file_download::download::Downloader;
 use indexmap::IndexMap;
-use noodles::fastq;
+use noodles_fastq as fastq;
 use serde::{Deserialize, Serialize, Serializer};
 use std::io::{BufRead, BufReader};
 use std::ops::{Deref, DerefMut};
@@ -131,10 +131,10 @@ impl<'a> Iterator for FastqRecords<'a> {
 }
 
 impl Read {
-    /// Open the fastq files for reading, and return a fastq reader.
-    /// If the read has multiple fastq files, they will be concatenated.
-    /// If the read has no fastq files, return None.
-    pub fn open(&self) -> Option<FastqReader> {
+    /// Open the FASTQ files for reading, returning I/O failures to the caller.
+    /// If the read has multiple FASTQ files, they are concatenated. If it has
+    /// no FASTQ files, return `Ok(None)`.
+    pub fn try_open(&self) -> Result<Option<FastqReader>> {
         let files = self
             .files
             .clone()
@@ -143,15 +143,25 @@ impl Read {
             .filter(|file| file.filetype == "fastq")
             .collect::<Vec<_>>();
         if files.is_empty() {
-            return None;
+            return Ok(None);
         }
-        let reader =
-            multi_reader::MultiReader::new(files.into_iter().map(move |file| file.open().unwrap()));
-        Some(FastqReader::new(
+        let readers = files
+            .into_iter()
+            .map(|file| file.open())
+            .collect::<Result<Vec<_>>>()?;
+        let reader = multi_reader::MultiReader::new(readers.into_iter());
+        Ok(Some(FastqReader::new(
             Box::new(BufReader::new(reader)),
             self.min_len,
             self.max_len,
-        ))
+        )))
+    }
+
+    /// Open the fastq files for reading, and return a fastq reader.
+    /// If the read has multiple fastq files, they will be concatenated.
+    /// If the read has no fastq files, return None.
+    pub fn open(&self) -> Option<FastqReader> {
+        self.try_open().expect("failed to open FASTQ files")
     }
 
     /// Get the actual length of the read by reading the first N record from the fastq file.
@@ -183,7 +193,11 @@ impl Read {
         }
     }
 
-    pub(crate) fn get_segments<'a>(&'a self, region: &'a Region, truncate_by_length: bool) -> Option<SegmentInfo> {
+    pub(crate) fn get_segments<'a>(
+        &'a self,
+        region: &'a Region,
+        truncate_by_length: bool,
+    ) -> Option<SegmentInfo> {
         if !region.sequence_type.is_joined() {
             return None;
         }
@@ -285,7 +299,8 @@ impl File {
             _ => {
                 let cache_dir = home::home_dir().unwrap().join(".cache/seqspec");
                 let downloader = Downloader::new(Some(cache_dir))?;
-                let file_path = downloader.retrieve(&self.url, Some(&self.filename), None, false)?;
+                let file_path =
+                    downloader.retrieve(&self.url, Some(&self.filename), None, false)?;
                 Ok(Box::new(crate::utils::open_file(file_path)?))
             }
         }

@@ -74,7 +74,6 @@ impl Assay {
         assay.file = Some(path.as_ref().to_path_buf());
         assay.normalize_all_paths();
         assay.validate_structure()?;
-        assay.validate_strands()?;
         Ok(assay)
     }
 
@@ -82,7 +81,6 @@ impl Assay {
         let yaml_str = reqwest::blocking::get(url)?.text()?;
         let assay: Assay = serde_yaml::from_str(&yaml_str).context("Failed to parse YAML")?;
         assay.validate_structure()?;
-        assay.validate_strands()?;
         Ok(assay)
     }
 
@@ -104,39 +102,19 @@ impl Assay {
         Ok(())
     }
 
-    /// Validate that read strand values are appropriate for the assay type.
+    /// Validate strand values for a modality that has been resolved as short-read.
     ///
-    /// For each modality:
-    /// - Detects whether it's a long-read or short-read assay
-    /// - Validates all reads in that modality:
-    ///   - Short-read assays: only Pos/Neg allowed
-    ///   - Long-read assays: Pos/Neg/Unstranded allowed
-    pub fn validate_strands(&self) -> Result<()> {
-        for modality in &self.modalities {
-            // Detect assay type for this modality
-            let is_long_read = match self.detect_assay_type(modality) {
-                Ok(AssayType::LongRead) => true,
-                Ok(AssayType::ShortRead) => false,
-                Err(e) => {
-                    // If detection fails, assume short-read
-                    log::warn!("Failed to detect assay type for modality {:?}, assuming short-read for validation: {}", modality, e);
-                    false
-                }
-            };
-
-            // Validate each read for this modality
-            for read in self.sequence_spec.values() {
-                if read.modality == *modality {
-                    // Unstranded is only valid for long-read assays
-                    if !is_long_read && read.strand == Strand::Unstranded {
-                        bail!(
-                            "Strand validation failed for read '{}' in short-read assay (modality: {:?}): \
-                            strand=unstranded is only valid for long-read assays",
-                            read.read_id,
-                            modality
-                        );
-                    }
-                }
+    /// This check intentionally runs at workflow construction time, after the
+    /// sequencing type is known, rather than while loading the assay. Loading a
+    /// seqspec must not open or sample FASTQ inputs.
+    pub fn validate_short_read_strands(&self, modality: &Modality) -> Result<()> {
+        for read in self.sequence_spec.values() {
+            if read.modality == *modality && read.strand == Strand::Unstranded {
+                bail!(
+                    "Read '{}' in short-read assay (modality: {:?}) cannot use strand=unstranded",
+                    read.read_id,
+                    modality
+                );
             }
         }
         Ok(())
@@ -605,19 +583,23 @@ impl Assay {
         const SAMPLE_SIZE: usize = 1000;
         const LENGTH_THRESHOLD: f64 = 500.0;
 
-        // Get the first read for this modality
-        let mut segments = self.get_segments_by_modality(*modality);
-        let first_segment = segments
-            .next()
-            .ok_or_else(|| anyhow!("No Reads found for modality: {:?}", modality))?;
-
-        let (read, _segment_info) = first_segment;
-        let mut reader = read.open()
+        // Sample the target-bearing read so index/barcode-only reads cannot
+        // determine the assay type for the selected modality.
+        let (read, _segment_info) = self
+            .get_segments_by_modality(*modality)
+            .find(|(_, segment_info)| {
+                segment_info
+                    .iter()
+                    .any(|segment| segment.region_type.is_target())
+            })
+            .ok_or_else(|| anyhow!("No target-bearing Read found for modality: {:?}", modality))?;
+        let mut reader = read
+            .try_open()?
             .ok_or_else(|| anyhow!("Failed to open FASTQ file for modality: {:?}", modality))?;
 
         let mut total_length = 0usize;
         let mut read_count = 0usize;
-        let mut record = noodles::fastq::Record::default();
+        let mut record = noodles_fastq::Record::default();
 
         // Read up to SAMPLE_SIZE records
         while read_count < SAMPLE_SIZE {
@@ -636,7 +618,7 @@ impl Assay {
         }
 
         let average_length = total_length as f64 / read_count as f64;
-        
+
         if average_length >= LENGTH_THRESHOLD {
             Ok(AssayType::LongRead)
         } else {
@@ -1233,19 +1215,21 @@ regions: []
     fn test_assay_type_detection() {
         // Test using scNanoATAC.yaml - should detect as LongRead
         let yaml_path = "../seqspec_templates/scNanoATAC.yaml";
-        
+
         // Check if the YAML file exists
         if !std::path::Path::new(yaml_path).exists() {
-            println!("Warning: {} not found, skipping assay type detection test", yaml_path);
+            println!(
+                "Warning: {} not found, skipping assay type detection test",
+                yaml_path
+            );
             return;
         }
-        
-        
+
         match Assay::from_path(yaml_path) {
             Ok(assay) => {
                 // scNanoATAC uses ATAC modality
                 let modality = Modality::ATAC;
-                
+
                 // Check if FASTQ file exists before testing detection
                 let mut segments = assay.get_segments_by_modality(modality);
                 if let Some((read, _)) = segments.next() {
@@ -1257,8 +1241,11 @@ regions: []
                                 // Test assay type detection - should be LongRead for scNanoATAC
                                 match assay.detect_assay_type(&modality) {
                                     Ok(assay_type) => {
-                                        assert_eq!(assay_type, AssayType::LongRead, 
-                                            "scNanoATAC should be detected as LongRead assay type");
+                                        assert_eq!(
+                                            assay_type,
+                                            AssayType::LongRead,
+                                            "scNanoATAC should be detected as LongRead assay type"
+                                        );
                                         println!("Assay type detected: {:?}", assay_type);
                                     }
                                     Err(e) => {
@@ -1267,20 +1254,21 @@ regions: []
                                     }
                                 }
                             } else {
-                                println!("Warning: FASTQ file {} not found, testing YAML parsing only", file_path.filename);
+                                println!(
+                                    "Warning: FASTQ file {} not found, testing YAML parsing only",
+                                    file_path.filename
+                                );
                             }
                         }
                     }
                 } else {
                     println!("Warning: No segments found for ATAC modality");
                 }
-                
             }
             Err(e) => {
                 panic!("Failed to parse scNanoATAC.yaml: {}", e);
             }
         }
-
     }
 
     #[test]
@@ -1313,13 +1301,19 @@ regions: []
                     .map(|(k, v)| format!("{}({})", k, v.len()))
                     .collect::<Vec<String>>()
                     .join(", ");
-                
+
                 println!("Total whitelists entries breakdown: {}", detail_str);
 
                 // Test segment parsing
                 for (read, segment_info) in assay.get_segments_by_modality(modality) {
-                    println!("Read {}: {:?}", read.read_id,
-                        segment_info.iter().map(|s| s.region_type).collect::<Vec<_>>());
+                    println!(
+                        "Read {}: {:?}",
+                        read.read_id,
+                        segment_info
+                            .iter()
+                            .map(|s| s.region_type)
+                            .collect::<Vec<_>>()
+                    );
                 }
             }
             Err(e) => panic!("Failed to parse: {}", e),

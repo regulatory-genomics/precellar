@@ -1,16 +1,16 @@
 !Assay
 seqspec_version: 0.3.0
-assay_id: 10xRNAv2
-name: 10xRNAv2
+assay_id: SeekOneRNA3p
+name: SeekOneRNA3p
 doi: https://doi.org/10.1126/science.aam8999
 date: 15 March 2018
-description: 10x Genomics v2 single-cell rnaseq
+description: SeekOne DD 3' single-cell rnaseq
 modalities:
 - rna
-lib_struct: https://teichlab.github.io/scg_lib_structs/methods_html/10xChromium2.html
+lib_struct: https://teichlab.github.io/scg_lib_structs/methods_html/10xChromium3.html
 sequence_protocol: Not-specified
 sequence_kit: Not-specified
-library_protocol: 10xv2 RNA
+library_protocol: SeekOne DD RNA
 library_kit: Not-specified
 chemistry_strandedness: reverse
 sequence_spec: []
@@ -19,7 +19,7 @@ library_spec:
   parent_id: null
   region_id: rna
   region_type: rna
-  name: 10x-RNA-seq RNA
+  name: SeekOne-RNA-seq RNA
   sequence_type: joined
   sequence: AATGATACGGCGACCACCGAGATCTACACTCTTTCCCTACACGACGCTCTTCCGATCTNNNNNNNNNNNNNNNNXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXAGATCGGAAGAGCACACGTCTGAACTCCAGTCACNNNNNNNNATCTCGTATGCCGTCTTCTGCTTG
   min_len: 153
@@ -54,17 +54,17 @@ library_spec:
     region_type: barcode
     name: Cell Barcode
     sequence_type: onlist
-    sequence: NNNNNNNNNNNNNNNN
-    min_len: 16
-    max_len: 16
+    sequence: NNNNNNNNNNNNNNNNN
+    min_len: 17
+    max_len: 17
     onlist: !Onlist
-      file_id: 10x_rna_v2-737K_august_2016.txt.gz
-      filename: 10x_rna_v2-737K_august_2016.txt.gz
+      file_id: P3CB.barcode.txt.gz
+      filename: P3CB.barcode.txt.gz
       filetype: txt
-      filesize: 2237432
-      url: https://osf.io/download/bmwcf
+      filesize: 4247340
+      url: https://osf.io/download/k365x
       urltype: https
-      md5: 8dc68aca20f45bd58cd3dc01603cb4a6
+      md5: b96f856355b471249313e8683576cd68
       location: remote
     regions: null
   - !Region
@@ -73,8 +73,8 @@ library_spec:
     name: GEX UMI
     sequence_type: random
     sequence: XXXXXXXXXXXX
-    min_len: 10
-    max_len: 10
+    min_len: 12
+    max_len: 12
     onlist: null
     regions: null
     parent_id: rna

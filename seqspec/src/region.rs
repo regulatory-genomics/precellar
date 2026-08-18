@@ -1,8 +1,8 @@
 use crate::read::UrlType;
 use crate::Modality;
 
-use file_download::download::Downloader;
 use anyhow::Result;
+use file_download::download::Downloader;
 use indexmap::{IndexMap, IndexSet};
 use itertools::Itertools;
 use serde::{Deserialize, Serialize};
@@ -460,7 +460,11 @@ pub struct Onlist {
     /// When true, reverse-complement the extracted candidate sequence before matching
     /// against this whitelist. This ensures that barcodes appearing in reverse-complement
     /// orientation resolve to the same whitelist entry as the forward copy.
-    #[serde(default, rename = "reverse_complement", skip_serializing_if = "is_false")]
+    #[serde(
+        default,
+        rename = "reverse_complement",
+        skip_serializing_if = "is_false"
+    )]
     pub rc: bool,
 }
 

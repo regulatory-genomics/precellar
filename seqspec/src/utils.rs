@@ -2,7 +2,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use async_compression::tokio::bufread::GzipDecoder;
 use async_compression::tokio::bufread::ZstdDecoder;
 use futures::StreamExt;
-use md5::{Md5, Digest};
+use md5::{Digest, Md5};
 use std::io::Read;
 use std::{
     fs::File,
@@ -42,7 +42,7 @@ pub fn create_file<P: AsRef<Path>>(
 
 /// Open a file, possibly compressed. Supports gzip and zstd.
 pub fn open_file<P: AsRef<Path>>(file: P) -> Result<Box<dyn std::io::Read + Send + Sync>> {
-    let reader: Box<dyn std::io::Read + Send + Sync> = match detect_compression(file.as_ref()) {
+    let reader: Box<dyn std::io::Read + Send + Sync> = match detect_compression(file.as_ref())? {
         Some(Compression::Gzip) => Box::new(flate2::read::MultiGzDecoder::new(File::open(
             file.as_ref(),
         )?)),
@@ -66,7 +66,10 @@ pub async fn open_file_async(
 
     let reader = tokio::io::BufReader::new(tokio::fs::File::open(src).await?);
 
-    let compression = compression.or_else(|| detect_compression(src));
+    let compression = match compression {
+        Some(compression) => Some(compression),
+        None => detect_compression(src)?,
+    };
     let reader: Box<dyn AsyncRead + Send + Unpin> = match compression {
         Some(Compression::Gzip) => {
             let mut decoder = GzipDecoder::new(reader);
@@ -107,20 +110,19 @@ async fn open_url_async(url: Url) -> Result<impl AsyncRead> {
 }
 
 /// Determine the file compression type. Supports gzip and zstd.
-fn detect_compression<P: AsRef<Path>>(path: P) -> Option<Compression> {
+fn detect_compression<P: AsRef<Path>>(path: P) -> Result<Option<Compression>> {
     let file = File::open(path.as_ref())
-        .with_context(|| format!("cannot open file: {:?}", path.as_ref()))
-        .unwrap();
+        .with_context(|| format!("cannot open file: {:?}", path.as_ref()))?;
     if flate2::read::MultiGzDecoder::new(file).header().is_some() {
-        Some(Compression::Gzip)
+        Ok(Some(Compression::Gzip))
     } else if let Some(ext) = path.as_ref().extension() {
         if ext == "zst" {
-            Some(Compression::Zstd)
+            Ok(Some(Compression::Zstd))
         } else {
-            None
+            Ok(None)
         }
     } else {
-        None
+        Ok(None)
     }
 }
 
@@ -278,11 +280,7 @@ pub fn hamming_distance(seq1: &[u8], seq2: &[u8]) -> Result<usize> {
             seq2.len()
         );
     }
-    Ok(seq1
-        .iter()
-        .zip(seq2.iter())
-        .filter(|(a, b)| a != b)
-        .count())
+    Ok(seq1.iter().zip(seq2.iter()).filter(|(a, b)| a != b).count())
 }
 
 #[cfg(test)]

@@ -1,6 +1,6 @@
 # Long-Read Barcode Extraction
 
-This page describes the current long-read barcode extraction design implemented in `precellar/src/long/`.
+This page describes the current long-read barcode extraction design implemented in `precellar-core/src/long/`.
 
 ## Scope
 
