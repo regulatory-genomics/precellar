@@ -1131,11 +1131,11 @@ impl FastqAnnotator {
             .checked_add(tail_trim)
             .context("long-read trim lengths overflowed")?;
         anyhow::ensure!(
-            total_trim <= sequence.len(),
-            "long-read sequence is too short ({} bp) for trimming {} + {} bp",
-            sequence.len(),
+            total_trim < sequence.len(),
+            "long-read sequence has no target bases after trimming {} + {} bp from {} bp",
             head_trim,
-            tail_trim
+            tail_trim,
+            sequence.len(),
         );
         let target_end = sequence.len() - tail_trim;
         let target = fastq::Record::new(
@@ -1657,6 +1657,38 @@ mod tests {
         assert_eq!(report["composite_alignment"]["fail"], 1);
         assert_eq!(report["barcode_extraction"]["success"], 1);
         assert_eq!(report["barcode_extraction"]["fail"], 1);
+    }
+
+    /// End trimming that consumes the whole read must be filtered before alignment.
+    #[test]
+    fn test_long_read_filters_empty_target_and_continues() {
+        let directory = tempfile::tempdir().unwrap();
+        let fastq_path = directory.path().join("reads.fastq");
+        let valid = forward_long_read();
+        let mut empty_target = valid.clone();
+        empty_target.drain(107..707);
+        assert_eq!(empty_target.len(), 214);
+        write_fastq_records(
+            &fastq_path,
+            &[
+                ("empty-target", empty_target.as_slice()),
+                ("valid", valid.as_slice()),
+            ],
+        );
+
+        let assay = long_read_assay(&[fastq_path.as_path()], directory.path());
+        let mut execution = FastqPlan::new(vec![assay], Modality::ATAC)
+            .build(false, 10_000)
+            .unwrap();
+
+        let batch = execution.next_batch().unwrap().unwrap();
+        assert_eq!(batch.len(), 1);
+        assert_eq!(batch[0].read1.as_ref().unwrap().name(), b"valid");
+        assert!(execution.next_batch().unwrap().is_none());
+
+        let report = execution.finish().unwrap();
+        assert_eq!(report.fastq.num_reads["R1"], 2);
+        assert_eq!(report.fastq.num_defect["R1"], 1);
     }
 
     struct IdentityStage;
