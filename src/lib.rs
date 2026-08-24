@@ -9,7 +9,6 @@ mod utils;
 use anyhow::{bail, Result};
 use noodles_fastq as fastq;
 use pyo3::prelude::*;
-use std::io::Write;
 use std::{io::BufWriter, path::PathBuf, str::FromStr};
 
 use ::precellar::align::{extend_fastq_record, Barcode, BarcodeCorrectionConfig, FastqPlan};
@@ -376,6 +375,8 @@ library_spec:
 /// A Python module implemented in Rust.
 #[pymodule]
 fn precellar(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    use std::io::Write;
+
     env_logger::builder()
         .format(|buf, record| {
             let timestamp = buf.timestamp();
@@ -391,7 +392,15 @@ fn precellar(m: &Bound<'_, PyModule>) -> PyResult<()> {
         .try_init()
         .unwrap();
 
-    m.add("__version__", env!("CARGO_PKG_VERSION"))?;
+    // Print version and build info on import
+    // Update BUILD_INFO manually after each modification
+    const BUILD_INFO: &str = "[21] 2026-07-01";
+    let version = env!("CARGO_PKG_VERSION");
+
+    eprintln!("✓ precellar v{} [{}]", version, BUILD_INFO);
+
+    m.add("__version__", version)?;
+    m.add("__build_info__", BUILD_INFO)?;
 
     m.add_class::<pyseqspec::Assay>()?;
 

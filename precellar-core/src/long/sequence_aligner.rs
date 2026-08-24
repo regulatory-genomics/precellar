@@ -1,6 +1,7 @@
 use anyhow::Result;
 use bio::alignment::pairwise::{Aligner, Scoring, MIN_SCORE};
 use bio::alignment::AlignmentOperation;
+use std::ops::Range;
 use std::sync::{Arc, RwLock};
 
 use seqspec::region::Region;
@@ -236,15 +237,54 @@ impl FittingAligner {
 /// Used for comparing a barcode candidate against a whitelist entry.
 pub fn fitting_alignment_distance(short_seq: &[u8], long_seq: &[u8]) -> usize {
     let m = short_seq.len();
-    let n = long_seq.len();
 
     if m == 0 {
         return 0; // Empty short sequence can always match
     }
-    if n == 0 {
+    if long_seq.is_empty() {
         return m; // Cannot fit non-empty short sequence in empty long sequence
     }
 
+    let dp = fitting_alignment_matrix(short_seq, long_seq);
+
+    // Return minimum value in the last row (fitting alignment)
+    dp[m].iter().min().copied().unwrap_or(m)
+}
+
+/// Calculate fitting-alignment distance and the observed span in `long_seq`.
+///
+/// Barcode candidate filtering should keep using [`fitting_alignment_distance`];
+/// this function is intended only for the first tied-best candidate after
+/// filtering has completed. The span is the `ystart..yend` returned by
+/// [`Aligner::semiglobal`], which aligns all of `short_seq` to a substring of
+/// `long_seq`.
+pub fn fitting_alignment_with_span(short_seq: &[u8], long_seq: &[u8]) -> (usize, Range<usize>) {
+    let m = short_seq.len();
+    let n = long_seq.len();
+
+    if m == 0 {
+        return (0, 0..0);
+    }
+    if n == 0 {
+        return (m, 0..0);
+    }
+
+    // With this linear scoring, score == -Levenshtein distance:
+    // mismatch = -1 and a gap of length k costs -1 + -1 * (k - 1) = -k.
+    let scoring = Scoring::from_scores(-1, -1, 0, -1);
+    let mut aligner = Aligner::with_capacity_and_scoring(m, n, scoring);
+    let alignment = aligner.semiglobal(short_seq, long_seq);
+    debug_assert!(alignment.score <= 0);
+
+    (
+        (-alignment.score) as usize,
+        alignment.ystart..alignment.yend,
+    )
+}
+
+fn fitting_alignment_matrix(short_seq: &[u8], long_seq: &[u8]) -> Vec<Vec<usize>> {
+    let m = short_seq.len();
+    let n = long_seq.len();
     let mut dp = vec![vec![0; n + 1]; m + 1];
 
     // First row: no penalty for gaps at the start of long sequence (fitting alignment)
@@ -270,8 +310,7 @@ pub fn fitting_alignment_distance(short_seq: &[u8], long_seq: &[u8]) -> usize {
         }
     }
 
-    // Return minimum value in the last row (fitting alignment)
-    dp[m].iter().min().copied().unwrap_or(m)
+    dp
 }
 
 #[cfg(test)]
@@ -409,5 +448,20 @@ mod tests {
 
         assert_eq!(result.region_mappings[2].read_start, 26);
         assert_eq!(result.region_mappings[2].read_end, 40);
+    }
+
+    #[test]
+    fn test_fitting_alignment_span() {
+        assert_eq!(fitting_alignment_with_span(b"ATCG", b"GGATCGCC"), (0, 2..6));
+        assert_eq!(
+            fitting_alignment_with_span(b"ATCG", b"GGATCCGCC"),
+            (1, 2..5)
+        );
+        assert_eq!(fitting_alignment_with_span(b"ATCG", b"GGACGCC"), (1, 2..5));
+    }
+
+    #[test]
+    fn test_fitting_alignment_span_uses_bio_tied_coordinates() {
+        assert_eq!(fitting_alignment_with_span(b"AT", b"ATAT"), (0, 2..4));
     }
 }

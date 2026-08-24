@@ -1,6 +1,7 @@
 use anyhow::Result;
 use indexmap::{IndexMap, IndexSet};
 use std::collections::HashSet;
+use std::ops::Range;
 use std::sync::{Arc, RwLock};
 
 use seqspec::region::{LibSpec, Region};
@@ -9,7 +10,9 @@ use seqspec::Modality;
 use super::{
     barcode_index::BarcodeIndex,
     collect_end_regions, collect_target_flanks,
-    sequence_aligner::{CompositeAlignmentResult, CompositePattern, FittingAligner},
+    sequence_aligner::{
+        fitting_alignment_with_span, CompositeAlignmentResult, CompositePattern, FittingAligner,
+    },
     EndRegions,
 };
 
@@ -18,6 +21,8 @@ use super::{
 pub struct LongReadBarcodeResult {
     /// Extracted barcode sequence (standardized from whitelist)
     pub barcode: Option<Vec<u8>>,
+    /// UMI sequence and quality in designed-library orientation
+    pub umi: Option<noodles_fastq::Record>,
     /// Extraction confidence (0.0 if no barcode extracted)
     pub confidence: f64,
     /// Whether the end segments were reverse-complemented during extraction
@@ -53,6 +58,12 @@ pub struct ExtractedBarcode {
     pub region_name: String, // For grouping same-barcode regions across ends
     pub barcodes: Vec<Vec<u8>>, // All tied-best candidates from whitelist
     pub confidence: f64,     // confidence = 1.0 - (min_edit_distance / barcode_length)
+    /// Observed span in normalized end-segment coordinates.
+    ///
+    /// When `barcodes` contains tied-best candidates, this span is traced only
+    /// from `barcodes[0]`. Multi-end consensus may later choose another barcode,
+    /// so the span is not guaranteed to belong to the final combined barcode.
+    pub traced_span: Range<usize>,
 }
 
 /// Evidence for read orientation determination using composite alignment
@@ -141,8 +152,10 @@ impl EndSegmentWithAlignment {
 /// Find the best barcode match using k-mer indexed search
 fn find_best_barcode_match(
     candidate_seq: &[u8],
+    normalized_window: &[u8],
     barcode_region: &Arc<RwLock<Region>>,
     whitelist_indices: &IndexMap<String, BarcodeIndex>,
+    reverse_barcode_for_tracing: bool,
 ) -> Option<ExtractedBarcode> {
     let region_guard = barcode_region.read().unwrap();
     let region_id = region_guard.region_id.clone();
@@ -154,12 +167,26 @@ fn find_best_barcode_match(
 
     // Find all tied-best matches using k-mer voting + fitting alignment
     let (matched_barcodes, confidence) = index.find_best_match(candidate_seq)?;
+    let reverse_barcode;
+    let barcode_for_tracing = if reverse_barcode_for_tracing {
+        reverse_barcode = seqspec::utils::rev_compl(&matched_barcodes[0]);
+        reverse_barcode.as_slice()
+    } else {
+        matched_barcodes[0].as_slice()
+    };
+    let (traced_distance, traced_span) =
+        fitting_alignment_with_span(barcode_for_tracing, normalized_window);
+    debug_assert_eq!(
+        confidence,
+        1.0 - traced_distance as f64 / matched_barcodes[0].len().max(1) as f64
+    );
 
     Some(ExtractedBarcode {
         region_id,
         region_name,
         barcodes: matched_barcodes,
         confidence,
+        traced_span,
     })
 }
 
@@ -305,6 +332,12 @@ pub struct BarcodeExtractor {
     rc_regions: HashSet<String>,
     /// All barcode group names that must be resolved for a valid barcode (deduplicated, first-seen order)
     required_barcode_groups: IndexSet<String>,
+    /// UMI region declared by the selected modality, if any.
+    umi_region: Option<Arc<RwLock<Region>>>,
+    /// Direct region neighbor on the UMI's 5' side, when usable as an anchor.
+    umi_five_prime_anchor: Option<Arc<RwLock<Region>>>,
+    /// Direct region neighbor on the UMI's 3' side, when usable as an anchor.
+    umi_three_prime_anchor: Option<Arc<RwLock<Region>>>,
 }
 
 impl BarcodeExtractor {
@@ -335,6 +368,54 @@ impl BarcodeExtractor {
             collect_target_flanks(lib_spec, modality)?;
         let five_prime_composite = five_prime_regions.build_composite_pattern();
         let three_prime_composite = three_prime_regions.build_composite_pattern();
+
+        let modality_region = lib_spec
+            .get_modality(modality)
+            .ok_or_else(|| anyhow::anyhow!("Cannot find specified modality: {:?}", modality))?;
+        let modality_guard = modality_region.read().unwrap();
+        let umi_positions: Vec<_> = modality_guard
+            .subregions
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, region)| region.read().unwrap().region_type.is_umi().then_some(idx))
+            .collect();
+        anyhow::ensure!(
+            umi_positions.len() <= 1,
+            "long-read modality {:?} contains multiple UMI regions; only one is supported",
+            modality
+        );
+
+        let umi_region = umi_positions
+            .first()
+            .map(|&idx| modality_guard.subregions[idx].clone());
+        let is_umi_anchor = |region: &&Arc<RwLock<Region>>| {
+            let region = region.read().unwrap();
+            region.sequence_type.is_fixed() || region.region_type.is_barcode()
+        };
+        let umi_five_prime_anchor = umi_positions.first().and_then(|&idx| {
+            idx.checked_sub(1)
+                .and_then(|idx| modality_guard.subregions.get(idx))
+                .filter(is_umi_anchor)
+                .cloned()
+        });
+        let umi_three_prime_anchor = umi_positions.first().and_then(|&idx| {
+            modality_guard
+                .subregions
+                .get(idx + 1)
+                .filter(is_umi_anchor)
+                .cloned()
+        });
+        drop(modality_guard);
+
+        if let Some(umi) = &umi_region {
+            if umi_five_prime_anchor.is_none() && umi_three_prime_anchor.is_none() {
+                log::warn!(
+                    "UMI region '{}' has no directly adjacent fixed/barcode anchor; long-read UMI extraction is disabled for modality {:?}",
+                    umi.read().unwrap().region_id,
+                    modality,
+                );
+            }
+        }
 
         // Validate minimum total fixed sequence length (12bp) only for ends with barcodes
         const MIN_FIXED_LEN: usize = 12;
@@ -387,7 +468,32 @@ impl BarcodeExtractor {
             whitelist_indices,
             rc_regions,
             required_barcode_groups,
+            umi_region,
+            umi_five_prime_anchor,
+            umi_three_prime_anchor,
         })
+    }
+
+    /// Whether this layout has a UMI with at least one supported direct anchor.
+    pub fn expects_umi(&self) -> bool {
+        self.umi_region.is_some()
+            && (self.umi_five_prime_anchor.is_some() || self.umi_three_prime_anchor.is_some())
+    }
+
+    fn should_analyze_end(&self, end_regions: &EndRegions) -> bool {
+        end_regions.has_barcode
+            || [
+                self.umi_five_prime_anchor.as_ref(),
+                self.umi_three_prime_anchor.as_ref(),
+            ]
+            .into_iter()
+            .flatten()
+            .any(|anchor| {
+                end_regions
+                    .regions
+                    .iter()
+                    .any(|region| Arc::ptr_eq(region, anchor))
+            })
     }
 
     /// Extract barcode from a FASTQ record with automatic orientation detection.
@@ -406,9 +512,13 @@ impl BarcodeExtractor {
     ) -> Result<(LongReadBarcodeResult, LrBarcodeExtractionStats)> {
         let sequence = record.sequence();
         let quality = record.quality_scores();
+        anyhow::ensure!(
+            sequence.len() == quality.len(),
+            "long-read FASTQ sequence and quality lengths differ"
+        );
 
         // Step 1: Sample end windows and composite-align for forward orientation
-        let forward_5p = if self.five_prime_regions.has_barcode {
+        let forward_5p = if self.should_analyze_end(&self.five_prime_regions) {
             self.sample_and_analyze_end_window(
                 sequence,
                 quality,
@@ -419,7 +529,7 @@ impl BarcodeExtractor {
         } else {
             EndSegmentWithAlignment::empty()
         };
-        let forward_3p = if self.three_prime_regions.has_barcode {
+        let forward_3p = if self.should_analyze_end(&self.three_prime_regions) {
             self.sample_and_analyze_end_window(
                 sequence,
                 quality,
@@ -439,7 +549,7 @@ impl BarcodeExtractor {
         // Step 2: If forward meets threshold, use it directly (fast path)
         if forward_evidence.meets_threshold() {
             let (result, consensus_results) =
-                self.extract_barcodes_from_segments(forward_5p, forward_3p, false)?;
+                self.extract_barcodes_from_segments(record, forward_5p, forward_3p, false)?;
             let stats = LrBarcodeExtractionStats {
                 is_reverse: false,
                 composite_pass: true,
@@ -450,7 +560,7 @@ impl BarcodeExtractor {
 
         // Step 3: Forward didn't meet threshold, try reverse orientation
         // Only Rc end segments, not full read.
-        let reverse_5p = if self.five_prime_regions.has_barcode {
+        let reverse_5p = if self.should_analyze_end(&self.five_prime_regions) {
             self.sample_and_analyze_end_window(
                 sequence,
                 quality,
@@ -461,7 +571,7 @@ impl BarcodeExtractor {
         } else {
             EndSegmentWithAlignment::empty()
         };
-        let reverse_3p = if self.three_prime_regions.has_barcode {
+        let reverse_3p = if self.should_analyze_end(&self.three_prime_regions) {
             self.sample_and_analyze_end_window(
                 sequence,
                 quality,
@@ -505,6 +615,7 @@ impl BarcodeExtractor {
             return Ok((
                 LongReadBarcodeResult {
                     barcode: None,
+                    umi: None,
                     confidence: 0.0,
                     is_reverse_complemented: should_rc,
                     five_prime_trim: if should_rc {
@@ -544,9 +655,9 @@ impl BarcodeExtractor {
 
         // Step 6: Extract barcodes using cached anchors from the chosen orientation
         let (result, consensus_results) = if should_rc {
-            self.extract_barcodes_from_segments(reverse_5p, reverse_3p, true)?
+            self.extract_barcodes_from_segments(record, reverse_5p, reverse_3p, true)?
         } else {
-            self.extract_barcodes_from_segments(forward_5p, forward_3p, false)?
+            self.extract_barcodes_from_segments(record, forward_5p, forward_3p, false)?
         };
         let stats = LrBarcodeExtractionStats {
             is_reverse: should_rc,
@@ -605,6 +716,7 @@ impl BarcodeExtractor {
     /// contains (group_name, intersection_hit) for each multi-end barcode group.
     fn extract_barcodes_from_segments(
         &self,
+        record: &noodles_fastq::Record,
         five_prime: EndSegmentWithAlignment,
         three_prime: EndSegmentWithAlignment,
         is_reverse_complemented: bool,
@@ -633,7 +745,15 @@ impl BarcodeExtractor {
             extracted_barcodes.extend(barcode_results);
         }
 
+        let umi = self.extract_umi(
+            record,
+            &five_prime,
+            &three_prime,
+            &extracted_barcodes,
+            is_reverse_complemented,
+        );
         let (mut result, consensus_results) = self.combine_barcodes(extracted_barcodes)?;
+        result.umi = umi;
         result.is_reverse_complemented = is_reverse_complemented;
         result.five_prime_trim = five_prime_trim;
         result.three_prime_trim = three_prime_trim;
@@ -748,25 +868,189 @@ impl BarcodeExtractor {
             if let Some((start, end)) = window {
                 let raw_seq = &segment.sequence[start..end];
                 let rc_seq;
-                let candidate_seq = if self
+                let should_rc = self
                     .rc_regions
-                    .contains(&barcode_region.read().unwrap().region_id)
-                {
+                    .contains(&barcode_region.read().unwrap().region_id);
+                let candidate_seq = if should_rc {
                     rc_seq = seqspec::utils::rev_compl(raw_seq);
                     rc_seq.as_slice()
                 } else {
                     raw_seq
                 };
 
-                if let Some(matched) =
-                    find_best_barcode_match(candidate_seq, barcode_region, &self.whitelist_indices)
-                {
+                if let Some(mut matched) = find_best_barcode_match(
+                    candidate_seq,
+                    raw_seq,
+                    barcode_region,
+                    &self.whitelist_indices,
+                    should_rc,
+                ) {
+                    matched.traced_span =
+                        start + matched.traced_span.start..start + matched.traced_span.end;
                     extracted_barcodes.push(matched);
                 }
             }
         }
 
         Ok(extracted_barcodes)
+    }
+
+    fn extract_umi(
+        &self,
+        record: &noodles_fastq::Record,
+        five_prime: &EndSegmentWithAlignment,
+        three_prime: &EndSegmentWithAlignment,
+        barcodes: &[ExtractedBarcode],
+        is_reverse_complemented: bool,
+    ) -> Option<noodles_fastq::Record> {
+        let umi_region = self.umi_region.as_ref()?;
+        if !self.expects_umi() {
+            return None;
+        }
+        let umi_length = {
+            let umi = umi_region.read().unwrap();
+            (umi.min_len as usize + umi.max_len as usize) / 2
+        };
+
+        // Fixed anchors precede barcode anchors; within each type the 5' side
+        // precedes the 3' side. Once an observed anchor is found, extraction
+        // failure for that anchor does not change the topology preference.
+        for fixed_anchor in [true, false] {
+            for (anchor, is_five_prime_neighbor) in [
+                (self.umi_five_prime_anchor.as_ref(), true),
+                (self.umi_three_prime_anchor.as_ref(), false),
+            ] {
+                let Some(anchor) = anchor else {
+                    continue;
+                };
+                let anchor_matches_type = {
+                    let anchor = anchor.read().unwrap();
+                    if fixed_anchor {
+                        anchor.sequence_type.is_fixed()
+                    } else {
+                        anchor.region_type.is_barcode()
+                    }
+                };
+                if !anchor_matches_type {
+                    continue;
+                }
+
+                let Some((anchor_span, end_type)) =
+                    self.observed_anchor_span(anchor, five_prime, three_prime, barcodes)
+                else {
+                    continue;
+                };
+                let normalized_umi_span = if is_five_prime_neighbor {
+                    anchor_span.end..anchor_span.end.checked_add(umi_length)?
+                } else {
+                    anchor_span.start.checked_sub(umi_length)?..anchor_span.start
+                };
+                let segment = match end_type {
+                    super::EndType::FivePrime => five_prime,
+                    super::EndType::ThreePrime => three_prime,
+                };
+                let raw_span = Self::normalized_to_raw_span(
+                    normalized_umi_span,
+                    end_type,
+                    is_reverse_complemented,
+                    record.sequence().len(),
+                    segment.sequence.len(),
+                )?;
+
+                let mut sequence = record.sequence().get(raw_span.clone())?.to_vec();
+                let mut quality = record.quality_scores().get(raw_span)?.to_vec();
+                sequence.make_ascii_uppercase();
+                if !sequence
+                    .iter()
+                    .all(|base| matches!(base, b'A' | b'C' | b'G' | b'T'))
+                {
+                    return None;
+                }
+                if is_reverse_complemented {
+                    sequence = seqspec::utils::rev_compl(&sequence);
+                    quality.reverse();
+                }
+                return Some(noodles_fastq::Record::new(
+                    record.definition().clone(),
+                    sequence,
+                    quality,
+                ));
+            }
+        }
+
+        None
+    }
+
+    fn observed_anchor_span(
+        &self,
+        anchor: &Arc<RwLock<Region>>,
+        five_prime: &EndSegmentWithAlignment,
+        three_prime: &EndSegmentWithAlignment,
+        barcodes: &[ExtractedBarcode],
+    ) -> Option<(Range<usize>, super::EndType)> {
+        for (end_regions, segment) in [
+            (&self.five_prime_regions, five_prime),
+            (&self.three_prime_regions, three_prime),
+        ] {
+            if !end_regions
+                .regions
+                .iter()
+                .any(|region| Arc::ptr_eq(region, anchor))
+            {
+                continue;
+            }
+
+            let anchor_guard = anchor.read().unwrap();
+            let span = if anchor_guard.region_type.is_barcode() {
+                barcodes
+                    .iter()
+                    .find(|barcode| barcode.region_id == anchor_guard.region_id)
+                    .map(|barcode| barcode.traced_span.clone())
+            } else {
+                segment.composite_result.as_ref().and_then(|result| {
+                    result
+                        .region_mappings
+                        .iter()
+                        .find(|mapping| Arc::ptr_eq(&mapping.region, anchor) && !mapping.is_spacer)
+                        .map(|mapping| mapping.read_start..mapping.read_end)
+                })
+            };
+            if let Some(span) = span {
+                return Some((span, end_regions.end_type));
+            }
+        }
+
+        None
+    }
+
+    fn normalized_to_raw_span(
+        normalized_span: Range<usize>,
+        end_type: super::EndType,
+        is_reverse_complemented: bool,
+        read_length: usize,
+        segment_length: usize,
+    ) -> Option<Range<usize>> {
+        if segment_length > read_length {
+            return None;
+        }
+        let uses_prefix = matches!(
+            (end_type, is_reverse_complemented),
+            (super::EndType::FivePrime, false) | (super::EndType::ThreePrime, true)
+        );
+        let raw_segment = if uses_prefix {
+            0..segment_length
+        } else {
+            read_length - segment_length..read_length
+        };
+        let raw_span = if is_reverse_complemented {
+            raw_segment.end.checked_sub(normalized_span.end)?
+                ..raw_segment.end.checked_sub(normalized_span.start)?
+        } else {
+            raw_segment.start.checked_add(normalized_span.start)?
+                ..raw_segment.start.checked_add(normalized_span.end)?
+        };
+
+        (raw_span.start <= raw_span.end && raw_span.end <= read_length).then_some(raw_span)
     }
 
     /// Get whitelist indices reference for external access
@@ -819,6 +1103,7 @@ impl BarcodeExtractor {
             return Ok((
                 LongReadBarcodeResult {
                     barcode: None,
+                    umi: None,
                     confidence: 0.0,
                     is_reverse_complemented: false,
                     five_prime_trim: 0,
@@ -843,6 +1128,7 @@ impl BarcodeExtractor {
             return Ok((
                 LongReadBarcodeResult {
                     barcode: None,
+                    umi: None,
                     confidence: 0.0,
                     is_reverse_complemented: false,
                     five_prime_trim: 0,
@@ -883,6 +1169,7 @@ impl BarcodeExtractor {
         Ok((
             LongReadBarcodeResult {
                 barcode: Some(combined_barcode),
+                umi: None,
                 confidence: average_confidence,
                 is_reverse_complemented: false,
                 five_prime_trim: 0,
@@ -1014,6 +1301,9 @@ mod tests {
             whitelist_indices: IndexMap::new(),
             rc_regions: HashSet::new(),
             required_barcode_groups: IndexSet::new(),
+            umi_region: None,
+            umi_five_prime_anchor: None,
+            umi_three_prime_anchor: None,
         };
 
         let sequence = b"AGTCAAAACCCCGTTA";
@@ -1105,6 +1395,9 @@ mod tests {
             whitelist_indices: IndexMap::new(),
             rc_regions: HashSet::new(),
             required_barcode_groups: IndexSet::new(),
+            umi_region: None,
+            umi_five_prime_anchor: None,
+            umi_three_prime_anchor: None,
         };
         let segment = EndSegmentWithAlignment {
             sequence: vec![b'A'; 40],
@@ -1164,6 +1457,9 @@ mod tests {
             whitelist_indices: IndexMap::new(),
             rc_regions: HashSet::new(),
             required_barcode_groups: IndexSet::new(),
+            umi_region: None,
+            umi_five_prime_anchor: None,
+            umi_three_prime_anchor: None,
         };
         let segment = EndSegmentWithAlignment {
             sequence: vec![b'A'; 28],
@@ -1222,6 +1518,9 @@ mod tests {
             whitelist_indices: IndexMap::new(),
             rc_regions: HashSet::new(),
             required_barcode_groups: IndexSet::new(),
+            umi_region: None,
+            umi_five_prime_anchor: None,
+            umi_three_prime_anchor: None,
         };
         let segment = EndSegmentWithAlignment {
             sequence: vec![b'A'; 20],
@@ -1455,5 +1754,254 @@ mod tests {
         // Test with empty sequences
         assert_eq!(fitting_alignment_distance(b"", b"ATCG"), 0);
         assert_eq!(fitting_alignment_distance(b"ATCG", b""), 4);
+    }
+
+    #[test]
+    fn test_reverse_complement_barcode_span_uses_normalized_window_coordinates() {
+        let barcode =
+            create_test_region("barcode", RegionType::Barcode, SequenceType::Onlist, 4, 4);
+        let whitelist = IndexSet::from_iter([b"AAGC".to_vec()]);
+        let indices = IndexMap::from_iter([("barcode".to_string(), BarcodeIndex::new(&whitelist))]);
+        let normalized_window = b"GCTTGCTT";
+        let matching_window = seqspec::utils::rev_compl(normalized_window);
+
+        let matched = find_best_barcode_match(
+            &matching_window,
+            normalized_window,
+            &barcode,
+            &indices,
+            true,
+        )
+        .unwrap();
+
+        assert_eq!(matched.barcodes[0], b"AAGC");
+        assert_eq!(matched.traced_span, 4..8);
+    }
+
+    #[test]
+    fn test_extract_umi_from_barcode_anchor_in_both_orientations() {
+        use noodles_fastq::record::Definition;
+
+        let fixed = create_test_region("fixed", RegionType::Linker, SequenceType::Fixed, 16, 16);
+        fixed.write().unwrap().sequence = "ACGTACGTACGTACGT".to_string();
+        let barcode =
+            create_test_region("barcode", RegionType::Barcode, SequenceType::Onlist, 10, 10);
+        let umi = create_test_region("umi", RegionType::Umi, SequenceType::Random, 4, 4);
+        let target = create_test_region("target", RegionType::Cdna, SequenceType::Random, 50, 500);
+        let modality_region = Region {
+            region_id: "rna".to_string(),
+            region_type: RegionType::Modality(Modality::RNA),
+            name: "RNA".to_string(),
+            sequence_type: SequenceType::Joined,
+            sequence: String::new(),
+            min_len: 0,
+            max_len: 0,
+            onlist: None,
+            subregions: vec![fixed, barcode, umi, target],
+        };
+        let lib_spec = LibSpec::new(vec![modality_region]).unwrap();
+        let whitelist = IndexSet::from_iter([b"AACCGGTTAA".to_vec()]);
+        let extractor = BarcodeExtractor::new(
+            &lib_spec,
+            &Modality::RNA,
+            IndexMap::from_iter([("barcode".to_string(), whitelist)]),
+        )
+        .unwrap();
+        assert!(extractor.expects_umi());
+
+        let sequence = [
+            b"ACGTACGTACGTACGT".as_slice(),
+            b"AACCGGTTAA".as_slice(),
+            b"tgca".as_slice(),
+            vec![b'G'; 80].as_slice(),
+        ]
+        .concat();
+        let mut quality = vec![b'I'; sequence.len()];
+        quality[26..30].copy_from_slice(b"#$%&");
+        let forward = noodles_fastq::Record::new(
+            Definition::new("forward", ""),
+            sequence.clone(),
+            quality.clone(),
+        );
+        let (result, _) = extractor.extract_barcode(&forward).unwrap();
+        assert!(!result.is_reverse_complemented);
+        let extracted_umi = result.umi.unwrap();
+        assert_eq!(extracted_umi.sequence(), b"TGCA");
+        assert_eq!(extracted_umi.quality_scores(), b"#$%&");
+
+        let uppercase_sequence = sequence.to_ascii_uppercase();
+        let reverse = noodles_fastq::Record::new(
+            Definition::new("reverse", ""),
+            seqspec::utils::rev_compl(&uppercase_sequence),
+            quality.iter().rev().copied().collect::<Vec<_>>(),
+        );
+        let (result, _) = extractor.extract_barcode(&reverse).unwrap();
+        assert!(result.is_reverse_complemented);
+        let extracted_umi = result.umi.unwrap();
+        assert_eq!(extracted_umi.sequence(), b"TGCA");
+        assert_eq!(extracted_umi.quality_scores(), b"#$%&");
+    }
+
+    #[test]
+    fn test_umi_anchor_prefers_fixed_and_falls_back_to_barcode() {
+        use noodles_fastq::record::Definition;
+
+        let outer_fixed =
+            create_test_region("outer", RegionType::Linker, SequenceType::Fixed, 16, 16);
+        outer_fixed.write().unwrap().sequence = "ACGTACGTACGTACGT".to_string();
+        let barcode =
+            create_test_region("barcode", RegionType::Barcode, SequenceType::Onlist, 10, 10);
+        let umi = create_test_region("umi", RegionType::Umi, SequenceType::Random, 4, 4);
+        let inner_fixed =
+            create_test_region("inner", RegionType::Linker, SequenceType::Fixed, 16, 16);
+        inner_fixed.write().unwrap().sequence = "TGCATGCATGCATGCA".to_string();
+        let target = create_test_region("target", RegionType::Cdna, SequenceType::Random, 50, 500);
+        let modality_region = Region {
+            region_id: "rna".to_string(),
+            region_type: RegionType::Modality(Modality::RNA),
+            name: "RNA".to_string(),
+            sequence_type: SequenceType::Joined,
+            sequence: String::new(),
+            min_len: 0,
+            max_len: 0,
+            onlist: None,
+            subregions: vec![
+                outer_fixed.clone(),
+                barcode,
+                umi,
+                inner_fixed.clone(),
+                target,
+            ],
+        };
+        let lib_spec = LibSpec::new(vec![modality_region]).unwrap();
+        let whitelist = IndexSet::from_iter([b"AACCGGTTAA".to_vec()]);
+        let extractor = BarcodeExtractor::new(
+            &lib_spec,
+            &Modality::RNA,
+            IndexMap::from_iter([("barcode".to_string(), whitelist)]),
+        )
+        .unwrap();
+        let sequence = [
+            b"ACGTACGTACGTACGT".as_slice(),
+            b"AACCGGTTAA".as_slice(),
+            b"TGCA".as_slice(),
+            b"TGCATGCATGCATGCA".as_slice(),
+            vec![b'G'; 50].as_slice(),
+        ]
+        .concat();
+        let record = noodles_fastq::Record::new(
+            Definition::new("read", ""),
+            sequence.clone(),
+            vec![b'I'; sequence.len()],
+        );
+        let mut barcode = ExtractedBarcode {
+            region_id: "barcode".to_string(),
+            region_name: "barcode".to_string(),
+            barcodes: vec![b"AACCGGTTAA".to_vec()],
+            confidence: 1.0,
+            // Deliberately offset: the fixed anchor must win while observed.
+            traced_span: 15..25,
+        };
+        let mut five_prime = EndSegmentWithAlignment {
+            sequence: sequence[..50].to_vec(),
+            composite_result: Some(CompositeAlignmentResult {
+                score: 50,
+                region_mappings: vec![
+                    make_fixed_mapping(&outer_fixed, 0, 16),
+                    make_fixed_mapping(&inner_fixed, 30, 46),
+                ],
+            }),
+        };
+        let three_prime = EndSegmentWithAlignment::empty();
+
+        let extracted = extractor
+            .extract_umi(
+                &record,
+                &five_prime,
+                &three_prime,
+                &[barcode.clone()],
+                false,
+            )
+            .unwrap();
+        assert_eq!(extracted.sequence(), b"TGCA");
+
+        // With the preferred 3' fixed anchor unavailable on this read, extraction
+        // falls back to the observed 5' barcode span.
+        five_prime
+            .composite_result
+            .as_mut()
+            .unwrap()
+            .region_mappings
+            .retain(|mapping| !Arc::ptr_eq(&mapping.region, &inner_fixed));
+        barcode.traced_span = 16..26;
+        let extracted = extractor
+            .extract_umi(&record, &five_prime, &three_prime, &[barcode], false)
+            .unwrap();
+        assert_eq!(extracted.sequence(), b"TGCA");
+    }
+
+    #[test]
+    fn test_unsupported_umi_topology_disables_extraction() {
+        let fixed = create_test_region("fixed", RegionType::Linker, SequenceType::Fixed, 16, 16);
+        fixed.write().unwrap().sequence = "ACGTACGTACGTACGT".to_string();
+        let barcode =
+            create_test_region("barcode", RegionType::Barcode, SequenceType::Onlist, 10, 10);
+        let spacer = create_test_region("spacer", RegionType::Named, SequenceType::Random, 4, 4);
+        let umi = create_test_region("umi", RegionType::Umi, SequenceType::Random, 4, 4);
+        let target = create_test_region("target", RegionType::Cdna, SequenceType::Random, 50, 500);
+        let modality_region = Region {
+            region_id: "rna".to_string(),
+            region_type: RegionType::Modality(Modality::RNA),
+            name: "RNA".to_string(),
+            sequence_type: SequenceType::Joined,
+            sequence: String::new(),
+            min_len: 0,
+            max_len: 0,
+            onlist: None,
+            subregions: vec![fixed, barcode, spacer, umi, target],
+        };
+        let lib_spec = LibSpec::new(vec![modality_region]).unwrap();
+        let whitelist = IndexSet::from_iter([b"AACCGGTTAA".to_vec()]);
+        let extractor = BarcodeExtractor::new(
+            &lib_spec,
+            &Modality::RNA,
+            IndexMap::from_iter([("barcode".to_string(), whitelist)]),
+        )
+        .unwrap();
+
+        assert!(!extractor.expects_umi());
+        assert!(extractor.umi_region.is_some());
+    }
+
+    #[test]
+    fn test_multiple_umi_regions_are_rejected() {
+        let fixed = create_test_region("fixed", RegionType::Linker, SequenceType::Fixed, 16, 16);
+        fixed.write().unwrap().sequence = "ACGTACGTACGTACGT".to_string();
+        let barcode =
+            create_test_region("barcode", RegionType::Barcode, SequenceType::Onlist, 10, 10);
+        let umi1 = create_test_region("umi1", RegionType::Umi, SequenceType::Random, 4, 4);
+        let umi2 = create_test_region("umi2", RegionType::Umi, SequenceType::Random, 4, 4);
+        let target = create_test_region("target", RegionType::Cdna, SequenceType::Random, 50, 500);
+        let modality_region = Region {
+            region_id: "rna".to_string(),
+            region_type: RegionType::Modality(Modality::RNA),
+            name: "RNA".to_string(),
+            sequence_type: SequenceType::Joined,
+            sequence: String::new(),
+            min_len: 0,
+            max_len: 0,
+            onlist: None,
+            subregions: vec![fixed, barcode, umi1, umi2, target],
+        };
+        let lib_spec = LibSpec::new(vec![modality_region]).unwrap();
+        let whitelist = IndexSet::from_iter([b"AACCGGTTAA".to_vec()]);
+        let error = BarcodeExtractor::new(
+            &lib_spec,
+            &Modality::RNA,
+            IndexMap::from_iter([("barcode".to_string(), whitelist)]),
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("multiple UMI regions"));
     }
 }

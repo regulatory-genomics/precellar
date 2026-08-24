@@ -672,6 +672,10 @@ impl BarcodeProcessor {
     fn is_long_read(&self) -> bool {
         matches!(self, Self::LongRead(_))
     }
+
+    fn expects_umi(&self) -> bool {
+        matches!(self, Self::LongRead(extractor) if extractor.expects_umi())
+    }
 }
 
 /// Concatenates assay-level readers without interleaving their batches.
@@ -838,8 +842,8 @@ impl Iterator for AnnotatedFastqReader {
 /// One group contains records at the same position from every participating
 /// FASTQ input. Individual physical annotations are joined into one logical
 /// insert. Split failures increment the per-read defect count and drop only the
-/// failed physical annotation. Logical inserts without a barcode are omitted
-/// from downstream output after their available QC has been recorded.
+/// failed physical annotation. Logical inserts without a barcode, or without an
+/// expected long-read UMI, are omitted after their available QC is recorded.
 fn process_chunk<'a, I: IntoIterator<Item = &'a SmallVec<[fastq::Record; 4]>>>(
     barcode_processor: &BarcodeProcessor,
     annotators: &[FastqAnnotator],
@@ -847,6 +851,10 @@ fn process_chunk<'a, I: IntoIterator<Item = &'a SmallVec<[fastq::Record; 4]>>>(
 ) -> (Vec<AnnotatedFastq>, QcFastq, Option<QcLongRead>) {
     let mut qc = QcFastq::default();
     let mut qc_long_read = barcode_processor.is_long_read().then(QcLongRead::default);
+    let expects_umi = barcode_processor.expects_umi();
+    if expects_umi {
+        qc_long_read.as_mut().unwrap().enable_umi_extraction();
+    }
     let annotated = chunk
         .into_iter()
         .flat_map(|records| {
@@ -866,6 +874,9 @@ fn process_chunk<'a, I: IntoIterator<Item = &'a SmallVec<[fastq::Record; 4]>>>(
                                     .record_orientation(stats.is_reverse, !stats.composite_pass);
                                 qc_long_read.record_composite_alignment(stats.composite_pass);
                                 qc_long_read.record_barcode_extraction(anno.barcode.is_some());
+                                if expects_umi {
+                                    qc_long_read.record_umi_extraction(anno.umi.is_some());
+                                }
                                 for (group_name, intersection_hit) in stats.consensus_results {
                                     qc_long_read.record_consensus(&group_name, intersection_hit);
                                 }
@@ -884,7 +895,7 @@ fn process_chunk<'a, I: IntoIterator<Item = &'a SmallVec<[fastq::Record; 4]>>>(
                     this
                 })?;
             qc.update(&fq);
-            if fq.barcode.is_none() {
+            if fq.barcode.is_none() || (expects_umi && fq.umi.is_none()) {
                 None
             } else {
                 Some(fq)
@@ -1153,7 +1164,7 @@ impl FastqAnnotator {
         Ok((
             AnnotatedFastq {
                 barcode,
-                umi: None,
+                umi: barcode_result.umi,
                 read1,
                 read2,
             },
@@ -1414,6 +1425,71 @@ mod tests {
         assay
     }
 
+    fn forward_long_read_with_umi(umi: &[u8], unsupported_topology: bool) -> Vec<u8> {
+        let spacer = unsupported_topology.then_some(b"ACGT".as_slice());
+        [
+            vec![b'A'; 30].as_slice(),
+            b"CTACACGACGCTCTTCCGATCT".as_slice(),
+            b"AACCGGTTAACCGGTT".as_slice(),
+            spacer.unwrap_or_default(),
+            umi,
+            vec![b'T'; 12].as_slice(),
+            vec![b'G'; 600].as_slice(),
+        ]
+        .concat()
+    }
+
+    fn long_read_umi_assay(
+        fastq_path: &Path,
+        directory: &Path,
+        unsupported_topology: bool,
+    ) -> Assay {
+        use seqspec::region::Region;
+        use seqspec::{RegionType, SequenceType};
+        use std::sync::{Arc, RwLock};
+
+        let whitelist = directory.join("umi-barcodes.txt");
+        std::fs::write(&whitelist, "AACCGGTTAACCGGTT\n").unwrap();
+
+        let mut assay = Assay::from_path("../seqspec_templates/10x_lr_rna_BLAZE.yaml").unwrap();
+        assay.sequence_spec.get_mut("R1").unwrap().files =
+            Some(vec![File::from_fastq(fastq_path, false).unwrap()]);
+
+        let modality = assay.library_spec.get_modality(&Modality::RNA).unwrap();
+        for region in &modality.read().unwrap().subregions {
+            let mut region = region.write().unwrap();
+            if let Some(onlist) = &mut region.onlist {
+                onlist.url = whitelist.to_string_lossy().into_owned();
+                onlist.filename = "umi-barcodes.txt".to_owned();
+                onlist.urltype = UrlType::Local;
+            }
+        }
+        if unsupported_topology {
+            let mut modality = modality.write().unwrap();
+            let umi_idx = modality
+                .subregions
+                .iter()
+                .position(|region| region.read().unwrap().region_type.is_umi())
+                .unwrap();
+            modality.subregions.insert(
+                umi_idx,
+                Arc::new(RwLock::new(Region {
+                    region_id: "umi_spacer".to_string(),
+                    region_type: RegionType::Named,
+                    name: "UMI spacer".to_string(),
+                    sequence_type: SequenceType::Random,
+                    sequence: "NNNN".to_string(),
+                    min_len: 4,
+                    max_len: 4,
+                    onlist: None,
+                    subregions: Vec::new(),
+                })),
+            );
+        }
+
+        assay
+    }
+
     fn short_read_fixture(directory: &Path) -> (Assay, Vec<u8>, Vec<u8>, Vec<u8>) {
         let read1_path = directory.join("R1.fastq");
         let read2_path = directory.join("R2.fastq");
@@ -1626,6 +1702,61 @@ mod tests {
         assert_eq!(long_read["orientation"]["forward"], 1);
         assert_eq!(long_read["orientation"]["reverse"], 1);
         assert_eq!(long_read["barcode_extraction"]["success"], 2);
+        assert!(long_read.get("umi_extraction").is_none());
+    }
+
+    #[test]
+    fn test_long_read_umi_failure_is_filtered_and_recorded() {
+        let directory = tempfile::tempdir().unwrap();
+        let fastq_path = directory.path().join("umi.fastq");
+        let valid = forward_long_read_with_umi(b"TGCATGCATGCA", false);
+        let invalid = forward_long_read_with_umi(b"NNNNNNNNNNNN", false);
+        write_fastq_records(
+            &fastq_path,
+            &[("valid", valid.as_slice()), ("invalid", invalid.as_slice())],
+        );
+        let assay = long_read_umi_assay(&fastq_path, directory.path(), false);
+        let mut execution = FastqPlan::new(vec![assay], Modality::RNA)
+            .with_sequencing_type(AssayType::LongRead)
+            .build(false, 10_000)
+            .unwrap();
+
+        let batch = execution.next_batch().unwrap().unwrap();
+        assert_eq!(batch.len(), 1);
+        assert_eq!(batch[0].read1.as_ref().unwrap().name(), b"valid");
+        assert_eq!(batch[0].umi.as_ref().unwrap().sequence(), b"TGCATGCATGCA");
+        assert_eq!(batch[0].read1.as_ref().unwrap().sequence().len(), 600);
+        assert!(execution.next_batch().unwrap().is_none());
+
+        let report = execution.finish().unwrap();
+        assert_eq!(report.fastq.num_defect.get("R1").copied().unwrap_or(0), 0);
+        let long_read = report.long_read.unwrap().to_json();
+        assert_eq!(long_read["barcode_extraction"]["success"], 2);
+        assert_eq!(long_read["umi_extraction"]["success"], 1);
+        assert_eq!(long_read["umi_extraction"]["fail"], 1);
+    }
+
+    #[test]
+    fn test_unsupported_umi_topology_keeps_reads_without_umi_qc() {
+        let directory = tempfile::tempdir().unwrap();
+        let fastq_path = directory.path().join("unsupported-umi.fastq");
+        let read = forward_long_read_with_umi(b"TGCATGCATGCA", true);
+        write_fastq(&fastq_path, "read", &read);
+        let assay = long_read_umi_assay(&fastq_path, directory.path(), true);
+        let mut execution = FastqPlan::new(vec![assay], Modality::RNA)
+            .with_sequencing_type(AssayType::LongRead)
+            .build(false, 10_000)
+            .unwrap();
+
+        let batch = execution.next_batch().unwrap().unwrap();
+        assert_eq!(batch.len(), 1);
+        assert!(batch[0].umi.is_none());
+        assert_eq!(batch[0].read1.as_ref().unwrap().sequence().len(), 600);
+        assert!(execution.next_batch().unwrap().is_none());
+
+        let long_read = execution.finish().unwrap().long_read.unwrap().to_json();
+        assert_eq!(long_read["barcode_extraction"]["success"], 1);
+        assert!(long_read.get("umi_extraction").is_none());
     }
 
     #[test]

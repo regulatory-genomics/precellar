@@ -503,6 +503,11 @@ pub struct QcLongRead {
     pub barcode_extracted: u64,
     pub barcode_failed: u64,
 
+    // UMI extraction outcome (only enabled for supported UMI layouts)
+    pub umi_extracted: u64,
+    pub umi_failed: u64,
+    umi_extraction_enabled: bool,
+
     // Consensus resolution (keyed by barcode group name)
     pub consensus_stats: HashMap<String, ConsensusStats>,
 }
@@ -534,6 +539,19 @@ impl QcLongRead {
         }
     }
 
+    pub fn enable_umi_extraction(&mut self) {
+        self.umi_extraction_enabled = true;
+    }
+
+    pub fn record_umi_extraction(&mut self, success: bool) {
+        self.umi_extraction_enabled = true;
+        if success {
+            self.umi_extracted += 1;
+        } else {
+            self.umi_failed += 1;
+        }
+    }
+
     pub fn record_consensus(&mut self, group_name: &str, intersection_hit: bool) {
         let stats = self
             .consensus_stats
@@ -558,6 +576,9 @@ impl Extend<Self> for QcLongRead {
             self.composite_alignment_fail += other.composite_alignment_fail;
             self.barcode_extracted += other.barcode_extracted;
             self.barcode_failed += other.barcode_failed;
+            self.umi_extracted += other.umi_extracted;
+            self.umi_failed += other.umi_failed;
+            self.umi_extraction_enabled |= other.umi_extraction_enabled;
             for (k, v) in other.consensus_stats {
                 self.consensus_stats.entry(k).or_default().combine(&v);
             }
@@ -585,7 +606,7 @@ impl Metric for QcLongRead {
             })
             .collect();
 
-        json!({
+        let mut result = json!({
             "total_reads": total_reads,
             "orientation": {
                 "forward": self.orientation_forward,
@@ -601,7 +622,17 @@ impl Metric for QcLongRead {
                 "fail": self.barcode_failed,
             },
             "consensus": consensus,
-        })
+        });
+        if self.umi_extraction_enabled {
+            result.as_object_mut().unwrap().insert(
+                "umi_extraction".to_string(),
+                json!({
+                    "success": self.umi_extracted,
+                    "fail": self.umi_failed,
+                }),
+            );
+        }
+        result
     }
 }
 
