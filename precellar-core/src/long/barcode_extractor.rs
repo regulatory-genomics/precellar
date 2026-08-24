@@ -1786,7 +1786,7 @@ mod tests {
         fixed.write().unwrap().sequence = "ACGTACGTACGTACGT".to_string();
         let barcode =
             create_test_region("barcode", RegionType::Barcode, SequenceType::Onlist, 10, 10);
-        let umi = create_test_region("umi", RegionType::Umi, SequenceType::Random, 4, 4);
+        let umi = create_test_region("umi", RegionType::Umi, SequenceType::Random, 6, 6);
         let target = create_test_region("target", RegionType::Cdna, SequenceType::Random, 50, 500);
         let modality_region = Region {
             region_id: "rna".to_string(),
@@ -1812,12 +1812,12 @@ mod tests {
         let sequence = [
             b"ACGTACGTACGTACGT".as_slice(),
             b"AACCGGTTAA".as_slice(),
-            b"tgca".as_slice(),
+            b"aagtcc".as_slice(),
             vec![b'G'; 80].as_slice(),
         ]
         .concat();
         let mut quality = vec![b'I'; sequence.len()];
-        quality[26..30].copy_from_slice(b"#$%&");
+        quality[26..32].copy_from_slice(b"#$%&'(");
         let forward = noodles_fastq::Record::new(
             Definition::new("forward", ""),
             sequence.clone(),
@@ -1826,8 +1826,8 @@ mod tests {
         let (result, _) = extractor.extract_barcode(&forward).unwrap();
         assert!(!result.is_reverse_complemented);
         let extracted_umi = result.umi.unwrap();
-        assert_eq!(extracted_umi.sequence(), b"TGCA");
-        assert_eq!(extracted_umi.quality_scores(), b"#$%&");
+        assert_eq!(extracted_umi.sequence(), b"AAGTCC");
+        assert_eq!(extracted_umi.quality_scores(), b"#$%&'(");
 
         let uppercase_sequence = sequence.to_ascii_uppercase();
         let reverse = noodles_fastq::Record::new(
@@ -1838,8 +1838,8 @@ mod tests {
         let (result, _) = extractor.extract_barcode(&reverse).unwrap();
         assert!(result.is_reverse_complemented);
         let extracted_umi = result.umi.unwrap();
-        assert_eq!(extracted_umi.sequence(), b"TGCA");
-        assert_eq!(extracted_umi.quality_scores(), b"#$%&");
+        assert_eq!(extracted_umi.sequence(), b"AAGTCC");
+        assert_eq!(extracted_umi.quality_scores(), b"#$%&'(");
     }
 
     #[test]
