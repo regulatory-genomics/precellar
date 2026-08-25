@@ -18,7 +18,7 @@ sequence_spec:
   read_id: R1
   name: Read 1
   modality: rna
-  primer_id: illumina_p5
+  primer_id: flt_prefix
   min_len: 100
   max_len: 2147483647
   strand: unstranded
@@ -42,20 +42,31 @@ library_spec:
   onlist: null
   regions:
   - !Region
-    region_id: illumina_p5
-    region_type: illumina_p5
-    name: Illumina P5
+    region_id: ont_adapter_prefix
+    region_type: named
+    name: ONT adapter / unknown prefix
     sequence_type: random
-    sequence: XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
-    min_len: 30
-    max_len: 60
+    sequence: XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
+    min_len: 12
+    max_len: 42
+    onlist: null
+    regions: null
+    parent_id: rna
+  - !Region
+    region_id: flt_prefix
+    region_type: custom_primer
+    name: FLT-seq forward primer prefix
+    sequence_type: fixed
+    sequence: ACTAAAGGCCATTACGGC
+    min_len: 18
+    max_len: 18
     onlist: null
     regions: null
     parent_id: rna
   - !Region
     region_id: adapter
     region_type: named
-    name: adapter
+    name: 10x adapter
     sequence_type: fixed
     sequence: CTACACGACGCTCTTCCGATCT
     min_len: 22
@@ -112,6 +123,17 @@ library_spec:
     sequence: XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
     min_len: 100
     max_len: 2147483647
+    onlist: null
+    regions: null
+    parent_id: rna
+  - !Region
+    region_id: tso
+    region_type: named
+    name: Template-switch oligo (TSO)
+    sequence_type: fixed
+    sequence: TGTACTCTGCGTTGATACCACTGCTT
+    min_len: 26
+    max_len: 26
     onlist: null
     regions: null
     parent_id: rna

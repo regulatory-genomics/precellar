@@ -1429,12 +1429,14 @@ mod tests {
         let spacer = unsupported_topology.then_some(b"ACGT".as_slice());
         [
             vec![b'A'; 30].as_slice(),
+            b"ACTAAAGGCCATTACGGC".as_slice(),
             b"CTACACGACGCTCTTCCGATCT".as_slice(),
             b"AACCGGTTAACCGGTT".as_slice(),
             spacer.unwrap_or_default(),
             umi,
             vec![b'T'; 12].as_slice(),
             vec![b'G'; 600].as_slice(),
+            b"TGTACTCTGCGTTGATACCACTGCTT".as_slice(),
         ]
         .concat()
     }
