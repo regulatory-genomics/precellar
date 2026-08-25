@@ -40,6 +40,37 @@ Each example dataset below contains approximately 2.5 million fastq records.
 
 ### Gene Expression
 
+`GeneQuantificationSink` normally reads transcript annotation from the
+configured STAR aligner. To quantify RNA alignments produced by another
+aligner, such as long-read Minimap2, provide a STAR index containing
+`geneInfo.tab`, `transcriptInfo.tab`, `exonInfo.tab`, `chrNameLength.txt`
+and `chrStart.txt` explicitly:
+
+Build the aligner and STAR indexes from the same reference FASTA, and ensure the
+GTF uses matching chromosome names. Reference names and lengths are validated
+before reads are processed, so mismatches such as `chr1` versus `1` fail
+immediately instead of inflating intergenic reads.
+
+```python
+rna_qc = (
+    precellar.FastqPipeline(assay, modality="rna")
+    .align_with(
+        precellar.aligners.Minimap2(
+            "GRCh38.splice_hq.mmi",
+            preset="splice:hq",
+            build_if_missing=False,
+        )
+    )
+    .run_sink(
+        precellar.sinks.GeneQuantificationSink(
+            "gene_matrix.h5ad",
+            strandedness="reverse",
+            transcriptome_index="GRCh38_STAR_index",
+        )
+    )
+)
+```
+
 <details>
 <summary>10x scRNA-seq v3</summary>
 
