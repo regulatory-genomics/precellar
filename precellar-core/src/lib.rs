@@ -3,6 +3,7 @@ pub mod align;
 pub mod barcode;
 pub mod fragment;
 pub mod genome;
+pub mod long;
 pub mod middleware;
 pub mod pipeline;
 pub mod pseudoalign;

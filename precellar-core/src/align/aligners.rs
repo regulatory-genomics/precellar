@@ -124,6 +124,23 @@ pub trait Aligner {
     ) -> Vec<(Option<MultiMapR>, Option<MultiMapR>)>;
 }
 
+/// Select one single-end read and retain whether it came from read 1.
+fn select_single_read<T>(read1: Option<T>, read2: Option<T>) -> Option<(T, bool)> {
+    match (read1, read2) {
+        (Some(read), None) => Some((read, true)),
+        (None, Some(read)) => Some((read, false)),
+        (Some(_), Some(_)) | (None, None) => None,
+    }
+}
+
+fn restore_single_slot<T>(value: T, is_read1: bool) -> (Option<T>, Option<T>) {
+    if is_read1 {
+        (Some(value), None)
+    } else {
+        (None, Some(value))
+    }
+}
+
 impl Aligner for BurrowsWheelerAligner {
     fn header(&self) -> sam::Header {
         self.get_sam_header()
@@ -134,13 +151,32 @@ impl Aligner for BurrowsWheelerAligner {
         num_threads: u16,
         records: Vec<AlignmentInput>,
     ) -> Vec<(Option<MultiMapR>, Option<MultiMapR>)> {
-        if records[0].read2.is_some() {
+        if records.is_empty() {
+            return Vec::new();
+        }
+        let all_paired = records
+            .iter()
+            .all(|record| record.read1.is_some() && record.read2.is_some());
+        let all_single = records
+            .iter()
+            .all(|record| record.read1.is_some() ^ record.read2.is_some());
+        assert!(
+            all_paired || all_single,
+            "an alignment batch cannot mix paired and single-end records"
+        );
+
+        if all_paired {
             let (info, mut reads): (Vec<_>, Vec<_>) = records
                 .into_iter()
                 .map(|rec| {
+                    let AlignmentInput {
+                        read1,
+                        read2,
+                        metadata,
+                    } = rec;
                     (
-                        (rec.metadata.barcode, rec.metadata.umi),
-                        (rec.read1.unwrap(), rec.read2.unwrap()),
+                        (metadata.barcode, metadata.umi),
+                        (read1.unwrap(), read2.unwrap()),
                     )
                 })
                 .unzip();
@@ -156,15 +192,24 @@ impl Aligner for BurrowsWheelerAligner {
         } else {
             let (info, mut reads): (Vec<_>, Vec<_>) = records
                 .into_iter()
-                .map(|rec| ((rec.metadata.barcode, rec.metadata.umi), rec.read1.unwrap()))
+                .map(|rec| {
+                    let AlignmentInput {
+                        read1,
+                        read2,
+                        metadata,
+                    } = rec;
+                    let (read, slot) = select_single_read(read1, read2)
+                        .expect("single-end batch contains an invalid read layout");
+                    ((metadata.barcode, metadata.umi, slot), read)
+                })
                 .unzip();
 
             self.align_reads(num_threads, reads.as_mut_slice())
                 .enumerate()
                 .map(|(i, mut alignment)| {
-                    let (bc, umi) = info.get(i).unwrap();
+                    let (bc, umi, slot) = info.get(i).unwrap();
                     attach_read_metadata(&mut alignment, bc, umi.as_ref());
-                    (Some(alignment.into()), None)
+                    restore_single_slot(alignment.into(), *slot)
                 })
                 .collect()
         }
@@ -181,13 +226,32 @@ impl Aligner for MiniBwaSR {
         num_threads: u16,
         records: Vec<AlignmentInput>,
     ) -> Vec<(Option<MultiMapR>, Option<MultiMapR>)> {
-        if records[0].read2.is_some() {
+        if records.is_empty() {
+            return Vec::new();
+        }
+        let all_paired = records
+            .iter()
+            .all(|record| record.read1.is_some() && record.read2.is_some());
+        let all_single = records
+            .iter()
+            .all(|record| record.read1.is_some() ^ record.read2.is_some());
+        assert!(
+            all_paired || all_single,
+            "an alignment batch cannot mix paired and single-end records"
+        );
+
+        if all_paired {
             let (info, mut reads): (Vec<_>, Vec<_>) = records
                 .into_iter()
                 .map(|rec| {
+                    let AlignmentInput {
+                        read1,
+                        read2,
+                        metadata,
+                    } = rec;
                     (
-                        (rec.metadata.barcode, rec.metadata.umi),
-                        (rec.read1.unwrap(), rec.read2.unwrap()),
+                        (metadata.barcode, metadata.umi),
+                        (read1.unwrap(), read2.unwrap()),
                     )
                 })
                 .unzip();
@@ -208,7 +272,16 @@ impl Aligner for MiniBwaSR {
         } else {
             let (info, mut reads): (Vec<_>, Vec<_>) = records
                 .into_iter()
-                .map(|rec| ((rec.metadata.barcode, rec.metadata.umi), rec.read1.unwrap()))
+                .map(|rec| {
+                    let AlignmentInput {
+                        read1,
+                        read2,
+                        metadata,
+                    } = rec;
+                    let (read, slot) = select_single_read(read1, read2)
+                        .expect("single-end batch contains an invalid read layout");
+                    ((metadata.barcode, metadata.umi, slot), read)
+                })
                 .unzip();
 
             self.align_reads(num_threads, reads.as_mut_slice())
@@ -217,9 +290,9 @@ impl Aligner for MiniBwaSR {
                 .map(|(i, alignment)| {
                     // Extract the primary alignment and discard the rest
                     let mut alignment = alignment.into_iter().next().unwrap();
-                    let (bc, umi) = info.get(i).unwrap();
+                    let (bc, umi, slot) = info.get(i).unwrap();
                     attach_read_metadata(&mut alignment, bc, umi.as_ref());
-                    (Some(alignment.into()), None)
+                    restore_single_slot(alignment.into(), *slot)
                 })
                 .collect()
         }
@@ -256,18 +329,14 @@ impl Aligner for StarAligner {
                                 attach_read_metadata(alignment, bc, rec.metadata.umi.as_ref());
                             });
                         (Some(ali1.try_into().unwrap()), Some(ali2.try_into().unwrap()))
-                    } else if let Some(read) = read1.or(read2) {
+                    } else if let Some((read, slot)) = select_single_read(read1, read2) {
                         let mut ali = aligner.align_read(read).unwrap();
                         ali.iter_mut().for_each(|alignment| {
                             attach_read_metadata(alignment, bc, rec.metadata.umi.as_ref());
                         });
-                        if read1.is_some() {
-                            (Some(ali.try_into().unwrap()), None)
-                        } else {
-                            (None, Some(ali.try_into().unwrap()))
-                        }
+                        restore_single_slot(ali.try_into().unwrap(), slot)
                     } else {
-                        log::warn!("Found record with no reads (read1 and read2 are both None). Barcode: {:?}", 
+                        log::warn!("Found record with no reads (read1 and read2 are both None). Barcode: {:?}",
                                   String::from_utf8_lossy(bc.raw.sequence()));
                         (None, None)
                     }
@@ -310,16 +379,12 @@ impl Aligner for Minimap2Aligner {
                                 attach_read_metadata(alignment, bc, rec.metadata.umi.as_ref());
                             });
                         (Some(ali1.try_into().unwrap()), Some(ali2.try_into().unwrap()))
-                    } else if let Some(read) = read1.or(read2) {
+                    } else if let Some((read, slot)) = select_single_read(read1, read2) {
                         let mut ali = thread_aligner.align_read(read).unwrap();
                         ali.iter_mut().for_each(|alignment| {
                             attach_read_metadata(alignment, bc, rec.metadata.umi.as_ref());
                         });
-                        if read1.is_some() {
-                            (Some(ali.try_into().unwrap()), None)
-                        } else {
-                            (None, Some(ali.try_into().unwrap()))
-                        }
+                        restore_single_slot(ali.try_into().unwrap(), slot)
                     } else {
                         log::warn!("Found record with no reads (read1 and read2 are both None). Barcode: {:?}",
                                   String::from_utf8_lossy(bc.raw.sequence()));
@@ -332,7 +397,7 @@ impl Aligner for Minimap2Aligner {
 }
 
 fn get_chunk_size(total_length: usize, num_threads: usize) -> usize {
-    let chunk_size = total_length / num_threads;
+    let chunk_size = total_length / num_threads.max(1);
     if chunk_size == 0 {
         1
     } else {
@@ -365,5 +430,160 @@ fn attach_read_metadata(
             Tag::UMI_QUALITY_SCORES,
             Value::String(umi.quality_scores().into()),
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::align::fastq::ReadMetadata;
+    use bwa_mem2::{AlignerOpts, FMIndex};
+    use noodles_fastq::record::Definition;
+
+    fn reference_sequence(len: usize) -> Vec<u8> {
+        let mut state = 0x1234_5678_u32;
+        (0..len)
+            .map(|_| {
+                state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                b"ACGT"[((state >> 16) & 3) as usize]
+            })
+            .collect()
+    }
+
+    fn write_reference(directory: &std::path::Path) -> (std::path::PathBuf, Vec<u8>) {
+        let fasta = directory.join("reference.fa");
+        let sequence = reference_sequence(2_000);
+        std::fs::write(
+            &fasta,
+            format!(">chr1\n{}\n", String::from_utf8_lossy(&sequence)),
+        )
+        .unwrap();
+        (fasta, sequence)
+    }
+
+    fn fastq_record(name: &str, sequence: &[u8]) -> fastq::Record {
+        fastq::Record::new(
+            Definition::new(name.as_bytes(), ""),
+            sequence.to_vec(),
+            vec![b'I'; sequence.len()],
+        )
+    }
+
+    fn alignment_input(name: &str, sequence: &[u8], is_read1: bool) -> AlignmentInput {
+        let read = fastq_record(name, sequence);
+        let (read1, read2) = restore_single_slot(read, is_read1);
+        AlignmentInput {
+            read1,
+            read2,
+            metadata: ReadMetadata {
+                barcode: Barcode {
+                    raw: fastq_record("barcode", b"ACGT"),
+                    corrected: Some(b"ACGT".to_vec()),
+                },
+                umi: None,
+            },
+        }
+    }
+
+    fn mixed_single_end_inputs(sequence: &[u8]) -> Vec<AlignmentInput> {
+        vec![
+            alignment_input("forward", sequence, true),
+            alignment_input("reverse", sequence, false),
+        ]
+    }
+
+    fn assert_mixed_single_end_slots(output: &[(Option<MultiMapR>, Option<MultiMapR>)]) {
+        assert_eq!(output.len(), 2);
+        assert!(output[0].0.is_some());
+        assert!(output[0].1.is_none());
+        assert!(output[1].0.is_none());
+        assert!(output[1].1.is_some());
+        assert_eq!(
+            output[0].0.as_ref().unwrap().barcode().unwrap().as_deref(),
+            Some("ACGT")
+        );
+        assert_eq!(
+            output[1].1.as_ref().unwrap().barcode().unwrap().as_deref(),
+            Some("ACGT")
+        );
+    }
+
+    #[test]
+    fn single_read_helpers_preserve_read1_and_read2_slots() {
+        assert_eq!(select_single_read(Some("r1"), None), Some(("r1", true)));
+        assert_eq!(select_single_read(None, Some("r2")), Some(("r2", false)));
+        assert_eq!(select_single_read(Some("r1"), Some("r2")), None);
+        assert_eq!(select_single_read::<&str>(None, None), None);
+
+        assert_eq!(
+            restore_single_slot("alignment", true),
+            (Some("alignment"), None)
+        );
+        assert_eq!(
+            restore_single_slot("alignment", false),
+            (None, Some("alignment"))
+        );
+    }
+
+    #[test]
+    fn minimap2_smoke_preserves_mixed_single_end_slots() {
+        let directory = tempfile::tempdir().unwrap();
+        let (fasta, reference) = write_reference(directory.path());
+        let query = &reference[400..1_000];
+        let opts = Minimap2Opts::new(fasta).with_preset(::minimap2::Preset::MapOnt);
+        let mut aligner = Minimap2Aligner::new(opts).unwrap();
+
+        let output = Aligner::align_reads(&mut aligner, 1, mixed_single_end_inputs(query));
+        assert_mixed_single_end_slots(&output);
+    }
+
+    #[test]
+    fn minibwa_smoke_preserves_mixed_single_end_slots() {
+        let directory = tempfile::tempdir().unwrap();
+        let (fasta, reference) = write_reference(directory.path());
+        let prefix = directory.path().join("minibwa-index");
+        let index = MiniBwaIndex::build(&fasta, &prefix, 1, false).unwrap();
+        let mut options = MiniBwaOptions::default();
+        options.set_min_seed_len(8);
+        options.set_min_chain_score(1);
+        options.set_min_dp_score(1);
+        let mut aligner = MiniBwaSR::new(index, options).unwrap();
+
+        let output = Aligner::align_reads(
+            &mut aligner,
+            1,
+            mixed_single_end_inputs(&reference[400..500]),
+        );
+        assert_mixed_single_end_slots(&output);
+    }
+
+    #[test]
+    fn bwa_mem2_smoke_preserves_mixed_single_end_slots() {
+        let directory = tempfile::tempdir().unwrap();
+        let (fasta, reference) = write_reference(directory.path());
+        let prefix = directory.path().join("bwa-index");
+        let index = FMIndex::new(&fasta, &prefix).unwrap();
+        let mut options = AlignerOpts::default();
+        options.set_min_seed_len(8);
+        let mut aligner = BurrowsWheelerAligner::new(index, options);
+
+        let output = Aligner::align_reads(
+            &mut aligner,
+            1,
+            mixed_single_end_inputs(&reference[400..500]),
+        );
+        assert_mixed_single_end_slots(&output);
+    }
+
+    #[test]
+    #[ignore = "requires a prebuilt STAR index in PRECELLAR_TEST_STAR_INDEX"]
+    fn star_smoke_preserves_mixed_single_end_slots() {
+        let index = std::env::var_os("PRECELLAR_TEST_STAR_INDEX")
+            .expect("PRECELLAR_TEST_STAR_INDEX must point to a prebuilt STAR index");
+        let mut aligner = StarAligner::new(star_aligner::StarOpts::new(index)).unwrap();
+        let sequence = reference_sequence(100);
+
+        let output = Aligner::align_reads(&mut aligner, 1, mixed_single_end_inputs(&sequence));
+        assert_mixed_single_end_slots(&output);
     }
 }

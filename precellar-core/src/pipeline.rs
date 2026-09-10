@@ -33,6 +33,10 @@ pub struct FastqStagePipeline {
 }
 
 impl FastqStagePipeline {
+    pub fn is_empty(&self) -> bool {
+        self.stages.is_empty()
+    }
+
     pub fn push_stage<S>(&mut self, stage: S)
     where
         S: FastqStage + 'static,

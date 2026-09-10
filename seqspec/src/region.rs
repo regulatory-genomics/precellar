@@ -443,6 +443,10 @@ impl SequenceType {
     }
 }
 
+fn is_false(v: &bool) -> bool {
+    !*v
+}
+
 #[derive(Deserialize, Serialize, Debug, Clone, PartialEq)]
 pub struct Onlist {
     pub file_id: String,
@@ -453,6 +457,15 @@ pub struct Onlist {
     pub urltype: UrlType,
     pub location: Option<Location>,
     pub md5: String,
+    /// When true, reverse-complement the extracted candidate sequence before matching
+    /// against this whitelist. This ensures that barcodes appearing in reverse-complement
+    /// orientation resolve to the same whitelist entry as the forward copy.
+    #[serde(
+        default,
+        rename = "reverse_complement",
+        skip_serializing_if = "is_false"
+    )]
+    pub rc: bool,
 }
 
 impl Onlist {

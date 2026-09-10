@@ -14,7 +14,10 @@ use seqspec::{
     utils::{create_file, Compression},
     ChemistryStrandedness, Modality,
 };
-use std::{path::PathBuf, str::FromStr};
+use std::{
+    path::{Path, PathBuf},
+    str::FromStr,
+};
 
 pub(crate) struct AlignmentContext {
     pub(crate) num_threads: u16,
@@ -31,6 +34,10 @@ pub(crate) struct OutputReport {
 pub(crate) trait AlignmentSink {
     fn needs_transcriptome(&self) -> bool {
         false
+    }
+
+    fn transcriptome_index(&self) -> Option<&Path> {
+        None
     }
 
     fn strandedness(
@@ -287,6 +294,7 @@ impl AlignmentSink for FragmentsSink {
 pub(crate) struct GeneQuantificationSink {
     output: PathBuf,
     strandedness: Option<String>,
+    transcriptome_index: Option<PathBuf>,
 }
 
 #[pymethods]
@@ -299,12 +307,24 @@ impl GeneQuantificationSink {
     ///     Destination H5AD path.
     /// strandedness : {"forward", "reverse", "unstranded", "auto"}, optional
     ///     Strand model. If omitted, use the assay declaration.
+    /// transcriptome_index : pathlib.Path | str, optional
+    ///     STAR index directory containing transcript annotation tables. This
+    ///     is required for non-STAR aligners such as Minimap2. When omitted,
+    ///     transcript annotation is obtained from the STAR aligner itself.
+    ///     Its reference names and lengths must exactly match the aligner
+    ///     index. Build both indexes from the same reference FASTA; incompatible
+    ///     references fail before reads are processed.
     #[new]
-    #[pyo3(signature = (output, *, strandedness=None))]
-    fn new(output: PathBuf, strandedness: Option<String>) -> Self {
+    #[pyo3(signature = (output, *, strandedness=None, transcriptome_index=None))]
+    fn new(
+        output: PathBuf,
+        strandedness: Option<String>,
+        transcriptome_index: Option<PathBuf>,
+    ) -> Self {
         Self {
             output,
             strandedness,
+            transcriptome_index,
         }
     }
 }
@@ -312,6 +332,10 @@ impl GeneQuantificationSink {
 impl AlignmentSink for GeneQuantificationSink {
     fn needs_transcriptome(&self) -> bool {
         true
+    }
+
+    fn transcriptome_index(&self) -> Option<&Path> {
+        self.transcriptome_index.as_deref()
     }
 
     fn strandedness(
@@ -332,7 +356,11 @@ impl AlignmentSink for GeneQuantificationSink {
         let annotator = context
             .transcript_annotator
             .take()
-            .ok_or_else(|| anyhow::anyhow!("gene quantification requires a STAR aligner"))?;
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "gene quantification requires a STAR aligner or GeneQuantificationSink(transcriptome_index=...)"
+                )
+            })?;
         let mut quantifier = Quantifier::new(annotator)?;
         quantifier.num_threads = context.num_threads as usize;
         quantifier.temp_dir = context.temp_dir.clone();

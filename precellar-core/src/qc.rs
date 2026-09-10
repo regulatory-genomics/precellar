@@ -170,6 +170,7 @@ impl AlignStat {
 struct PairAlignStat {
     read1: AlignStat,
     read2: AlignStat,
+    sequenced_pairs: u64,
     proper_pairs: u64,
 }
 
@@ -179,7 +180,7 @@ impl PairAlignStat {
     }
 
     fn total_pairs(&self) -> u64 {
-        self.read2.total.min(self.read1.total)
+        self.sequenced_pairs
     }
 
     fn total_mapped(&self) -> u64 {
@@ -201,6 +202,8 @@ impl PairAlignStat {
     fn add_pair<R: Record>(&mut self, record1: &MultiMap<R>, record2: &MultiMap<R>) -> Result<()> {
         self.read1.add(record1)?;
         self.read2.add(record2)?;
+        // Opposite slots can hold independent single-end reads, so only this path establishes a pair.
+        self.sequenced_pairs += 1;
         if record1.primary.flags()?.is_properly_segmented() {
             self.proper_pairs += 1;
         }
@@ -210,6 +213,7 @@ impl PairAlignStat {
     fn combine(&mut self, other: &Self) {
         self.read1.combine(&other.read1);
         self.read2.combine(&other.read2);
+        self.sequenced_pairs += other.sequenced_pairs;
         self.proper_pairs += other.proper_pairs;
     }
 }
@@ -363,8 +367,8 @@ pub struct QcFragment {
     mito_dna: HashSet<String>,
     num_pcr_duplicates: u64,
     num_unique_fragments: u64,
-    num_frag_nfr: u64,
-    num_frag_single: u64,
+    num_frag_nfr: u64,    // Nucleosome-free region fragments (<147 bp)
+    num_frag_single: u64, // Flanking single nucleosome fragments (147-294 bp)
 }
 
 impl From<QcFragment> for Value {
@@ -460,5 +464,217 @@ impl From<QcGeneQuant> for Value {
                 "frac_unspliced": qc.num_unspliced as f64 / qc.num_unique_umi as f64,
             },
         })
+    }
+}
+
+// Long-Read QC
+/// Per-barcode-group consensus resolution statistics.
+#[derive(Debug, Default, Clone)]
+pub struct ConsensusStats {
+    /// Number of reads where this group had entries from multiple ends
+    pub attempted: u64,
+    /// Number of times the candidate intersection was non-empty
+    pub intersection_hit: u64,
+    /// Number of times the candidate intersection was empty (fallback to best)
+    pub intersection_miss: u64,
+}
+
+impl ConsensusStats {
+    pub fn combine(&mut self, other: &Self) {
+        self.attempted += other.attempted;
+        self.intersection_hit += other.intersection_hit;
+        self.intersection_miss += other.intersection_miss;
+    }
+}
+
+/// QC metrics specific to long-read barcode extraction.
+#[derive(Debug, Default)]
+pub struct QcLongRead {
+    // Orientation detection
+    pub orientation_forward: u64,
+    pub orientation_reverse: u64,
+    pub orientation_undetermined: u64,
+
+    // Composite alignment quality gate
+    pub composite_alignment_pass: u64,
+    pub composite_alignment_fail: u64,
+
+    // Barcode extraction outcome
+    pub barcode_extracted: u64,
+    pub barcode_failed: u64,
+
+    // UMI extraction outcome (only enabled for supported UMI layouts)
+    pub umi_extracted: u64,
+    pub umi_failed: u64,
+    umi_extraction_enabled: bool,
+
+    // Consensus resolution (keyed by barcode group name)
+    pub consensus_stats: HashMap<String, ConsensusStats>,
+}
+
+impl QcLongRead {
+    pub fn record_orientation(&mut self, is_reverse: bool, is_undetermined: bool) {
+        if is_undetermined {
+            self.orientation_undetermined += 1;
+        } else if is_reverse {
+            self.orientation_reverse += 1;
+        } else {
+            self.orientation_forward += 1;
+        }
+    }
+
+    pub fn record_composite_alignment(&mut self, pass: bool) {
+        if pass {
+            self.composite_alignment_pass += 1;
+        } else {
+            self.composite_alignment_fail += 1;
+        }
+    }
+
+    pub fn record_barcode_extraction(&mut self, success: bool) {
+        if success {
+            self.barcode_extracted += 1;
+        } else {
+            self.barcode_failed += 1;
+        }
+    }
+
+    pub fn enable_umi_extraction(&mut self) {
+        self.umi_extraction_enabled = true;
+    }
+
+    pub fn record_umi_extraction(&mut self, success: bool) {
+        self.umi_extraction_enabled = true;
+        if success {
+            self.umi_extracted += 1;
+        } else {
+            self.umi_failed += 1;
+        }
+    }
+
+    pub fn record_consensus(&mut self, group_name: &str, intersection_hit: bool) {
+        let stats = self
+            .consensus_stats
+            .entry(group_name.to_string())
+            .or_default();
+        stats.attempted += 1;
+        if intersection_hit {
+            stats.intersection_hit += 1;
+        } else {
+            stats.intersection_miss += 1;
+        }
+    }
+}
+
+impl Extend<Self> for QcLongRead {
+    fn extend<T: IntoIterator<Item = Self>>(&mut self, iter: T) {
+        for other in iter {
+            self.orientation_forward += other.orientation_forward;
+            self.orientation_reverse += other.orientation_reverse;
+            self.orientation_undetermined += other.orientation_undetermined;
+            self.composite_alignment_pass += other.composite_alignment_pass;
+            self.composite_alignment_fail += other.composite_alignment_fail;
+            self.barcode_extracted += other.barcode_extracted;
+            self.barcode_failed += other.barcode_failed;
+            self.umi_extracted += other.umi_extracted;
+            self.umi_failed += other.umi_failed;
+            self.umi_extraction_enabled |= other.umi_extraction_enabled;
+            for (k, v) in other.consensus_stats {
+                self.consensus_stats.entry(k).or_default().combine(&v);
+            }
+        }
+    }
+}
+
+impl Metric for QcLongRead {
+    fn to_json(&self) -> Value {
+        let total_reads =
+            self.orientation_forward + self.orientation_reverse + self.orientation_undetermined;
+
+        let consensus: serde_json::Map<String, Value> = self
+            .consensus_stats
+            .iter()
+            .map(|(name, stats)| {
+                (
+                    name.clone(),
+                    json!({
+                        "attempted": stats.attempted,
+                        "intersection_hit": stats.intersection_hit,
+                        "intersection_miss": stats.intersection_miss,
+                    }),
+                )
+            })
+            .collect();
+
+        let mut result = json!({
+            "total_reads": total_reads,
+            "orientation": {
+                "forward": self.orientation_forward,
+                "reverse": self.orientation_reverse,
+                "undetermined": self.orientation_undetermined,
+            },
+            "composite_alignment": {
+                "pass": self.composite_alignment_pass,
+                "fail": self.composite_alignment_fail,
+            },
+            "barcode_extraction": {
+                "success": self.barcode_extracted,
+                "fail": self.barcode_failed,
+            },
+            "consensus": consensus,
+        });
+        if self.umi_extraction_enabled {
+            result.as_object_mut().unwrap().insert(
+                "umi_extraction".to_string(),
+                json!({
+                    "success": self.umi_extracted,
+                    "fail": self.umi_failed,
+                }),
+            );
+        }
+        result
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use noodles_sam::alignment::record::Flags;
+    use noodles_sam::alignment::record_buf::RecordBuf;
+
+    use super::*;
+
+    fn alignment(flags: Flags) -> MultiMap<RecordBuf> {
+        let mut record = RecordBuf::default();
+        *record.flags_mut() = flags;
+        record.into()
+    }
+
+    #[test]
+    fn independent_single_end_slots_are_not_counted_as_a_pair() {
+        let header = sam::Header::default();
+        let mut qc = QcAlign::default();
+
+        qc.add_read1(&header, &alignment(Flags::empty())).unwrap();
+        qc.add_read2(&header, &alignment(Flags::empty())).unwrap();
+
+        let report = qc.to_json();
+        assert_eq!(report["sequenced_reads"], json!(2));
+        assert_eq!(report["sequenced_read_pairs"], json!(0));
+        assert_eq!(report["frac_properly_paired"], json!(0.0));
+    }
+
+    #[test]
+    fn paired_end_record_is_counted_as_one_pair() {
+        let header = sam::Header::default();
+        let mut qc = QcAlign::default();
+        let read1 = alignment(Flags::SEGMENTED | Flags::PROPERLY_SEGMENTED);
+        let read2 = alignment(Flags::SEGMENTED);
+
+        qc.add_pair(&header, &read1, &read2).unwrap();
+
+        let report = qc.to_json();
+        assert_eq!(report["sequenced_reads"], json!(2));
+        assert_eq!(report["sequenced_read_pairs"], json!(1));
+        assert_eq!(report["frac_properly_paired"], json!(1.0));
     }
 }

@@ -12,9 +12,141 @@ use pyo3::prelude::*;
 use seqspec::ChemistryStrandedness;
 use star_aligner::{StarAligner, StarOpts};
 use std::{
+    collections::BTreeMap,
     ops::{Deref, DerefMut},
-    path::PathBuf,
+    path::{Path, PathBuf},
 };
+
+fn reference_sequences_from_star_index(index_path: &Path) -> Result<BTreeMap<String, usize>> {
+    let path = index_path.join("chrNameLength.txt");
+    let contents = std::fs::read_to_string(&path).with_context(|| {
+        format!(
+            "failed to read STAR reference sequences from '{}'",
+            path.display()
+        )
+    })?;
+    let mut references = BTreeMap::new();
+
+    for (line_index, line) in contents.lines().enumerate() {
+        let mut fields = line.split_whitespace();
+        let Some(name) = fields.next() else {
+            continue;
+        };
+        let length = fields
+            .next()
+            .with_context(|| format!("missing length at {}:{}", path.display(), line_index + 1))?
+            .parse::<usize>()
+            .with_context(|| {
+                format!(
+                    "invalid reference length at {}:{}",
+                    path.display(),
+                    line_index + 1
+                )
+            })?;
+        if references.insert(name.to_owned(), length).is_some() {
+            bail!(
+                "duplicate reference sequence '{name}' in '{}'",
+                path.display()
+            );
+        }
+    }
+
+    if references.is_empty() {
+        bail!(
+            "STAR reference sequence table is empty: '{}'",
+            path.display()
+        );
+    }
+    Ok(references)
+}
+
+fn summarize_references(references: &[String]) -> String {
+    if references.is_empty() {
+        "none".to_owned()
+    } else {
+        references
+            .iter()
+            .take(5)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+}
+
+fn validate_reference_compatibility(index_path: &Path, header: &Header) -> Result<()> {
+    let aligner_references = header
+        .reference_sequences()
+        .iter()
+        .map(|(name, reference)| (name.to_string(), reference.length().get()))
+        .collect::<BTreeMap<_, _>>();
+    let star_references = reference_sequences_from_star_index(index_path)?;
+
+    let only_aligner = aligner_references
+        .iter()
+        .filter(|(name, _)| !star_references.contains_key(*name))
+        .map(|(name, length)| format!("{name}:{length}"))
+        .collect::<Vec<_>>();
+    let only_star = star_references
+        .iter()
+        .filter(|(name, _)| !aligner_references.contains_key(*name))
+        .map(|(name, length)| format!("{name}:{length}"))
+        .collect::<Vec<_>>();
+    let length_mismatches = aligner_references
+        .iter()
+        .filter_map(|(name, aligner_length)| {
+            star_references
+                .get(name)
+                .filter(|star_length| *star_length != aligner_length)
+                .map(|star_length| format!("{name}:aligner={aligner_length},STAR={star_length}"))
+        })
+        .collect::<Vec<_>>();
+
+    if !only_aligner.is_empty() || !only_star.is_empty() || !length_mismatches.is_empty() {
+        bail!(
+            "aligner and STAR transcriptome references are incompatible: aligner={}, STAR={}; only in aligner: [{}]; only in STAR: [{}]; length mismatches: [{}]. Rebuild both indexes from the same reference FASTA, and ensure the GTF uses the same chromosome names (for example, 'chr1' versus '1'). STAR index: '{}'",
+            aligner_references.len(),
+            star_references.len(),
+            summarize_references(&only_aligner),
+            summarize_references(&only_star),
+            summarize_references(&length_mismatches),
+            index_path.display(),
+        );
+    }
+    log::info!(
+        "Validated {} reference sequences between the aligner and STAR index '{}'",
+        aligner_references.len(),
+        index_path.display()
+    );
+    Ok(())
+}
+
+fn make_transcript_annotator(
+    transcriptome: impl IntoIterator<Item = star_aligner::transcript::Transcript>,
+    header: Header,
+    strandness: Option<ChemistryStrandedness>,
+) -> Result<TxAligner> {
+    let transcripts = transcriptome
+        .into_iter()
+        .map(Transcript::try_from)
+        .collect::<Result<Vec<_>>>()?;
+    Ok(TxAligner::new(transcripts, header, strandness))
+}
+
+pub(crate) fn transcript_annotator_from_star_index(
+    index_path: &Path,
+    header: Header,
+    strandness: Option<ChemistryStrandedness>,
+) -> Result<TxAligner> {
+    validate_reference_compatibility(index_path, &header)?;
+    let transcriptome = star_aligner::transcript::Transcriptome::from_path(index_path)
+        .with_context(|| {
+            format!(
+                "failed to load transcript annotation from STAR index '{}'",
+                index_path.display()
+            )
+        })?;
+    make_transcript_annotator(transcriptome.iter().cloned(), header, strandness)
+}
 
 pub enum AlignerRef<'py> {
     STAR(PyRefMut<'py, STAR>),
@@ -36,20 +168,21 @@ impl AlignerRef<'_> {
     pub fn transcript_annotator(
         &self,
         strandness: Option<ChemistryStrandedness>,
-    ) -> Option<TxAligner> {
+    ) -> Result<Option<TxAligner>> {
         match self {
             AlignerRef::STAR(aligner) => {
-                let transcriptome: Vec<_> = aligner
+                let transcriptome = aligner
                     .get_transcriptome()
-                    .unwrap()
-                    .iter()
-                    .map(|t| Transcript::try_from(t.clone()).unwrap())
-                    .collect();
-                Some(TxAligner::new(transcriptome, self.header(), strandness))
+                    .context("failed to load transcript annotation from STAR index")?;
+                Ok(Some(make_transcript_annotator(
+                    transcriptome.iter().cloned(),
+                    self.header(),
+                    strandness,
+                )?))
             }
-            AlignerRef::BWA(_) => None,
-            AlignerRef::MiniBwa(_) => None,
-            AlignerRef::Minimap2(_) => None,
+            AlignerRef::BWA(_) => Ok(None),
+            AlignerRef::MiniBwa(_) => Ok(None),
+            AlignerRef::Minimap2(_) => Ok(None),
         }
     }
 }
@@ -497,4 +630,76 @@ pub(crate) fn register_aligners(parent_module: &Bound<'_, PyModule>) -> PyResult
     m.add_class::<MINIMAP2>()?;
 
     parent_module.add_submodule(&m)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use noodles_sam::header::record::value::{map::ReferenceSequence, Map};
+    use std::{fs, num::NonZeroUsize};
+
+    #[test]
+    fn loads_transcript_annotation_independently_of_aligner() {
+        let directory = tempfile::tempdir().unwrap();
+        fs::write(
+            directory.path().join("geneInfo.tab"),
+            "1\ngene1\tGene 1\tprotein_coding\n",
+        )
+        .unwrap();
+        fs::write(
+            directory.path().join("transcriptInfo.tab"),
+            "1\ntx1\t0\t9\t9\t1\t1\t0\t0\n",
+        )
+        .unwrap();
+        fs::write(directory.path().join("exonInfo.tab"), "1\n0\t9\t0\n").unwrap();
+        fs::write(directory.path().join("chrNameLength.txt"), "chr1\t100\n").unwrap();
+        fs::write(directory.path().join("chrStart.txt"), "0\n100\n").unwrap();
+
+        let header = Header::builder()
+            .add_reference_sequence(
+                "chr1",
+                Map::<ReferenceSequence>::new(NonZeroUsize::new(100).unwrap()),
+            )
+            .build();
+        let annotator = transcript_annotator_from_star_index(
+            directory.path(),
+            header,
+            Some(ChemistryStrandedness::Reverse),
+        )
+        .unwrap();
+
+        let transcripts: Vec<_> = annotator.transcripts().collect();
+        assert_eq!(transcripts.len(), 1);
+        assert_eq!(transcripts[0].id, "tx1");
+        assert_eq!(transcripts[0].gene_id, "gene1");
+        assert_eq!(transcripts[0].gene_name, "Gene 1");
+    }
+
+    #[test]
+    fn rejects_incompatible_aligner_and_star_references() {
+        let directory = tempfile::tempdir().unwrap();
+        fs::write(
+            directory.path().join("chrNameLength.txt"),
+            "chr1\t101\nchr2\t200\n",
+        )
+        .unwrap();
+
+        let header = Header::builder()
+            .add_reference_sequence(
+                "1",
+                Map::<ReferenceSequence>::new(NonZeroUsize::new(100).unwrap()),
+            )
+            .add_reference_sequence(
+                "chr2",
+                Map::<ReferenceSequence>::new(NonZeroUsize::new(201).unwrap()),
+            )
+            .build();
+        let error = validate_reference_compatibility(directory.path(), &header).unwrap_err();
+        let message = error.to_string();
+
+        assert!(message.contains("only in aligner: [1:100]"));
+        assert!(message.contains("only in STAR: [chr1:101]"));
+        assert!(message.contains("chr2:aligner=201,STAR=200"));
+        assert!(message.contains("same reference FASTA"));
+    }
 }

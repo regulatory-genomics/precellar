@@ -25,18 +25,18 @@ from typing import Literal, Dict, Any
 from my_package.exceptions import ResourceNotFoundError, AuthenticationError
 
 def manage_container_lifecycle(
-    container_id: str, 
+    container_id: str,
     action: Literal["start", "stop", "restart"]
 ) -> Dict[str, Any]:
     """
     Execute lifecycle commands on a specific cloud infrastructure container.
-    
-    Use this tool when an agent or script needs to explicitly alter the operational 
-    state of a running or stopped compute container. 
+
+    Use this tool when an agent or script needs to explicitly alter the operational
+    state of a running or stopped compute container.
 
     Anti-Patterns
     -------------
-    - Do NOT use this function to check container health or metrics; use 
+    - Do NOT use this function to check container health or metrics; use
       `get_container_metrics` instead to save compute tokens.
     - Do NOT pass raw arbitrary strings to `action`. Only the explicit literal
       values defined in the type signature are accepted.
@@ -44,7 +44,7 @@ def manage_container_lifecycle(
     Parameters
     ----------
     container_id : str
-        The unique alphanumeric identifier of the target container 
+        The unique alphanumeric identifier of the target container
         (e.g., "ctnr-8f9d2").
     action : {"start", "stop", "restart"}
         The structural mutation to apply. Must match one of the allowed literals.
@@ -71,15 +71,15 @@ def manage_container_lifecycle(
     >>> import os
     >>> from my_package.client import InfrastructureClient
     >>> from my_package.exceptions import ResourceNotFoundError, AuthenticationError
-    
+
     1. Setup and authenticate the primary client
     >>> token = os.environ.get("INFRA_API_TOKEN")
     >>> client = InfrastructureClient(api_token=token)
-    
+
     2. Execute workflow with explicit, resilient error handling
     >>> try:
     ...     response = client.manage_container_lifecycle(
-    ...         container_id="ctnr-8f9d2", 
+    ...         container_id="ctnr-8f9d2",
     ...         action="restart"
     ...     )
     ...     print(f"Success! New state: {response['status']}")

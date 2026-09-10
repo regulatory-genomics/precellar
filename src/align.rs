@@ -1,4 +1,4 @@
-use crate::aligners::AlignerRef;
+use crate::aligners::{transcript_annotator_from_star_index, AlignerRef};
 use crate::pyseqspec::extract_assays;
 use crate::sinks::{
     AlignmentContext, AlignmentSink, BamSink, FragmentsSink, GeneQuantificationSink, NullSink,
@@ -11,8 +11,9 @@ use precellar::qc::Metric;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 use pyo3::BoundObject;
-use seqspec::Modality;
+use seqspec::{AssayType, Modality};
 use serde_json::{Map, Value};
+use std::time::Duration;
 use std::{path::PathBuf, str::FromStr};
 
 pub(crate) fn parse_minimap2_preset(preset: &str) -> Result<minimap2::Preset> {
@@ -38,6 +39,17 @@ pub(crate) fn parse_minimap2_preset(preset: &str) -> Result<minimap2::Preset> {
     })
 }
 
+fn parse_sequencing_type(sequencing_type: &str) -> Result<AssayType> {
+    match sequencing_type.to_ascii_lowercase().as_str() {
+        "short-read" => Ok(AssayType::ShortRead),
+        "long-read" => Ok(AssayType::LongRead),
+        _ => bail!(
+            "Invalid sequencing_type '{}'. Expected 'short-read' or 'long-read'",
+            sequencing_type
+        ),
+    }
+}
+
 /// A reusable configuration for reading and annotating assay FASTQs.
 ///
 /// Use this builder to configure the input assay, modality, barcode correction,
@@ -57,6 +69,7 @@ pub(crate) fn parse_minimap2_preset(preset: &str) -> Result<minimap2::Preset> {
 pub struct FastqPipeline {
     assays: Vec<seqspec::Assay>,
     modality: Modality,
+    sequencing_type: Option<AssayType>,
     barcode_config: BarcodeCorrectionConfig,
     middleware: Option<Py<PyAny>>,
 }
@@ -118,6 +131,7 @@ impl FastqPipeline {
         Ok(Self {
             assays,
             modality,
+            sequencing_type: None,
             barcode_config: BarcodeCorrectionConfig {
                 confidence_threshold: 0.9,
                 max_mismatch: 1,
@@ -183,6 +197,27 @@ impl FastqPipeline {
             confidence_threshold,
             max_mismatch,
         };
+        Ok(slf)
+    }
+
+    /// Select the sequencing technology used for FASTQ annotation.
+    ///
+    /// Parameters
+    /// ----------
+    /// sequencing_type : str
+    ///     Either ``"short-read"`` or ``"long-read"``. If omitted, the
+    ///     annotation workflow samples the configured FASTQ input at runtime.
+    ///
+    /// Returns
+    /// -------
+    /// FastqPipeline
+    ///     The same pipeline object, allowing method chaining.
+    #[pyo3(signature = (sequencing_type))]
+    pub fn with_sequencing_type<'py>(
+        mut slf: PyRefMut<'py, Self>,
+        sequencing_type: &str,
+    ) -> Result<PyRefMut<'py, Self>> {
+        slf.sequencing_type = Some(parse_sequencing_type(sequencing_type)?);
         Ok(slf)
     }
 
@@ -321,6 +356,7 @@ impl FastqPipeline {
             state: Some(AlignmentJobState {
                 assays: slf.assays.clone(),
                 modality: slf.modality,
+                sequencing_type: slf.sequencing_type,
                 barcode_config: slf.barcode_config.clone(),
                 middleware: slf
                     .middleware
@@ -356,6 +392,7 @@ pub struct AlignmentJob {
 struct AlignmentJobState {
     assays: Vec<seqspec::Assay>,
     modality: Modality,
+    sequencing_type: Option<AssayType>,
     barcode_config: BarcodeCorrectionConfig,
     middleware: Option<Py<PyAny>>,
     aligner: Py<PyAny>,
@@ -438,13 +475,24 @@ impl AlignmentJobState {
         let mut aligner = AlignerRef::try_from(self.aligner.bind(py).clone())?;
         let header = aligner.header();
         let transcript_annotator = if sink.needs_transcriptome() {
-            aligner.transcript_annotator(strandedness)
+            if let Some(index_path) = sink.transcriptome_index() {
+                Some(transcript_annotator_from_star_index(
+                    index_path,
+                    header.clone(),
+                    strandedness,
+                )?)
+            } else {
+                aligner.transcript_annotator(strandedness)?
+            }
         } else {
             None
         };
 
         let mut plan =
             FastqPlan::new(self.assays, self.modality).with_barcode_config(self.barcode_config);
+        if let Some(sequencing_type) = self.sequencing_type {
+            plan = plan.with_sequencing_type(sequencing_type);
+        }
         if let Some(middleware) = self.middleware {
             let middleware = middleware
                 .bind(py)
@@ -489,12 +537,7 @@ pub(crate) struct AlignProgressBar<'a, A> {
 
 impl<'a, A> AlignProgressBar<'a, A> {
     fn new(alignments: AlignmentResult<'a, A>) -> Self {
-        let pb = ProgressBar::new(alignments.num_records() as u64);
-        let style = ProgressStyle::with_template(
-            "{percent}%|{wide_bar:.cyan/blue}| {human_pos:>}/{human_len:} [{elapsed}<{eta}, {per_sec}]",
-        )
-        .unwrap();
-        pb.set_style(style);
+        let pb = alignment_progress_bar(alignments.num_records() as u64);
         Self {
             pb: pb.with_finish(ProgressFinish::Abandon),
             alignments,
@@ -503,6 +546,29 @@ impl<'a, A> AlignProgressBar<'a, A> {
 
     fn finish(self) -> Result<precellar::align::RunReport> {
         self.alignments.finish()
+    }
+}
+
+fn alignment_progress_bar(num_records: u64) -> ProgressBar {
+    if num_records == 0 {
+        let pb = ProgressBar::new_spinner();
+        pb.set_style(
+            ProgressStyle::with_template(
+                "{spinner:.cyan} {human_pos} reads processed [{elapsed}, {per_sec}]",
+            )
+            .unwrap(),
+        );
+        pb.enable_steady_tick(Duration::from_millis(100));
+        pb
+    } else {
+        let pb = ProgressBar::new(num_records);
+        pb.set_style(
+            ProgressStyle::with_template(
+                "{percent}%|{wide_bar:.cyan/blue}| {human_pos:>}/{human_len:} [{elapsed}<{eta}, {per_sec}]",
+            )
+            .unwrap(),
+        );
+        pb
     }
 }
 
@@ -526,6 +592,9 @@ fn assemble_report(
     }
     for middleware in report.fastq.middleware {
         qc_metrics.insert(middleware.name, middleware.metrics);
+    }
+    if let Some(long_read) = report.fastq.long_read {
+        qc_metrics.insert("long_read".to_owned(), long_read.to_json());
     }
     qc_metrics.insert("fastq".to_owned(), report.fastq.fastq.to_json());
     qc_metrics.insert("alignment".to_owned(), report.alignment.to_json());
@@ -566,5 +635,46 @@ fn value_into_pyobject<'py>(val: Value, py: Python<'py>) -> Bound<'py, PyAny> {
             }
             dict.into_any()
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use precellar::align::{FastqReport, RunReport};
+    use precellar::qc::{QcAlign, QcFastq, QcLongRead};
+
+    #[test]
+    fn test_unknown_total_uses_spinner() {
+        let spinner = alignment_progress_bar(0);
+        assert_eq!(spinner.length(), None);
+        spinner.finish_and_clear();
+
+        let bounded = alignment_progress_bar(10);
+        assert_eq!(bounded.length(), Some(10));
+        bounded.finish_and_clear();
+    }
+
+    #[test]
+    fn test_assemble_report_includes_long_read_metrics() {
+        let mut long_read = QcLongRead::default();
+        long_read.record_orientation(false, false);
+        long_read.record_barcode_extraction(true);
+        let report = assemble_report(
+            RunReport {
+                fastq: FastqReport {
+                    fastq: QcFastq::default(),
+                    long_read: Some(long_read),
+                    middleware: Vec::new(),
+                },
+                alignment: QcAlign::default(),
+            },
+            None,
+        );
+
+        assert_eq!(report["long_read"]["total_reads"], 1);
+        assert_eq!(report["long_read"]["barcode_extraction"]["success"], 1);
+        assert!(report.get("fastq").is_some());
+        assert!(report.get("alignment").is_some());
     }
 }

@@ -1,0 +1,186 @@
+!Assay
+seqspec_version: 0.3.0
+assay_id: scNanoATAC
+name: scNanoATAC
+doi: 10.1038/s41422-022-00730-x
+date: 11 October 2022
+description: Single Cell Long Read ATAC-seq
+modalities:
+- atac
+lib_struct: https://static-content.springer.com/esm/art%3A10.1038%2Fs41422-022-00730-x/MediaObjects/41422_2022_730_MOESM1_ESM.pdf
+library_protocol: Custom
+library_kit: Custom
+sequence_protocol: Oxford Nanopore
+sequence_kit: Custom
+sequence_spec:
+- !Read
+  read_id: R1
+  name: Read 1
+  modality: atac
+  primer_id: start_linker
+  min_len: 100
+  max_len: 2147483647
+  strand: unstranded
+  files:
+  - file_id: 2112_TAG_test_2.pass.fastq.gz
+    filename: 2112_TAG_test_2.pass.fastq.gz
+    filetype: fastq
+    filesize: 0
+    url: /data2/xurui/data/scNanoATAC-seq2/technical/2112_TAG_test_2.pass.fastq.gz
+    urltype: local
+    md5: ""
+library_spec:
+- !Region
+  region_id: atac
+  region_type: atac
+  name: ATAC
+  sequence_type: joined
+  sequence: ""
+  min_len: 1000
+  max_len: 2147483647
+  onlist: null
+  regions:
+  - !Region
+    region_id: start_linker
+    region_type: custom_primer
+    name: start
+    sequence_type: fixed
+    sequence: ATCT
+    min_len: 4
+    max_len: 4
+    onlist: null
+    regions: null
+  - !Region
+    region_id: outer_barcode_5p
+    region_type: barcode
+    name: outer barcode
+    sequence_type: onlist
+    sequence: NNNNNNNNNNNNNNNNNNNNNNNN
+    min_len: 24
+    max_len: 24
+    onlist: !Onlist
+      file_id: 96_barcode.txt
+      filename: 96_barcode.txt
+      filetype: txt
+      filesize: 0
+      url: /data2/xurui/data/scNanoATAC-seq2/96_barcode_seq_only.txt
+      urltype: local
+      md5: ""
+      location: local
+    regions: null
+  - !Region
+    region_id: linker_5p
+    region_type: linker
+    name: linker
+    sequence_type: fixed
+    sequence: CTACACGACGCTCTTCCGATCT
+    min_len: 22
+    max_len: 22
+    onlist: null
+    regions: null
+  - !Region
+    region_id: inner_barcode_5p
+    region_type: barcode
+    name: inner barcode
+    sequence_type: onlist
+    sequence: NNNNNNNNNNNNNNNNNNNNNNNN
+    min_len: 24
+    max_len: 24
+    onlist: !Onlist
+      file_id: 96_barcode.txt
+      filename: 96_barcode.txt
+      filetype: txt
+      filesize: 0
+      url: /data2/xurui/data/scNanoATAC-seq2/96_barcode_seq_only.txt
+      urltype: local
+      md5: ""
+      location: local
+    regions: null
+  - !Region
+    region_id: adapter_5p
+    region_type: named
+    name: adapter
+    sequence_type: fixed
+    sequence: TCGTCGGCAGCGTCAGATGTGTATAAGAGACAG
+    min_len: 33
+    max_len: 33
+    onlist: null
+    regions: null
+  - !Region
+    region_id: gdna
+    region_type: gdna
+    name: gdna
+    sequence_type: random
+    sequence: ""
+    min_len: 1000
+    max_len: 2147483647
+    onlist: null
+    regions: null
+  - !Region
+    region_id: adapter_3p
+    region_type: named
+    name: adapter
+    sequence_type: fixed
+    sequence: CTGTCTCTTATACACATCTGACGCTGCCGACGA
+    min_len: 33
+    max_len: 33
+    onlist: null
+    regions: null
+  - !Region
+    region_id: inner_barcode_3p
+    region_type: barcode
+    name: inner barcode
+    sequence_type: onlist
+    sequence: NNNNNNNNNNNNNNNNNNNNNNNN
+    min_len: 24
+    max_len: 24
+    onlist: !Onlist
+      file_id: 96_barcode.txt
+      filename: 96_barcode.txt
+      filetype: txt
+      filesize: 0
+      url: /data2/xurui/data/scNanoATAC-seq2/96_barcode_seq_only.txt
+      urltype: local
+      md5: ""
+      location: local
+      reverse_complement: true
+    regions: null
+  - !Region
+    region_id: linker_3p
+    region_type: linker
+    name: linker
+    sequence_type: fixed
+    sequence: AGATCGGAAGAGCGTCGTGTAG
+    min_len: 22
+    max_len: 22
+    onlist: null
+    regions: null
+  - !Region
+    region_id: outer_barcode_3p
+    region_type: barcode
+    name: outer barcode
+    sequence_type: onlist
+    sequence: NNNNNNNNNNNNNNNNNNNNNNNN
+    min_len: 24
+    max_len: 24
+    onlist: !Onlist
+      file_id: 96_barcode.txt
+      filename: 96_barcode.txt
+      filetype: txt
+      filesize: 0
+      url: /data2/xurui/data/scNanoATAC-seq2/96_barcode_seq_only.txt
+      urltype: local
+      md5: ""
+      location: local
+      reverse_complement: true
+    regions: null
+  - !Region
+    region_id: end_linker
+    region_type: linker
+    name: end linker
+    sequence_type: fixed
+    sequence: AGAT
+    min_len: 4
+    max_len: 4
+    onlist: null
+    regions: null

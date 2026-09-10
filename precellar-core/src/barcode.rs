@@ -11,7 +11,7 @@ use noodles_sam::alignment::{
 use rand::distr::{slice::Choose, Distribution};
 use seqspec::{Assay, Modality, RegionId, SequenceType};
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     ops::{Deref, DerefMut},
 };
 
@@ -19,6 +19,7 @@ const BC_MAX_QV: u8 = 66; // This is the illumina quality value
 pub(crate) const BASE_OPTS: [u8; 4] = [b'A', b'C', b'G', b'T'];
 
 /// Options for barcode correction
+#[derive(Debug)]
 pub struct BarcodeCorrectOptions {
     /// threshold for sum of probability of error on barcode QVs. Barcodes exceeding
     /// this threshold will be marked as not valid.
@@ -48,8 +49,11 @@ pub enum BarcodeError {
 }
 
 /// Count barcodes in a given assay and modality, returning a map of region IDs to their respective whitelists
+#[derive(Debug)]
 pub struct BarcodeAnalyzer {
     whitelists: IndexMap<RegionId, Whitelist>,
+    /// Region IDs whose extracted barcode should be reverse-complemented before whitelist matching
+    rc_regions: HashSet<String>,
     contains_umi: bool,
     num_reads: usize,
     pub barcode_correct_options: Option<BarcodeCorrectOptions>,
@@ -62,12 +66,18 @@ impl BarcodeAnalyzer {
             .get_segments_by_modality(modality)
             .any(|(_, info)| info.iter().any(|x| x.is_umi()));
 
-        // Collect whitelists for barcode regions
+        // Collect whitelists for barcode regions and identify RC regions
+        let mut rc_regions = HashSet::new();
         let mut wl_builders: IndexMap<_, _> = assay
             .get_whitelists(modality)
             .into_iter()
             .map(|(k, v)| {
                 let region = assay.library_spec.get(&k).unwrap().read().unwrap();
+                if let Some(onlist) = &region.onlist {
+                    if onlist.rc {
+                        rc_regions.insert(k.clone());
+                    }
+                }
                 if region.sequence_type == SequenceType::Onlist {
                     (k, WhitelistBuilder::new(v, true))
                 } else {
@@ -107,7 +117,8 @@ impl BarcodeAnalyzer {
                                     "Region '{}' not found in whitelist builders",
                                     segment.region_id()
                                 ));
-                            if is_reverse {
+                            let should_rc = is_reverse ^ rc_regions.contains(segment.region_id());
+                            if should_rc {
                                 builder.add(&rev_compl(segment.seq));
                             } else {
                                 builder.add(segment.seq);
@@ -130,6 +141,7 @@ impl BarcodeAnalyzer {
 
         Self {
             whitelists,
+            rc_regions,
             num_reads,
             contains_umi,
             barcode_correct_options: None,
@@ -138,6 +150,11 @@ impl BarcodeAnalyzer {
 
     pub fn num_reads(&self) -> usize {
         self.num_reads
+    }
+
+    /// Check if a barcode region requires reverse-complementing before whitelist matching
+    pub fn should_rc(&self, region_id: &str) -> bool {
+        self.rc_regions.contains(region_id)
     }
 
     pub fn summary(&self) {

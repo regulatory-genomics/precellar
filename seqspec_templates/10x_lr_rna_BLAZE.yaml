@@ -1,0 +1,139 @@
+!Assay
+seqspec_version: 0.3.0
+assay_id: 10x_lr_rna_BLAZE
+name: 10x-LR-RNA-BLAZE
+doi: https://doi.org/10.1186/s13059-023-02907-y
+date: 2023-3-23
+description: Single Cell Long Read RNA-seq
+modalities:
+- rna
+lib_struct: Not-Specified
+library_protocol: FLT-seq+10x Single Cell
+library_kit: 10x Genomics Chromium Single-cell 3' gene expression protocol (v3.1)
+chemistry_strandedness: reverse
+sequence_protocol: Oxford Nanopore
+sequence_kit: Custom
+sequence_spec:
+- !Read
+  read_id: R1
+  name: Read 1
+  modality: rna
+  primer_id: flt_prefix
+  min_len: 100
+  max_len: 2147483647
+  strand: unstranded
+  files:
+  - file_id: LR_sc-RNA-seq_GridION_Q20_pass
+    filename: LR_sc-RNA-seq_GridION_Q20_pass
+    filetype: fastq
+    filesize: 0
+    url: /data2/xurui/data/BLAZE_LR_scRNA/LR_sc-RNA-seq_GridION_Q20_pass.fastq.gz
+    urltype: local
+    md5: ""
+library_spec:
+- !Region
+  region_id: rna
+  region_type: rna
+  name: rna
+  sequence_type: joined
+  sequence:
+  min_len: 100
+  max_len: 2147483647
+  onlist: null
+  regions:
+  - !Region
+    region_id: ont_adapter_prefix
+    region_type: named
+    name: ONT adapter / unknown prefix
+    sequence_type: random
+    sequence: XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
+    min_len: 12
+    max_len: 42
+    onlist: null
+    regions: null
+    parent_id: rna
+  - !Region
+    region_id: flt_prefix
+    region_type: custom_primer
+    name: FLT-seq forward primer prefix
+    sequence_type: fixed
+    sequence: ACTAAAGGCCATTACGGC
+    min_len: 18
+    max_len: 18
+    onlist: null
+    regions: null
+    parent_id: rna
+  - !Region
+    region_id: adapter
+    region_type: named
+    name: 10x adapter
+    sequence_type: fixed
+    sequence: CTACACGACGCTCTTCCGATCT
+    min_len: 22
+    max_len: 22
+    onlist: null
+    regions: null
+    parent_id: rna
+  - !Region
+    region_id: 10x_barcode
+    region_type: barcode
+    name: 10x barcode
+    sequence_type: onlist
+    sequence: NNNNNNNNNNNNNNNN
+    min_len: 16
+    max_len: 16
+    onlist: !Onlist
+      file_id: 3M-february-2018_TRU.txt.gz
+      filename: 3M-february-2018_TRU.txt.gz
+      filetype: txt
+      filesize: 0
+      url: /data2/xurui/software/cellranger-10.0.0/lib/python/cellranger/barcodes/3M-february-2018_TRU.txt.gz
+      urltype: local
+      md5: ""
+      location: local
+    regions: null
+    parent_id: rna
+  - !Region
+    region_id: umi
+    region_type: umi
+    name: umi
+    sequence_type: random
+    sequence: NNNNNNNNNNNN
+    min_len: 12
+    max_len: 12
+    onlist: null
+    regions: null
+    parent_id: rna
+  - !Region
+    region_id: poly_t
+    region_type: poly_t
+    name: poly_t
+    sequence_type: random
+    sequence: NNNNNNNNNNNN
+    min_len: 4
+    max_len: 20
+    onlist: null
+    regions: null
+    parent_id: rna
+  - !Region
+    region_id: cdna
+    region_type: cdna
+    name: cdna
+    sequence_type: random
+    sequence: XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
+    min_len: 100
+    max_len: 2147483647
+    onlist: null
+    regions: null
+    parent_id: rna
+  - !Region
+    region_id: tso
+    region_type: named
+    name: Template-switch oligo (TSO)
+    sequence_type: fixed
+    sequence: TGTACTCTGCGTTGATACCACTGCTT
+    min_len: 26
+    max_len: 26
+    onlist: null
+    regions: null
+    parent_id: rna

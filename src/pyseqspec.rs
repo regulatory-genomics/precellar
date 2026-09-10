@@ -26,9 +26,9 @@ pub(crate) fn extract_assays<'py>(assays: Bound<'py, PyAny>) -> PyResult<Vec<seq
     }
 }
 
-/** A Assay object.
+/** An Assay object.
 
-    A Assay object is used to annotate sequencing libraries produced by genomics assays.
+    An Assay object is used to annotate sequencing libraries produced by genomics assays.
     Genomic library structure depends on both the assay and sequencer (and kits) used to
     generate and bind the assay-specific construct to the sequencing adapters to generate
     a sequencing library. Assay is specific to both a genomics assay and sequencer

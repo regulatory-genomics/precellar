@@ -72,6 +72,10 @@ docs/_autosummary/
 # VSCode
 .vscode/
 
+# Develop
+.claude
+CLAUDE.*
+
 # Pyenv
 .python-version
 

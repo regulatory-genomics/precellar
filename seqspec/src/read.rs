@@ -61,7 +61,7 @@ pub struct Read {
     pub primer_id: String,
     pub min_len: u32,
     pub max_len: u32,
-    pub strand: Strand,
+    pub strand: Strand, // whether the read orientation is the same as the library
     pub files: Option<Vec<File>>,
 }
 
@@ -131,10 +131,10 @@ impl<'a> Iterator for FastqRecords<'a> {
 }
 
 impl Read {
-    /// Open the fastq files for reading, and return a fastq reader.
-    /// If the read has multiple fastq files, they will be concatenated.
-    /// If the read has no fastq files, return None.
-    pub fn open(&self) -> Option<FastqReader> {
+    /// Open the FASTQ files for reading, returning I/O failures to the caller.
+    /// If the read has multiple FASTQ files, they are concatenated. If it has
+    /// no FASTQ files, return `Ok(None)`.
+    pub fn try_open(&self) -> Result<Option<FastqReader>> {
         let files = self
             .files
             .clone()
@@ -143,15 +143,25 @@ impl Read {
             .filter(|file| file.filetype == "fastq")
             .collect::<Vec<_>>();
         if files.is_empty() {
-            return None;
+            return Ok(None);
         }
-        let reader =
-            multi_reader::MultiReader::new(files.into_iter().map(move |file| file.open().unwrap()));
-        Some(FastqReader::new(
+        let readers = files
+            .into_iter()
+            .map(|file| file.open())
+            .collect::<Result<Vec<_>>>()?;
+        let reader = multi_reader::MultiReader::new(readers.into_iter());
+        Ok(Some(FastqReader::new(
             Box::new(BufReader::new(reader)),
             self.min_len,
             self.max_len,
-        ))
+        )))
+    }
+
+    /// Open the fastq files for reading, and return a fastq reader.
+    /// If the read has multiple fastq files, they will be concatenated.
+    /// If the read has no fastq files, return None.
+    pub fn open(&self) -> Option<FastqReader> {
+        self.try_open().expect("failed to open FASTQ files")
     }
 
     /// Get the actual length of the read by reading the first N record from the fastq file.
@@ -172,10 +182,14 @@ impl Read {
     }
 
     /// Check if the read is reverse.
+    ///
+    /// For `Strand::Unstranded` (used in long-read assays), this returns `false` (forward),
+    /// which means the segment layout from the YAML is interpreted in forward orientation.
+    /// The actual per-read orientation is detected dynamically during barcode extraction.
     pub fn is_reverse(&self) -> bool {
         match self.strand {
             Strand::Neg => true,
-            Strand::Pos => false,
+            Strand::Pos | Strand::Unstranded => false,
         }
     }
 
@@ -221,6 +235,7 @@ impl Read {
 pub enum Strand {
     Pos,
     Neg,
+    Unstranded,
 }
 
 #[derive(Deserialize, Serialize, Debug, Clone, PartialEq)]
