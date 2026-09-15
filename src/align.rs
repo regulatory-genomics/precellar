@@ -1,4 +1,4 @@
-use crate::aligners::{transcript_annotator_from_star_index, AlignerRef};
+use crate::aligners::AlignerRef;
 use crate::pyseqspec::extract_assays;
 use crate::sinks::{
     AlignmentContext, AlignmentSink, BamSink, FragmentsSink, GeneQuantificationSink, NullSink,
@@ -475,14 +475,11 @@ impl AlignmentJobState {
         let mut aligner = AlignerRef::try_from(self.aligner.bind(py).clone())?;
         let header = aligner.header();
         let transcript_annotator = if sink.needs_transcriptome() {
-            if let Some(index_path) = sink.transcriptome_index() {
-                Some(transcript_annotator_from_star_index(
-                    index_path,
-                    header.clone(),
-                    strandedness,
-                )?)
-            } else {
-                aligner.transcript_annotator(strandedness)?
+            match sink.annotation_source() {
+                Some(source) => Some(source.load(header.clone(), strandedness)?),
+                // No explicit source: STAR carries its own annotation, other
+                // aligners have none and fail when the sink asks for it.
+                None => aligner.transcript_annotator(strandedness)?,
             }
         } else {
             None

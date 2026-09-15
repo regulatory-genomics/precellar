@@ -7,6 +7,7 @@
 
 mod align;
 mod annotate;
+pub mod gtf;
 mod quantification;
 
 pub use align::{TxAlignResult, TxAligner, TxAlignment};
@@ -129,6 +130,14 @@ pub struct Exon {
 }
 
 impl Exon {
+    pub fn start(&self) -> u64 {
+        self.start
+    }
+
+    pub fn end(&self) -> u64 {
+        self.end
+    }
+
     pub fn len(&self) -> u64 {
         self.end - self.start
     }

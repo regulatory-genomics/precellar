@@ -148,6 +148,45 @@ pub(crate) fn transcript_annotator_from_star_index(
     make_transcript_annotator(transcriptome.iter().cloned(), header, strandness)
 }
 
+pub(crate) fn transcript_annotator_from_gtf(
+    gtf_path: &Path,
+    header: Header,
+    strandness: Option<ChemistryStrandedness>,
+) -> Result<TxAligner> {
+    let transcripts = precellar::transcriptome::gtf::read_transcripts(gtf_path)?;
+    precellar::transcriptome::gtf::validate_against_header(&transcripts, &header).with_context(
+        || {
+            format!(
+                "GTF '{}' is incompatible with the aligner index",
+                gtf_path.display()
+            )
+        },
+    )?;
+    Ok(TxAligner::new(transcripts, header, strandness))
+}
+
+/// Where transcript annotation for gene quantification comes from.
+#[derive(Debug, Clone)]
+pub(crate) enum AnnotationSource {
+    /// A STAR index directory holding `geneInfo.tab` and friends.
+    StarIndex(PathBuf),
+    /// A GTF file.
+    Gtf(PathBuf),
+}
+
+impl AnnotationSource {
+    pub(crate) fn load(
+        &self,
+        header: Header,
+        strandness: Option<ChemistryStrandedness>,
+    ) -> Result<TxAligner> {
+        match self {
+            Self::StarIndex(path) => transcript_annotator_from_star_index(path, header, strandness),
+            Self::Gtf(path) => transcript_annotator_from_gtf(path, header, strandness),
+        }
+    }
+}
+
 pub enum AlignerRef<'py> {
     STAR(PyRefMut<'py, STAR>),
     BWA(PyRefMut<'py, BWAMEM2>),
