@@ -1,5 +1,5 @@
 use crate::align::AlignProgressBar;
-use crate::aligners::AlignerRef;
+use crate::aligners::{AlignerRef, AnnotationSource};
 use anyhow::{bail, Result};
 use noodles_sam::{self as sam, alignment::io::Write};
 use precellar::{
@@ -15,7 +15,7 @@ use seqspec::{
     ChemistryStrandedness, Modality,
 };
 use std::{
-    path::{Path, PathBuf},
+    path::PathBuf,
     str::FromStr,
 };
 
@@ -36,7 +36,7 @@ pub(crate) trait AlignmentSink {
         false
     }
 
-    fn transcriptome_index(&self) -> Option<&Path> {
+    fn annotation_source(&self) -> Option<AnnotationSource> {
         None
     }
 
@@ -294,7 +294,7 @@ impl AlignmentSink for FragmentsSink {
 pub(crate) struct GeneQuantificationSink {
     output: PathBuf,
     strandedness: Option<String>,
-    transcriptome_index: Option<PathBuf>,
+    annotation_source: Option<AnnotationSource>,
 }
 
 #[pymethods]
@@ -309,23 +309,42 @@ impl GeneQuantificationSink {
     ///     Strand model. If omitted, use the assay declaration.
     /// transcriptome_index : pathlib.Path | str, optional
     ///     STAR index directory containing transcript annotation tables. This
-    ///     is required for non-STAR aligners such as Minimap2. When omitted,
-    ///     transcript annotation is obtained from the STAR aligner itself.
-    ///     Its reference names and lengths must exactly match the aligner
-    ///     index. Build both indexes from the same reference FASTA; incompatible
-    ///     references fail before reads are processed.
+    ///     is required for non-STAR aligners such as Minimap2, unless `gtf` is
+    ///     given. When both are omitted, transcript annotation is obtained from
+    ///     the STAR aligner itself. Its reference names and lengths must exactly
+    ///     match the aligner index. Build both indexes from the same reference
+    ///     FASTA; incompatible references fail before reads are processed.
+    /// gtf : pathlib.Path | str, optional
+    ///     GTF file holding transcript annotation, optionally gzip- or
+    ///     zstd-compressed. Works with any aligner. Its chromosome names must
+    ///     match the aligner index; mismatches fail before reads are processed.
+    ///     Mutually exclusive with `transcriptome_index`.
     #[new]
-    #[pyo3(signature = (output, *, strandedness=None, transcriptome_index=None))]
+    #[pyo3(signature = (output, *, strandedness=None, transcriptome_index=None, gtf=None))]
     fn new(
         output: PathBuf,
         strandedness: Option<String>,
         transcriptome_index: Option<PathBuf>,
-    ) -> Self {
-        Self {
+        gtf: Option<PathBuf>,
+    ) -> Result<Self> {
+        // Fail at construction time rather than after the alignment setup has
+        // already run.
+        let annotation_source = match (transcriptome_index, gtf) {
+            (Some(index), Some(gtf)) => bail!(
+                "transcriptome_index ('{}') and gtf ('{}') are mutually exclusive; \
+                 choose a single annotation source",
+                index.display(),
+                gtf.display()
+            ),
+            (Some(index), None) => Some(AnnotationSource::StarIndex(index)),
+            (None, Some(gtf)) => Some(AnnotationSource::Gtf(gtf)),
+            (None, None) => None,
+        };
+        Ok(Self {
             output,
             strandedness,
-            transcriptome_index,
-        }
+            annotation_source,
+        })
     }
 }
 
@@ -334,8 +353,8 @@ impl AlignmentSink for GeneQuantificationSink {
         true
     }
 
-    fn transcriptome_index(&self) -> Option<&Path> {
-        self.transcriptome_index.as_deref()
+    fn annotation_source(&self) -> Option<AnnotationSource> {
+        self.annotation_source.clone()
     }
 
     fn strandedness(
@@ -358,7 +377,9 @@ impl AlignmentSink for GeneQuantificationSink {
             .take()
             .ok_or_else(|| {
                 anyhow::anyhow!(
-                    "gene quantification requires a STAR aligner or GeneQuantificationSink(transcriptome_index=...)"
+                    "gene quantification requires a STAR aligner, \
+                     GeneQuantificationSink(transcriptome_index=...), or \
+                     GeneQuantificationSink(gtf=...)"
                 )
             })?;
         let mut quantifier = Quantifier::new(annotator)?;
