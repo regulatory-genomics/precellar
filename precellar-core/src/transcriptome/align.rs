@@ -670,8 +670,14 @@ impl TxAligner {
                 Some(TxAlignment::Intergenic)
             }
         } else {
-            // Now we know there's exactly one gene, we choose the first non-discordant alignment
-            let (read1, read2, alignment) = aln.into_iter().next().unwrap();
+            // Now we know there's exactly one gene, we choose the first non-discordant
+            // alignment. `gene_id` is set by any record pair that produced an
+            // alignment, which need not be the first pair, so the first pair may
+            // carry none.
+            let (read1, read2, alignment) = aln
+                .into_iter()
+                .find(|(_, _, alignment)| !alignment.is_empty())
+                .unwrap();
             Some(TxAlignment::PeAligned {
                 read1,
                 read2,
@@ -770,9 +776,113 @@ impl TxAligner {
 
 #[cfg(test)]
 mod tests {
+    use crate::align::MultiMap;
     use crate::transcriptome::Exons;
+    use noodles_core::Position;
+    use noodles_sam::alignment::record::cigar::Op;
+    use noodles_sam::alignment::record::data::field::tag::Tag;
+    use noodles_sam::alignment::record::Flags;
+    use noodles_sam::alignment::record_buf::data::field::value::Value;
+    use noodles_sam::header::record::value::{map::ReferenceSequence, Map};
+    use std::num::NonZeroUsize;
 
     use super::*;
+
+    #[test]
+    fn test_align_pe() {
+        let header = sam::Header::builder()
+            .add_reference_sequence(
+                "chr1",
+                Map::<ReferenceSequence>::new(NonZeroUsize::new(10_000).unwrap()),
+            )
+            .build();
+
+        let transcript = Transcript {
+            id: "tx1".to_string(),
+            chrom: "chr1".to_string(),
+            start: 100,
+            end: 600,
+            strand: bed_utils::bed::Strand::Forward,
+            gene_id: "gene1".to_string(),
+            gene_name: "GeneName1".to_string(),
+            exons: Exons(vec![
+                Exon {
+                    start: 100,
+                    end: 200,
+                },
+                Exon {
+                    start: 300,
+                    end: 400,
+                },
+                Exon {
+                    start: 500,
+                    end: 600,
+                },
+            ]),
+        };
+
+        let record = |start: u64, cigar: Vec<(Kind, usize)>, is_read2: bool| {
+            let mut rec = RecordBuf::default();
+            *rec.reference_sequence_id_mut() = Some(0);
+            *rec.alignment_start_mut() = Position::new(start as usize + 1);
+            *rec.flags_mut() = if is_read2 {
+                Flags::SEGMENTED | Flags::REVERSE_COMPLEMENTED
+            } else {
+                Flags::SEGMENTED
+            };
+            *rec.cigar_mut() = cigar
+                .into_iter()
+                .map(|(kind, len)| Op::new(kind, len))
+                .collect();
+            rec.data_mut()
+                .insert(Tag::CELL_BARCODE_ID, Value::String("ACGT".into()));
+            rec
+        };
+
+        let discordant = |is_read2: bool| {
+            record(
+                120,
+                vec![(Kind::Match, 60), (Kind::Skip, 140), (Kind::Match, 60)],
+                is_read2,
+            )
+        };
+        let intronic = |is_read2: bool| record(220, vec![(Kind::Match, 30)], is_read2);
+
+        let read1 = MultiMap::new(discordant(false), Some(vec![intronic(false)]));
+        let read2 = MultiMap::new(discordant(true), Some(vec![intronic(true)]));
+
+        let aligner = TxAligner::new(
+            vec![transcript],
+            header,
+            Some(ChemistryStrandedness::Forward),
+        );
+        let result = aligner
+            ._align_pe(&read1, &read2, ChemistryStrandedness::Forward)
+            .expect("the secondary pair aligns, so the read is not dropped");
+
+        let TxAlignment::PeAligned {
+            read1: reported1,
+            read2: reported2,
+            alignment,
+            gene_id,
+            ..
+        } = &result
+        else {
+            panic!("expected PeAligned, got {result:?}");
+        };
+
+        assert_eq!(gene_id, "gene1");
+        assert_eq!(
+            alignment.as_slice(),
+            &[("tx1".to_string(), AlignType::Intronic)]
+        );
+        assert_eq!(reported1.start(), 220);
+        assert_eq!(reported2.start(), 220);
+
+        assert!(!result.is_exonic_only());
+        assert!(result.is_intronic_only());
+        assert!(!result.is_spanning());
+    }
 
     #[test]
     fn test_align() {
