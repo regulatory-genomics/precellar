@@ -15,6 +15,14 @@ pub enum Annotation {
     Ambiguous,
 }
 
+/// Per-gene UMI counts of one cell, split by splicing status.
+#[derive(Debug, Default)]
+pub struct SplicedCounts {
+    pub spliced: Vec<(GeneIndex, u32)>,
+    pub unspliced: Vec<(GeneIndex, u32)>,
+    pub ambiguous: Vec<(GeneIndex, u32)>,
+}
+
 /// A group of transcript alignments corresponding to a single UMI.
 struct AlignmentGroup<'a>(Vec<&'a TxAlignment>);
 
@@ -156,12 +164,16 @@ impl<'a> GeneCounter<'a> {
             .collect()
     }
 
-    pub fn to_spliced_counts(&self) -> (Vec<(GeneIndex, u32)>, Vec<(GeneIndex, u32)>) {
-        let mut spliced_counts = Vec::new();
-        let mut unspliced_counts = Vec::new();
+    /// Splits the UMI counts of this cell by splicing status.
+    ///
+    /// The three categories are mutually exclusive and together account for
+    /// every UMI, so their sums equal [`GeneCounter::to_counts`].
+    pub fn to_spliced_counts(&self) -> SplicedCounts {
+        let mut counts = SplicedCounts::default();
         self.0.iter().for_each(|(gene_idx, umi_group)| {
             let mut spliced: u32 = 0;
             let mut unspliced: u32 = 0;
+            let mut ambiguous: u32 = 0;
             umi_group
                 .iter()
                 .for_each(|reads| match reads.to_annotation() {
@@ -171,21 +183,105 @@ impl<'a> GeneCounter<'a> {
                     Annotation::Unspliced => {
                         unspliced = unspliced.checked_add(1).unwrap();
                     }
-                    Annotation::Ambiguous => {}
+                    Annotation::Ambiguous => {
+                        ambiguous = ambiguous.checked_add(1).unwrap();
+                    }
                 });
             if spliced > 0 {
-                spliced_counts.push((*gene_idx, spliced));
+                counts.spliced.push((*gene_idx, spliced));
             }
             if unspliced > 0 {
-                unspliced_counts.push((*gene_idx, unspliced));
+                counts.unspliced.push((*gene_idx, unspliced));
+            }
+            if ambiguous > 0 {
+                counts.ambiguous.push((*gene_idx, ambiguous));
             }
         });
-        (spliced_counts, unspliced_counts)
+        counts
     }
 
     pub fn to_fragments(&self) -> impl Iterator<Item = Fragment> + '_ {
         self.0
             .iter()
             .flat_map(|(_, umi_group)| umi_group.iter().flat_map(|reads| reads.to_fragments()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::transcriptome::align::{AlignType, SplicedRecord};
+
+    /// One read of a molecule, given as the per-transcript alignment types it
+    /// is compatible with. Coordinates are irrelevant here: `to_annotation`
+    /// reads only the `(transcript_id, AlignType)` list.
+    fn read(umi: &str, alignment: &[(&str, AlignType)]) -> TxAlignment {
+        TxAlignment::SeAligned {
+            read: SplicedRecord::for_test("chr1", vec![(0, 10)]),
+            alignment: alignment
+                .iter()
+                .map(|(tx, ty)| (tx.to_string(), ty.clone()))
+                .collect(),
+            gene_id: "gene1".to_string(),
+            barcode: "ACGT".to_string(),
+            umi: Some(umi.to_string()),
+        }
+    }
+
+    /// The three categories partition the UMIs of a gene, so the layers sum to
+    /// the total count.
+    #[test]
+    fn splicing_status_partitions_the_umis_of_a_gene() {
+        let genes = IndexMap::from([("gene1".to_string(), "GeneName1".to_string())]);
+
+        let alignments = vec![
+            // Spliced: every transcript is exonic (rule 2).
+            read("AAAAAAAA", &[("tx1", AlignType::Exonic)]),
+            // Unspliced: a spanning read decides the molecule (rule 1).
+            read("CCCCCCCC", &[("tx1", AlignType::Spanning)]),
+            // Ambiguous: tx1 says exonic, tx2 says intronic, and no read spans,
+            // so neither rule 2 nor rule 3 holds.
+            read(
+                "GGGGGGGG",
+                &[("tx1", AlignType::Exonic), ("tx2", AlignType::Intronic)],
+            ),
+        ];
+
+        let counter = GeneCounter::new(&alignments, &genes);
+        let counts = counter.to_spliced_counts();
+
+        assert_eq!(counts.spliced, vec![(0, 1)]);
+        assert_eq!(counts.unspliced, vec![(0, 1)]);
+        assert_eq!(counts.ambiguous, vec![(0, 1)]);
+
+        // The invariant that makes the three layers comparable: nothing is
+        // dropped, so `X == spliced + unspliced + ambiguous`.
+        let total: u32 = counter.to_counts().iter().map(|(_, c)| c).sum();
+        let split: u32 = counts
+            .spliced
+            .iter()
+            .chain(&counts.unspliced)
+            .chain(&counts.ambiguous)
+            .map(|(_, c)| c)
+            .sum();
+        assert_eq!(total, 3);
+        assert_eq!(total, split);
+    }
+
+    /// A molecule with no spanning read is still unspliced when every
+    /// compatible transcript has intronic evidence.
+    #[test]
+    fn intronic_evidence_on_all_transcripts_is_unspliced() {
+        let genes = IndexMap::from([("gene1".to_string(), "GeneName1".to_string())]);
+        let alignments = vec![read(
+            "AAAAAAAA",
+            &[("tx1", AlignType::Intronic), ("tx2", AlignType::Intronic)],
+        )];
+
+        let counts = GeneCounter::new(&alignments, &genes).to_spliced_counts();
+
+        assert_eq!(counts.unspliced, vec![(0, 1)]);
+        assert!(counts.spliced.is_empty());
+        assert!(counts.ambiguous.is_empty());
     }
 }

@@ -141,6 +141,20 @@ impl SplicedRecord {
         }))
     }
 
+    /// A record with the given segments, for tests that exercise logic keyed on
+    /// the transcript alignment list rather than on read coordinates.
+    #[cfg(test)]
+    pub(crate) fn for_test(chrom: &str, segments: Vec<(u64, u64)>) -> Self {
+        Self {
+            chrom: chrom.to_string(),
+            segments: segments
+                .into_iter()
+                .map(|(start, end)| Segment { start, end })
+                .collect(),
+            strand: bed_utils::bed::Strand::Forward,
+        }
+    }
+
     /// The leftmost position of the alignment.
     fn start(&self) -> u64 {
         self.segments.first().map_or(0, |segment| segment.start)
