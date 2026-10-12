@@ -64,7 +64,7 @@ pub struct TxAlignOpts {
     /// few bases, which must not be read as a structural mismatch. Only the
     /// inner edges of the alignment are affected; transcript ends are
     /// governed by the unconditional exemption above. IsoQuant uses 4 for
-    /// PacBio and 6 for ONT. Not yet implemented; reserved.
+    /// PacBio and 6 for ONT; `0` requires exact equality.
     pub junction_tolerance: u64,
 }
 
@@ -86,6 +86,12 @@ impl TxAlignOpts {
             micro_intron_length: 0,
             junction_tolerance: 0,
         }
+    }
+
+    /// Whether an observed junction coordinate matches an annotated exon
+    /// boundary within tolerance.
+    fn junction_matches(&self, observed: u64, annotated: u64) -> bool {
+        observed.abs_diff(annotated) <= self.junction_tolerance
     }
 }
 
@@ -269,9 +275,9 @@ impl SplicedRecord {
     /// Outer transcript edges are exempt from the containment checks: TSS/polyA
     /// annotations (also long-read end trimming) are unreliable, so a read overhanging
     /// a terminal exon says nothing about splicing. Inner edges (junctions) are still
-    /// checked exactly. The exemption is keyed on the transcript's terminal exons, not
-    /// the first overlapped exon, so that a read starting in intron 2 still counts as
-    /// intron retention rather than an overhang.
+    /// checked, within `opts.junction_tolerance`. The exemption is keyed on the
+    /// transcript's terminal exons, not the first overlapped exon, so that a read
+    /// starting in intron 2 still counts as intron retention rather than an overhang.
     fn align_helper(&self, transcript: &Transcript, opts: &TxAlignOpts) -> AlignType {
         if self.end() <= transcript.start || self.start() >= transcript.end {
             panic!("Read does not overlap transcript");
@@ -307,11 +313,14 @@ impl SplicedRecord {
             } else if segments[1..n_segment - 1]
                 .iter()
                 .zip(exons[1..n_ex - 1].iter())
-                .all(|(s, e)| s.start == e.start && s.end == e.end)
+                .all(|(s, e)| {
+                    opts.junction_matches(s.start, e.start) && opts.junction_matches(s.end, e.end)
+                })
             {
-                // All internal segments (except the 1st and last) match exactly.
-                if segments[0].end == exons[0].end
-                    && segments[n_segment - 1].start == exons[n_ex - 1].start
+                // All internal segments (except the 1st and last) match within
+                // tolerance.
+                if opts.junction_matches(segments[0].end, exons[0].end)
+                    && opts.junction_matches(segments[n_segment - 1].start, exons[n_ex - 1].start)
                 {
                     // first and last segments also match.
                     if (at_tx_start || segments[0].start >= exons[0].start)
@@ -348,8 +357,8 @@ impl SplicedRecord {
                     return false;
                 };
 
-                left_segment.end == left_exon.end
-                    && right_segment.start == right_exon.start
+                opts.junction_matches(left_segment.end, left_exon.end)
+                    && opts.junction_matches(right_segment.start, right_exon.start)
                     && right_idx == left_idx + 1
             });
 
@@ -1301,5 +1310,140 @@ mod tests {
         // Reaching partway into a 10bp intron is genuine intronic sequence.
         test_fun(&micro, vec![(12, 25)], &default, AlignType::Spanning);
         test_fun(&micro, vec![(12, 25)], &exact, AlignType::Spanning);
+    }
+
+    /// Splice sites carry a GT-AG motif, so a junction that misses the
+    /// annotated boundary is evidence against the isoform -- but long-read
+    /// indel noise shifts junctions by a few bases, and treating that as a
+    /// structural mismatch loses the read entirely (`Discordant` is filtered
+    /// out before counting). The tolerance applies only to inner edges.
+    #[test]
+    fn test_junction_tolerance() {
+        let transcript = Transcript {
+            id: "tx1".to_string(),
+            chrom: "chr1".to_string(),
+            start: 100,
+            end: 1100,
+            strand: bed_utils::bed::Strand::Forward,
+            gene_id: "gene1".to_string(),
+            gene_name: "GeneName1".to_string(),
+            exons: Exons(vec![
+                Exon {
+                    start: 100,
+                    end: 200,
+                },
+                Exon {
+                    start: 500,
+                    end: 600,
+                },
+                Exon {
+                    start: 1000,
+                    end: 1100,
+                },
+            ]),
+        };
+
+        let mut record = SplicedRecord {
+            chrom: "chr1".to_string(),
+            segments: vec![],
+            strand: bed_utils::bed::Strand::Forward,
+        };
+        let mut test_fun = |segments: Vec<(u64, u64)>, tolerance: u64, expected: AlignType| {
+            record.segments = segments
+                .into_iter()
+                .map(|(s, e)| Segment { start: s, end: e })
+                .collect();
+            let opts = TxAlignOpts {
+                junction_tolerance: tolerance,
+                ..TxAlignOpts::exact()
+            };
+            assert_eq!(
+                record.align_helper(&transcript, &opts),
+                expected,
+                "segments={:?} tolerance={}",
+                record.segments,
+                tolerance
+            );
+        };
+
+        // An exact three-exon match is unaffected by tolerance.
+        for tol in [0, 4, 6] {
+            test_fun(
+                vec![(120, 200), (500, 600), (1000, 1080)],
+                tol,
+                AlignType::Exonic,
+            );
+        }
+
+        // Inner edge of the first segment off by 3bp: recovered at 4 and 6.
+        test_fun(
+            vec![(120, 197), (500, 600), (1000, 1080)],
+            0,
+            AlignType::Discordant,
+        );
+        test_fun(
+            vec![(120, 197), (500, 600), (1000, 1080)],
+            4,
+            AlignType::Exonic,
+        );
+
+        // Off by 5bp: still discordant at 4, recovered at 6 (PacBio vs ONT).
+        test_fun(
+            vec![(120, 195), (500, 600), (1000, 1080)],
+            4,
+            AlignType::Discordant,
+        );
+        test_fun(
+            vec![(120, 195), (500, 600), (1000, 1080)],
+            6,
+            AlignType::Exonic,
+        );
+
+        // Off by 7bp exceeds every supported tolerance.
+        for tol in [0, 4, 6] {
+            test_fun(
+                vec![(120, 193), (500, 600), (1000, 1080)],
+                tol,
+                AlignType::Discordant,
+            );
+        }
+
+        // Both edges of the internal segment off by 3bp.
+        test_fun(
+            vec![(120, 200), (503, 597), (1000, 1080)],
+            0,
+            AlignType::Discordant,
+        );
+        test_fun(
+            vec![(120, 200), (503, 597), (1000, 1080)],
+            4,
+            AlignType::Exonic,
+        );
+
+        // Inner edge of the last segment off by 3bp.
+        test_fun(
+            vec![(120, 200), (500, 600), (1003, 1080)],
+            0,
+            AlignType::Discordant,
+        );
+        test_fun(
+            vec![(120, 200), (500, 600), (1003, 1080)],
+            4,
+            AlignType::Exonic,
+        );
+
+        // Tolerance must not rescue a junction that no boundary explains: 300
+        // is 100bp past the end of exon 1.
+        for tol in [0, 4, 6] {
+            test_fun(vec![(120, 300), (500, 600)], tol, AlignType::Discordant);
+        }
+
+        // Outer edges are governed by the terminal exemption, not tolerance:
+        // overhanging the transcript start by 20bp stays exonic at tolerance 0.
+        test_fun(
+            vec![(80, 200), (500, 600), (1000, 1120)],
+            0,
+            AlignType::Exonic,
+        );
     }
 }
