@@ -335,7 +335,8 @@ where
         output.write_all(&name)?;
         output.write_all(b"\t")?;
         if output_num_umis {
-            writeln!(output, "{}", umis.len())?;
+            let total_count: u64 = umis.values().sum();
+            writeln!(output, "{}\t{}", umis.len(), total_count)?;
             return Ok(());
         }
         for (index, (umi, count)) in umis.into_iter().enumerate() {
@@ -557,7 +558,7 @@ where
         self.qc.num_umi_duplicates = self.qc.num_matched - num_unique_umis;
 
         if self.output_num_umis {
-            self.output.write_all(b"cell_barcode\tname\tnum_umis\n")?;
+            self.output.write_all(b"cell_barcode\tname\tnum_uniq_umis\ttotal_count\n")?;
         } else {
             self.output.write_all(b"cell_barcode\tname\tumi_counts\n")?;
         }
@@ -853,7 +854,7 @@ mod tests {
         stage.finish().unwrap();
         assert_eq!(
             stage.into_output(),
-            b"cell_barcode\tname\tnum_umis\nCELL\tTF1\t1\nEMPTY\tTF1\t1\n"
+            b"cell_barcode\tname\tnum_uniq_umis\ttotal_count\nCELL\tTF1\t1\t3\nEMPTY\tTF1\t1\t2\n"
         );
     }
 
@@ -870,7 +871,10 @@ mod tests {
         .with_output_num_umis(true);
 
         stage.finish().unwrap();
-        assert_eq!(stage.into_output(), b"cell_barcode\tname\tnum_umis\n");
+        assert_eq!(
+            stage.into_output(),
+            b"cell_barcode\tname\tnum_uniq_umis\ttotal_count\n"
+        );
     }
 
     #[test]
