@@ -49,6 +49,46 @@ impl AlignType {
     }
 }
 
+/// Tolerances applied when matching read structure against a transcript model.
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub struct TxAlignOpts {
+    /// Annotated introns at or below this length are treated as alignment
+    /// artifacts rather than retained introns: aligners routinely fail to
+    /// report short skips, so a read covering one looks like intron retention
+    /// when it is not. Zero-length introns (abutting exons) are always
+    /// exempted, since they contain no intronic sequence at all. IsoQuant
+    /// uses 50.
+    pub micro_intron_length: u64,
+    /// Tolerance for matching observed junctions against annotated exon
+    /// boundaries. Long-read indel noise routinely shifts a junction by a
+    /// few bases, which must not be read as a structural mismatch. Only the
+    /// inner edges of the alignment are affected; transcript ends are
+    /// governed by the unconditional exemption above. IsoQuant uses 4 for
+    /// PacBio and 6 for ONT. Not yet implemented; reserved.
+    pub junction_tolerance: u64,
+}
+
+impl Default for TxAlignOpts {
+    fn default() -> Self {
+        Self {
+            micro_intron_length: 50,
+            junction_tolerance: 0,
+        }
+    }
+}
+
+impl TxAlignOpts {
+    /// Options that disable every tolerance, restoring exact structural
+    /// matching. Used to reproduce historical classifications. Zero-length
+    /// introns remain exempted, as they hold no intronic sequence.
+    pub fn exact() -> Self {
+        Self {
+            micro_intron_length: 0,
+            junction_tolerance: 0,
+        }
+    }
+}
+
 #[derive(Eq, PartialEq, Debug, Clone, Encode, Decode)]
 pub struct TxAlignResult {
     pub gene_id: String,
@@ -170,6 +210,7 @@ impl SplicedRecord {
         &self,
         transcript: &Transcript,
         strandedness: ChemistryStrandedness,
+        opts: &TxAlignOpts,
     ) -> TxAlignResult {
         let is_antisense = match strandedness {
             ChemistryStrandedness::Forward => transcript.strand != self.strand,
@@ -186,7 +227,7 @@ impl SplicedRecord {
             gene_id: transcript.gene_id.clone(),
             transcript_id: transcript.id.clone(),
             strand,
-            align_type: self.align_helper(transcript),
+            align_type: self.align_helper(transcript, opts),
         }
     }
 
@@ -224,12 +265,20 @@ impl SplicedRecord {
     /// Exonic:        XXXXX----XXXX--------XXXXX
     /// Intronic:            XX
     /// Spanning:        XXXXXXXXXXXX-------XXXXX
-    fn align_helper(&self, transcript: &Transcript) -> AlignType {
+    ///
+    /// Outer transcript edges are exempt from the containment checks: TSS/polyA
+    /// annotations (also long-read end trimming) are unreliable, so a read overhanging
+    /// a terminal exon says nothing about splicing. Inner edges (junctions) are still
+    /// checked exactly. The exemption is keyed on the transcript's terminal exons, not
+    /// the first overlapped exon, so that a read starting in intron 2 still counts as
+    /// intron retention rather than an overhang.
+    fn align_helper(&self, transcript: &Transcript, opts: &TxAlignOpts) -> AlignType {
         if self.end() <= transcript.start || self.start() >= transcript.end {
             panic!("Read does not overlap transcript");
         }
 
-        let exons = find_exons(transcript.exons(), self.start(), self.end() - 1);
+        let tx_exons = transcript.exons();
+        let exons = find_exons(tx_exons, self.start(), self.end() - 1);
         if exons.is_empty() {
             // No exon overlaps the read, but the read overlaps the transcript.
             return AlignType::Intronic;
@@ -238,10 +287,19 @@ impl SplicedRecord {
         let segments = &self.segments;
         let n_ex = exons.len();
         let n_segment = segments.len();
+
+        // The left outer edge is exempt only at the transcript's start, and the
+        // right outer edge only at the transcript's end. Exon boundaries are
+        // unique within a transcript (exons are non-overlapping and in order),
+        // so coordinate equality identifies the terminal exons.
+        let at_tx_start = exons[0].start == tx_exons[0].start;
+        let at_tx_end = exons[n_ex - 1].end == tx_exons[tx_exons.len() - 1].end;
         if n_ex == n_segment {
             if n_ex == 1 {
-                if segments[0].start >= exons[0].start && segments[0].end <= exons[0].end {
-                    // Fully contained within the exon.
+                if (at_tx_start || segments[0].start >= exons[0].start)
+                    && (at_tx_end || segments[0].end <= exons[0].end)
+                {
+                    // Fully contained within the exon (terminal edges exempt).
                     AlignType::Exonic
                 } else {
                     AlignType::Spanning
@@ -256,8 +314,8 @@ impl SplicedRecord {
                     && segments[n_segment - 1].start == exons[n_ex - 1].start
                 {
                     // first and last segments also match.
-                    if segments[0].start >= exons[0].start
-                        && segments[n_segment - 1].end <= exons[n_ex - 1].end
+                    if (at_tx_start || segments[0].start >= exons[0].start)
+                        && (at_tx_end || segments[n_segment - 1].end <= exons[n_ex - 1].end)
                     {
                         AlignType::Exonic
                     } else {
@@ -295,10 +353,34 @@ impl SplicedRecord {
                     && right_idx == left_idx + 1
             });
 
-            if is_compatible {
-                AlignType::Spanning
-            } else {
+            if !is_compatible {
                 AlignType::Discordant
+            } else {
+                // Every observed junction lands on adjacent exon boundaries, so
+                // the read differs from a plain exonic match only by the introns
+                // bridged within single segments. An intron short enough that
+                // aligners routinely fail to report it as a skip is an
+                // alignment artifact, not retained-intron evidence; if the read
+                // bridges no genuine intron, it is exonic. Zero-length introns
+                // (abutting exons) never count: they hold no intronic sequence.
+                let only_artifacts = exons
+                    .windows(2)
+                    .filter(|pair| {
+                        let (left, right) = (&pair[0], &pair[1]);
+                        // The intron is bridged by a single segment that aligns
+                        // straight through it without reporting a junction. A
+                        // segment that only reaches partway into the intron is
+                        // genuine retained-intron sequence, not a missed skip.
+                        segments
+                            .iter()
+                            .any(|segment| segment.start <= left.end && segment.end >= right.start)
+                    })
+                    .all(|pair| pair[1].start - pair[0].end <= opts.micro_intron_length);
+                if only_artifacts {
+                    AlignType::Exonic
+                } else {
+                    AlignType::Spanning
+                }
             }
         } else {
             // There are more segments than exons. Cannot be concordant.
@@ -453,6 +535,7 @@ pub struct TxAligner {
     transcripts: GIntervalMap<Transcript>,
     strandedness: Option<ChemistryStrandedness>,
     header: sam::Header,
+    opts: TxAlignOpts,
 }
 
 impl TxAligner {
@@ -470,7 +553,14 @@ impl TxAligner {
             transcripts,
             header,
             strandedness,
+            opts: TxAlignOpts::default(),
         }
+    }
+
+    /// Applies custom tolerance options to the annotator.
+    pub fn with_opts(mut self, opts: TxAlignOpts) -> Self {
+        self.opts = opts;
+        self
     }
 
     pub fn transcripts(&self) -> impl Iterator<Item = &Transcript> {
@@ -711,7 +801,7 @@ impl TxAligner {
         let region = GenomicRange::new(&rec.chrom, rec.start() as u64, rec.end() as u64);
         self.transcripts
             .find(&region)
-            .map(|(_, transcript)| rec.align_transcript(transcript, strandedness))
+            .map(|(_, transcript)| rec.align_transcript(transcript, strandedness, &self.opts))
             .collect()
     }
 
@@ -933,33 +1023,283 @@ mod tests {
             strand: bed_utils::bed::Strand::Forward,
         };
 
+        let mut test_fun = |segments: Vec<(u64, u64)>, opts: &TxAlignOpts, expected: AlignType| {
+            record.segments = segments
+                .into_iter()
+                .map(|(s, e)| Segment { start: s, end: e })
+                .collect();
+            assert_eq!(record.align_helper(&transcript, opts), expected);
+        };
+        let exact = TxAlignOpts::exact();
+        let default = TxAlignOpts::default();
+
+        // Incompatible
+        test_fun(vec![(12, 18), (32, 38)], &exact, AlignType::Discordant);
+        test_fun(vec![(12, 18), (32, 38)], &default, AlignType::Discordant);
+        test_fun(vec![(21, 29), (32, 38)], &exact, AlignType::Discordant);
+        test_fun(vec![(21, 29), (32, 38)], &default, AlignType::Discordant);
+        test_fun(
+            vec![(5, 40), (50, 60), (500, 700), (1400, 1501)],
+            &exact,
+            AlignType::Discordant,
+        );
+        test_fun(
+            vec![(5, 40), (50, 60), (500, 700), (1400, 1501)],
+            &default,
+            AlignType::Discordant,
+        );
+
+        // Exonic
+        test_fun(vec![(12, 20), (30, 38)], &exact, AlignType::Exonic);
+        test_fun(vec![(12, 20), (30, 38)], &default, AlignType::Exonic);
+
+        // Intronic
+        test_fun(vec![(6, 8)], &exact, AlignType::Intronic);
+        test_fun(vec![(6, 8)], &default, AlignType::Intronic);
+
+        // Reaching left of a middle exon is genuine intron retention.
+        test_fun(vec![(29, 38)], &exact, AlignType::Spanning);
+        test_fun(vec![(29, 38)], &default, AlignType::Spanning);
+
+        // The first segment bridges a 10bp intron (exons 10-20 and 30-40):
+        // an aligner artifact under the default micro-intron exemption,
+        // retained-intron evidence under exact matching.
+        test_fun(
+            vec![(5, 40), (50, 60), (500, 700), (1500, 1501)],
+            &exact,
+            AlignType::Spanning,
+        );
+        test_fun(
+            vec![(5, 40), (50, 60), (500, 700), (1500, 1501)],
+            &default,
+            AlignType::Exonic,
+        );
+    }
+
+    /// The outer edge of the transcript's first and last exon is TSS/polyA
+    /// territory, not splicing evidence, and is exempt unconditionally. The
+    /// same edges on interior exons face introns and stay checked.
+    #[test]
+    fn test_terminal_exemption() {
+        let transcript = Transcript {
+            id: "tx1".to_string(),
+            chrom: "chr1".to_string(),
+            start: 100,
+            end: 1100,
+            strand: bed_utils::bed::Strand::Forward,
+            gene_id: "gene1".to_string(),
+            gene_name: "GeneName1".to_string(),
+            exons: Exons(vec![
+                Exon {
+                    start: 100,
+                    end: 200,
+                },
+                Exon {
+                    start: 500,
+                    end: 600,
+                },
+                Exon {
+                    start: 1000,
+                    end: 1100,
+                },
+            ]),
+        };
+
+        let mut record = SplicedRecord {
+            chrom: "chr1".to_string(),
+            segments: vec![],
+            strand: bed_utils::bed::Strand::Forward,
+        };
         let mut test_fun = |segments: Vec<(u64, u64)>, expected: AlignType| {
             record.segments = segments
                 .into_iter()
                 .map(|(s, e)| Segment { start: s, end: e })
                 .collect();
-            assert_eq!(record.align_helper(&transcript), expected);
+            // The exemption is unconditional: it holds under exact matching too.
+            assert_eq!(
+                record.align_helper(&transcript, &TxAlignOpts::exact()),
+                expected
+            );
+            assert_eq!(
+                record.align_helper(&transcript, &TxAlignOpts::default()),
+                expected
+            );
         };
 
-        // Incompatible
-        test_fun(vec![(12, 18), (32, 38)], AlignType::Discordant);
-        test_fun(vec![(21, 29), (32, 38)], AlignType::Discordant);
-        test_fun(
-            vec![(5, 40), (50, 60), (500, 700), (1400, 1501)],
-            AlignType::Discordant,
+        // Reaching past the transcript start / end.
+        test_fun(vec![(80, 150)], AlignType::Exonic);
+        test_fun(vec![(1050, 1150)], AlignType::Exonic);
+        test_fun(vec![(80, 200), (500, 600), (1000, 1150)], AlignType::Exonic);
+
+        // Extending into intron 1 from inside the first exon: the right edge
+        // of the first exon is a junction, checked exactly.
+        test_fun(vec![(120, 300)], AlignType::Spanning);
+        // Read starts in intron 1 and reaches left of exon 2: exon 2 is not
+        // the transcript's first exon, so this is genuine intron retention.
+        test_fun(vec![(450, 590)], AlignType::Spanning);
+        // Multi-segment read reaching left of a middle exon.
+        test_fun(vec![(450, 600), (1000, 1100)], AlignType::Spanning);
+
+        // A single-exon transcript: both edges of its only exon are terminal.
+        let single = Transcript {
+            id: "tx2".to_string(),
+            chrom: "chr1".to_string(),
+            start: 100,
+            end: 200,
+            strand: bed_utils::bed::Strand::Forward,
+            gene_id: "gene1".to_string(),
+            gene_name: "GeneName1".to_string(),
+            exons: Exons(vec![Exon {
+                start: 100,
+                end: 200,
+            }]),
+        };
+        record.segments = vec![Segment {
+            start: 80,
+            end: 220,
+        }];
+        assert_eq!(
+            record.align_helper(&single, &TxAlignOpts::exact()),
+            AlignType::Exonic
         );
+        assert_eq!(
+            record.align_helper(&single, &TxAlignOpts::default()),
+            AlignType::Exonic
+        );
+    }
 
-        // Exonic
-        test_fun(vec![(12, 20), (30, 38)], AlignType::Exonic);
+    /// An intron short enough that aligners routinely miss the skip is an
+    /// alignment artifact, not retained-intron evidence. A segment that only
+    /// reaches partway into an intron holds genuine intronic sequence and is
+    /// never exempt.
+    #[test]
+    fn test_micro_intron() {
+        // 10bp intron.
+        let micro = Transcript {
+            id: "tx1".to_string(),
+            chrom: "chr1".to_string(),
+            start: 10,
+            end: 40,
+            strand: bed_utils::bed::Strand::Forward,
+            gene_id: "gene1".to_string(),
+            gene_name: "GeneName1".to_string(),
+            exons: Exons(vec![
+                Exon { start: 10, end: 20 },
+                Exon { start: 30, end: 40 },
+            ]),
+        };
+        // 40bp and 40bp introns: each within the default threshold, but their
+        // sum (80bp) exceeds it, so the length check must be per-gap.
+        let micro_chain = Transcript {
+            id: "tx2".to_string(),
+            chrom: "chr1".to_string(),
+            start: 10,
+            end: 120,
+            strand: bed_utils::bed::Strand::Forward,
+            gene_id: "gene1".to_string(),
+            gene_name: "GeneName1".to_string(),
+            exons: Exons(vec![
+                Exon { start: 10, end: 20 },
+                Exon { start: 60, end: 70 },
+                Exon {
+                    start: 110,
+                    end: 120,
+                },
+            ]),
+        };
+        // 50bp intron, exactly at the default threshold.
+        let boundary = Transcript {
+            id: "tx3".to_string(),
+            chrom: "chr1".to_string(),
+            start: 10,
+            end: 80,
+            strand: bed_utils::bed::Strand::Forward,
+            gene_id: "gene1".to_string(),
+            gene_name: "GeneName1".to_string(),
+            exons: Exons(vec![
+                Exon { start: 10, end: 20 },
+                Exon { start: 70, end: 80 },
+            ]),
+        };
+        // 200bp intron: genuine retention evidence.
+        let real = Transcript {
+            id: "tx4".to_string(),
+            chrom: "chr1".to_string(),
+            start: 10,
+            end: 230,
+            strand: bed_utils::bed::Strand::Forward,
+            gene_id: "gene1".to_string(),
+            gene_name: "GeneName1".to_string(),
+            exons: Exons(vec![
+                Exon { start: 10, end: 20 },
+                Exon {
+                    start: 220,
+                    end: 230,
+                },
+            ]),
+        };
+        // Zero-length intron (abutting exons): holds no intronic sequence.
+        let abutting = Transcript {
+            id: "tx5".to_string(),
+            chrom: "chr1".to_string(),
+            start: 10,
+            end: 30,
+            strand: bed_utils::bed::Strand::Forward,
+            gene_id: "gene1".to_string(),
+            gene_name: "GeneName1".to_string(),
+            exons: Exons(vec![
+                Exon { start: 10, end: 20 },
+                Exon { start: 20, end: 30 },
+            ]),
+        };
 
-        // Intronic
-        test_fun(vec![(6, 8)], AlignType::Intronic);
+        let mut record = SplicedRecord {
+            chrom: "chr1".to_string(),
+            segments: vec![],
+            strand: bed_utils::bed::Strand::Forward,
+        };
+        let mut test_fun = |transcript: &Transcript,
+                            segments: Vec<(u64, u64)>,
+                            opts: &TxAlignOpts,
+                            expected: AlignType| {
+            record.segments = segments
+                .into_iter()
+                .map(|(s, e)| Segment { start: s, end: e })
+                .collect();
+            assert_eq!(record.align_helper(transcript, opts), expected);
+        };
+        let exact = TxAlignOpts::exact();
+        let default = TxAlignOpts::default();
 
-        // Spanning
-        test_fun(vec![(29, 38)], AlignType::Spanning);
+        // Single segment through a 10bp intron: artifact at default, retained
+        // at exact.
+        test_fun(&micro, vec![(12, 38)], &default, AlignType::Exonic);
+        test_fun(&micro, vec![(12, 38)], &exact, AlignType::Spanning);
+        // Multi-segment read whose first segment bridges a 40bp micro-intron;
+        // the observed junction between exons 2 and 3 is not bridging evidence.
         test_fun(
-            vec![(5, 40), (50, 60), (500, 700), (1500, 1501)],
+            &micro_chain,
+            vec![(12, 70), (110, 115)],
+            &default,
+            AlignType::Exonic,
+        );
+        test_fun(
+            &micro_chain,
+            vec![(12, 70), (110, 115)],
+            &exact,
             AlignType::Spanning,
         );
+        // 50bp intron sits exactly at the default threshold (`<=`).
+        test_fun(&boundary, vec![(12, 75)], &default, AlignType::Exonic);
+        test_fun(&boundary, vec![(12, 75)], &exact, AlignType::Spanning);
+        // 200bp intron: never exempt.
+        test_fun(&real, vec![(12, 225)], &default, AlignType::Spanning);
+        test_fun(&real, vec![(12, 225)], &exact, AlignType::Spanning);
+        // Zero-length intron: exempt even under exact matching.
+        test_fun(&abutting, vec![(12, 28)], &default, AlignType::Exonic);
+        test_fun(&abutting, vec![(12, 28)], &exact, AlignType::Exonic);
+        // Reaching partway into a 10bp intron is genuine intronic sequence.
+        test_fun(&micro, vec![(12, 25)], &default, AlignType::Spanning);
+        test_fun(&micro, vec![(12, 25)], &exact, AlignType::Spanning);
     }
 }

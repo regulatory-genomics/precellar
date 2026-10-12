@@ -6,7 +6,7 @@ use precellar::{
     align::MultiMapR,
     fragment::{IntoFragOpts, IntoFragments},
     qc::QcFragment,
-    transcriptome::Quantifier,
+    transcriptome::{Quantifier, TxAlignOpts},
 };
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
@@ -38,6 +38,12 @@ pub(crate) trait AlignmentSink {
 
     fn annotation_source(&self) -> Option<AnnotationSource> {
         None
+    }
+
+    /// Tolerance options for transcript structural matching, applied to the
+    /// transcript annotator before quantification.
+    fn tx_align_opts(&self) -> TxAlignOpts {
+        TxAlignOpts::default()
     }
 
     fn strandedness(
@@ -295,6 +301,7 @@ pub(crate) struct GeneQuantificationSink {
     output: PathBuf,
     strandedness: Option<String>,
     annotation_source: Option<AnnotationSource>,
+    micro_intron_length: Option<u64>,
 }
 
 #[pymethods]
@@ -319,13 +326,20 @@ impl GeneQuantificationSink {
     ///     zstd-compressed. Works with any aligner. Its chromosome names must
     ///     match the aligner index; mismatches fail before reads are processed.
     ///     Mutually exclusive with `transcriptome_index`.
+    /// micro_intron_length : int, optional
+    ///     Annotated introns at or below this length are treated as alignment
+    ///     artifacts rather than retained introns: aligners routinely fail to
+    ///     report short skips, so a read covering one looks like intron
+    ///     retention when it is not. Set 0 to disable the exemption and
+    ///     reproduce the historical strict behavior. Defaults to 50.
     #[new]
-    #[pyo3(signature = (output, *, strandedness=None, transcriptome_index=None, gtf=None))]
+    #[pyo3(signature = (output, *, strandedness=None, transcriptome_index=None, gtf=None, micro_intron_length=None))]
     fn new(
         output: PathBuf,
         strandedness: Option<String>,
         transcriptome_index: Option<PathBuf>,
         gtf: Option<PathBuf>,
+        micro_intron_length: Option<u64>,
     ) -> Result<Self> {
         // Fail at construction time rather than after the alignment setup has
         // already run.
@@ -344,6 +358,7 @@ impl GeneQuantificationSink {
             output,
             strandedness,
             annotation_source,
+            micro_intron_length,
         })
     }
 }
@@ -355,6 +370,18 @@ impl AlignmentSink for GeneQuantificationSink {
 
     fn annotation_source(&self) -> Option<AnnotationSource> {
         self.annotation_source.clone()
+    }
+
+    fn tx_align_opts(&self) -> TxAlignOpts {
+        // Delegate the default to `TxAlignOpts::default()` so that the Python
+        // binding never pins its own copy of the core default value.
+        match self.micro_intron_length {
+            Some(v) => TxAlignOpts {
+                micro_intron_length: v,
+                ..TxAlignOpts::default()
+            },
+            None => TxAlignOpts::default(),
+        }
     }
 
     fn strandedness(

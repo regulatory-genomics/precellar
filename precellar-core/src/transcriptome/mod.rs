@@ -10,7 +10,7 @@ mod annotate;
 pub mod gtf;
 mod quantification;
 
-pub use align::{TxAlignResult, TxAligner, TxAlignment};
+pub use align::{TxAlignOpts, TxAlignResult, TxAligner, TxAlignment};
 pub use annotate::{GeneCounter, SplicedCounts};
 pub use quantification::Quantifier;
 
