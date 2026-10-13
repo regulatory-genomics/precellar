@@ -385,7 +385,14 @@ impl SplicedRecord {
                             .any(|segment| segment.start <= left.end && segment.end >= right.start)
                     })
                     .all(|pair| pair[1].start - pair[0].end <= opts.micro_intron_length);
-                if only_artifacts {
+                // Bridged introns being artifacts is not enough: the outer
+                // edges must also be contained, exactly as in the branch above.
+                // A segment running past the last overlapped exon without
+                // reaching the next one holds retained-intron sequence that no
+                // gap test above can see, since that intron is never bridged.
+                let ends_contained = (at_tx_start || segments[0].start >= exons[0].start)
+                    && (at_tx_end || segments[n_segment - 1].end <= exons[n_ex - 1].end);
+                if only_artifacts && ends_contained {
                     AlignType::Exonic
                 } else {
                     AlignType::Spanning
@@ -1445,5 +1452,56 @@ mod tests {
             0,
             AlignType::Exonic,
         );
+    }
+
+    /// The micro-intron exemption must not swallow a segment that runs past
+    /// the last exon it overlaps without reaching the next one. That overhang
+    /// is retained-intron sequence, and the per-gap length test cannot see it:
+    /// the intron it sits in is never bridged, so it is never a candidate gap.
+    #[test]
+    fn test_micro_intron_requires_contained_ends() {
+        let transcript = Transcript {
+            id: "tx1".to_string(),
+            chrom: "chr1".to_string(),
+            start: 10,
+            end: 1010,
+            strand: bed_utils::bed::Strand::Forward,
+            gene_id: "gene1".to_string(),
+            gene_name: "GeneName1".to_string(),
+            exons: Exons(vec![
+                Exon { start: 10, end: 20 },
+                Exon { start: 30, end: 40 },
+                Exon {
+                    start: 1000,
+                    end: 1010,
+                },
+            ]),
+        };
+
+        let mut record = SplicedRecord {
+            chrom: "chr1".to_string(),
+            segments: vec![],
+            strand: bed_utils::bed::Strand::Forward,
+        };
+        let mut test_fun = |segments: Vec<(u64, u64)>, expected: AlignType| {
+            record.segments = segments
+                .into_iter()
+                .map(|(s, e)| Segment { start: s, end: e })
+                .collect();
+            assert_eq!(
+                record.align_helper(&transcript, &TxAlignOpts::default()),
+                expected,
+                "segments={:?}",
+                record.segments
+            );
+        };
+
+        // Bridges the 10bp intron and stops inside exon 2: a missed skip.
+        test_fun(vec![(12, 38)], AlignType::Exonic);
+        // Same bridge, but then runs 460bp into the intron before exon 3.
+        test_fun(vec![(12, 500)], AlignType::Spanning);
+        // Reaching exon 3 without a junction bridges the 960bp intron too,
+        // which the gap test already rejects.
+        test_fun(vec![(12, 1005)], AlignType::Spanning);
     }
 }
