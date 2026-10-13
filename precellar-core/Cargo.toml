@@ -16,7 +16,6 @@ minimap2 = { git = "https://github.com/PPSherry/minimap2-rs.git", rev = "2b9b4f3
 smallvec = "1.15"
 sshash-lib = "=0.6.1"
 bstr = "1.12"
-cf1-rs = "0.5.0"
 itertools = "0.15"
 indexmap = "2.11"
 log = "0.4"
@@ -28,8 +27,6 @@ noodles-gff = "=0.52.0"
 noodles-gtf = "=0.47.0"
 noodles-sam = { version = "=0.79.0", features = ["async"] }
 polars = "0.53"
-piscem-rs = { version = "=0.6.4", default-features = false }
-paraseq = "=0.4.8"
 rayon = "1.11"
 bitcode = "0.6"
 serde_json = "1.0"
