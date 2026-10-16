@@ -67,6 +67,8 @@ impl Quantifier {
             ExternalChunkBuilder::new(tempfile::tempfile()?, 3)?;
         let mut unspliced_cache: ExternalChunkBuilder<Vec<Vec<(usize, u32)>>> =
             ExternalChunkBuilder::new(tempfile::tempfile()?, 3)?;
+        let mut ambiguous_cache: ExternalChunkBuilder<Vec<Vec<(usize, u32)>>> =
+            ExternalChunkBuilder::new(tempfile::tempfile()?, 3)?;
         let mut coverage_cache: ExternalChunkBuilder<Vec<Vec<(usize, i32)>>> =
             ExternalChunkBuilder::new(tempfile::tempfile()?, 3)?;
 
@@ -116,11 +118,12 @@ impl Quantifier {
                 .chunk_by(|(chunk_id, _)| *chunk_id);
 
             aln_chunks.into_iter().for_each(|(_, chunk)| {
-                let ((t, s), (uns, cov)) = self.count_one_cell(&genome_index, chunk.map(|x| x.1));
-                umi_cache.add(t).unwrap();
-                spliced_cache.add(s).unwrap();
-                unspliced_cache.add(uns).unwrap();
-                coverage_cache.add(cov).unwrap();
+                let counts = self.count_one_cell(&genome_index, chunk.map(|x| x.1));
+                umi_cache.add(counts.umi).unwrap();
+                spliced_cache.add(counts.spliced).unwrap();
+                unspliced_cache.add(counts.unspliced).unwrap();
+                ambiguous_cache.add(counts.ambiguous).unwrap();
+                coverage_cache.add(counts.coverage).unwrap();
             });
 
             bar.abandon();
@@ -156,6 +159,16 @@ impl Quantifier {
         });
         adata.layers().add_iter("unspliced", unspliced_count)?;
 
+        let ambiguous_count = ambiguous_cache.finish()?.map(|x| {
+            let x = x.unwrap();
+            qc.num_ambiguous += x
+                .iter()
+                .flat_map(|x| x.iter().map(|(_, c)| *c as u64))
+                .sum::<u64>();
+            make_csr(x, num_cols)
+        });
+        adata.layers().add_iter("ambiguous", ambiguous_count)?;
+
         let coverage = coverage_cache.finish()?.map(|x| {
             let x = x.unwrap();
             make_csr(x, genome_index.len())
@@ -175,28 +188,49 @@ impl Quantifier {
         Ok(qc)
     }
 
+    /// Counts a batch of cells, one entry per cell in each returned vector.
     fn count_one_cell(
         &self,
         index: &GenomeBaseIndex,
         alignments: impl Iterator<Item = Vec<TxAlignment>>,
-    ) -> (
-        (Vec<Vec<(usize, u32)>>, Vec<Vec<(usize, u32)>>),
-        (Vec<Vec<(usize, u32)>>, Vec<Vec<(usize, i32)>>),
-    ) {
+    ) -> CellCounts {
         let alignments = alignments.collect::<Vec<_>>();
         let chunk_size = (alignments.len() / self.num_threads).max(1);
-        alignments
+        let per_cell: Vec<_> = alignments
             .par_chunks(chunk_size)
             .flat_map_iter(|chunk| {
                 chunk.into_iter().map(|aln| {
                     let umi_group = GeneCounter::new(aln, &self.genes);
                     let coverage = index.count_fragments(umi_group.to_fragments());
-                    let (spliced, unspliced) = umi_group.to_spliced_counts();
-                    ((umi_group.to_counts(), spliced), (unspliced, coverage))
+                    (
+                        umi_group.to_counts(),
+                        umi_group.to_spliced_counts(),
+                        coverage,
+                    )
                 })
             })
-            .unzip()
+            .collect();
+
+        let mut counts = CellCounts::default();
+        for (umi, spliced, coverage) in per_cell {
+            counts.umi.push(umi);
+            counts.spliced.push(spliced.spliced);
+            counts.unspliced.push(spliced.unspliced);
+            counts.ambiguous.push(spliced.ambiguous);
+            counts.coverage.push(coverage);
+        }
+        counts
     }
+}
+
+/// Counts for a batch of cells, each vector holding one entry per cell.
+#[derive(Default)]
+struct CellCounts {
+    umi: Vec<Vec<(usize, u32)>>,
+    spliced: Vec<Vec<(usize, u32)>>,
+    unspliced: Vec<Vec<(usize, u32)>>,
+    ambiguous: Vec<Vec<(usize, u32)>>,
+    coverage: Vec<Vec<(usize, i32)>>,
 }
 
 fn sort_alignments<I>(

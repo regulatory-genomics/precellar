@@ -415,6 +415,7 @@ pub struct QcGeneQuant {
     pub(crate) num_unique_umi: u64,
     pub(crate) num_spliced: u64,
     pub(crate) num_unspliced: u64,
+    pub(crate) num_ambiguous: u64,
 }
 
 impl QcGeneQuant {
@@ -462,6 +463,7 @@ impl From<QcGeneQuant> for Value {
                 "frac_duplicates": 1.0 - qc.num_unique_umi as f64 / num_transcriptomic as f64,
                 "frac_spliced": qc.num_spliced as f64 / qc.num_unique_umi as f64,
                 "frac_unspliced": qc.num_unspliced as f64 / qc.num_unique_umi as f64,
+                "frac_ambiguous": qc.num_ambiguous as f64 / qc.num_unique_umi as f64,
             },
         })
     }

@@ -475,11 +475,14 @@ impl AlignmentJobState {
         let mut aligner = AlignerRef::try_from(self.aligner.bind(py).clone())?;
         let header = aligner.header();
         let transcript_annotator = if sink.needs_transcriptome() {
+            let opts = sink.tx_align_opts();
             match sink.annotation_source() {
-                Some(source) => Some(source.load(header.clone(), strandedness)?),
+                Some(source) => Some(source.load(header.clone(), strandedness)?.with_opts(opts)),
                 // No explicit source: STAR carries its own annotation, other
                 // aligners have none and fail when the sink asks for it.
-                None => aligner.transcript_annotator(strandedness)?,
+                None => aligner
+                    .transcript_annotator(strandedness)?
+                    .map(|annotator| annotator.with_opts(opts)),
             }
         } else {
             None

@@ -402,6 +402,7 @@ The processing path is determined by the `strand` field and read lengths.
 2. **All barcode regions must have whitelists.** Unlike short reads, long-read barcode extraction requires every barcode region to have a non-empty `onlist`.
 3. **`min_len` / `max_len` accuracy matters.** They determine the end-window sampling size and spacer lengths in composite alignment.
 4. **Target region placement.** The target (`cdna` or `gdna`) separates 5' and 3' processing. Ensure it is correctly positioned in the region order.
+5. **Describe the read, not the original library design.** For long reads `precellar` treats the library structure as the read structure directly, so a region that is absent from the FASTQ must not be listed in `library_spec`. Adapters that upstream tooling already trimmed are the common case.
 
 ## 9. Multi-Modal Assays
 
@@ -669,6 +670,7 @@ Use this checklist to verify a seqspec YAML before running `precellar`. Each ite
 - [ ] Total fixed-sequence length ≥ 12 bp in each end-region collection that contains a barcode. (**error** — `BarcodeExtractor::new()`)
 - [ ] Fixed regions have their actual nucleotide sequence in the `sequence` field, written in 5'→3' forward orientation. (**not checked** — wrong sequences or orientation silently break composite alignment)
 - [ ] `min_len` and `max_len` are accurate — they determine end-window size and composite alignment spacer lengths. (**not checked**)
+- [ ] No region describes sequence that upstream trimming already removed from the FASTQ. Trimmed adapters declared as `fixed` become anchors no read can match. (**not checked** — silently shifts composite alignment)
 
 ### RNA Modality
 
