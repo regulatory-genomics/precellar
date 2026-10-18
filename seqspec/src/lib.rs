@@ -5,7 +5,8 @@ pub mod utils;
 use indexmap::{IndexMap, IndexSet};
 use log::{info, warn};
 pub use read::{
-    FastqReader, File, Read, SegmentInfo, SegmentInfoElem, SplitError, Strand, UrlType,
+    fastq_record_from_seqarc_group_stream, seqarc_selection_for_streams, FastqReader, File, Read,
+    SegmentInfo, SegmentInfoElem, SeqArcContext, SeqArcReader, SplitError, Strand, UrlType,
 };
 pub use region::LibSpec;
 pub use region::{Onlist, Region, RegionId, RegionType, SequenceType};
@@ -506,6 +507,11 @@ impl Assay {
         self.sequence_spec
             .values()
             .filter(move |read| read.modality == modality)
+    }
+
+    /// Verify reads in the sequence spec.
+    pub fn validate_read(&self, read: &Read, sample_size: usize) -> Result<()> {
+        self.verify(read, sample_size)
     }
 
     /// Verify reads in the sequence spec.

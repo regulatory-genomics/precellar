@@ -1,7 +1,10 @@
 use anyhow::{bail, Result};
 use glob::glob;
 use pyo3::prelude::*;
-use seqspec::{Modality, Read, Region, SequenceKit, SequenceProtocol};
+use seqspec::{
+    seqarc_selection_for_streams, File, Modality, Read, Region, SeqArcReader, SequenceKit,
+    SequenceProtocol,
+};
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
@@ -228,6 +231,16 @@ impl Assay {
     /// fastq: Path | list[Path] | None
     ///     The path to the fastq file containing the reads. It can be:
     ///     (1) a single path, or (2) a list of paths, or (3) a glob pattern, e.g., `*.fastq`.
+    /// seqarc: Path | list[Path] | str | None
+    ///     One SeqArc archive, a list of archives, or a glob pattern. Multiple
+    ///     archives are consumed in sorted order as consecutive record groups.
+    ///     Use `streams` to attach their R1, R2, I1, and/or I2 streams to assay
+    ///     reads.
+    /// streams: dict[str, str | dict] | None
+    ///     SeqArc stream definitions. A string reuses an existing read, e.g.,
+    ///     `{"R1": "atac-R1", "R2": "atac-R2"}`. A dictionary can provide
+    ///     `read_id`, `modality`, `primer_id`, `is_reverse`, `min_len`, and
+    ///     `max_len` for that stream.
     /// min_len: int | None
     ///     The minimum length of the read. If not provided, the minimum length is inferred from the fastq file.
     /// max_len: int | None
@@ -238,23 +251,215 @@ impl Assay {
     ///     Whether to infer the read length from the fastq file.
     /// infer_read_length_sample: int | None
     ///     The number of records to read from the fastq file to infer the read length.
+    ///
+    /// Examples
+    /// --------
+    /// Existing FASTQ API:
+    ///     assay.update_read("atac-R1", fastq="R1.fastq.gz")
+    ///
+    /// Grouped SeqArc API:
+    ///     assay.update_read(
+    ///         seqarc="reads.seqarc",
+    ///         streams={"R1": "atac-R1", "R2": "atac-R2", "I1": "atac-I1"},
+    ///     )
     #[pyo3(
-        signature = (read_id, *, modality=None, primer_id=None, is_reverse=None, fastq=None, min_len=None, max_len=None, compute_md5=false, infer_read_length=true, infer_read_length_sample=10000),
-        text_signature = "($self, read_id, *, modality=None, primer_id=None, is_reverse=None, fastq=None, min_len=None, max_len=None, compute_md5=False, infer_read_length=True, infer_read_length_sample=10000)",
+        signature = (read_id=None, *, modality=None, primer_id=None, is_reverse=None, fastq=None, seqarc=None, streams=None, min_len=None, max_len=None, compute_md5=false, infer_read_length=true, infer_read_length_sample=10000),
+        text_signature = "($self, read_id=None, *, modality=None, primer_id=None, is_reverse=None, fastq=None, seqarc=None, streams=None, min_len=None, max_len=None, compute_md5=False, infer_read_length=True, infer_read_length_sample=10000)",
     )]
     fn update_read(
         &mut self,
-        read_id: &str,
+        read_id: Option<&str>,
         modality: Option<&str>,
         primer_id: Option<&str>,
         is_reverse: Option<bool>,
         fastq: Option<Bound<'_, PyAny>>,
+        seqarc: Option<Bound<'_, PyAny>>,
+        streams: Option<Bound<'_, PyAny>>,
         min_len: Option<usize>,
         max_len: Option<usize>,
         compute_md5: bool,
         infer_read_length: bool,
         infer_read_length_sample: usize,
     ) -> Result<()> {
+        if let Some(seqarc) = seqarc {
+            anyhow::ensure!(
+                fastq.is_none(),
+                "fastq and seqarc cannot be supplied together"
+            );
+            let streams =
+                streams.ok_or_else(|| anyhow::anyhow!("streams is required with seqarc"))?;
+            let streams = streams
+                .cast::<pyo3::types::PyDict>()
+                .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+            let seqarc_paths: Vec<PathBuf> = if seqarc.is_instance_of::<pyo3::types::PyList>() {
+                seqarc.extract()?
+            } else if let Ok(path) = seqarc.extract::<&str>() {
+                let mut matches = glob(path)
+                    .map_err(|error| anyhow::anyhow!("invalid SeqArc glob '{}': {}", path, error))?
+                    .collect::<std::result::Result<Vec<_>, _>>()?;
+                matches.sort();
+                if matches.is_empty() && !path.chars().any(|c| "*?[".contains(c)) {
+                    vec![PathBuf::from(path)]
+                } else {
+                    matches
+                }
+            } else {
+                vec![seqarc.extract()?]
+            };
+            anyhow::ensure!(
+                !seqarc_paths.is_empty(),
+                "seqarc must contain at least one file"
+            );
+            let mut archive_shape = None;
+            for path in &seqarc_paths {
+                let file = File::from_seqarc(path, "R1", false)?;
+                let reader = SeqArcReader::open(&file)?
+                    .ok_or_else(|| anyhow::anyhow!("failed to open SeqArc archive {:?}", path))?;
+                let shape = (
+                    reader.layout(),
+                    reader.index_streams(),
+                    reader.preserve_ids(),
+                    reader.preserve_quality(),
+                );
+                anyhow::ensure!(
+                    shape.2,
+                    "SeqArc archive {:?} does not preserve identifiers",
+                    path
+                );
+                anyhow::ensure!(
+                    shape.3,
+                    "SeqArc archive {:?} does not preserve quality scores",
+                    path
+                );
+                if let Some(expected) = archive_shape {
+                    anyhow::ensure!(
+                        expected == shape,
+                        "SeqArc archive {:?} is incompatible with the other archives",
+                        path
+                    );
+                } else {
+                    archive_shape = Some(shape);
+                }
+            }
+            for (stream_obj, config_obj) in streams.iter() {
+                let stream: String = stream_obj.extract()?;
+                anyhow::ensure!(
+                    matches!(stream.as_str(), "R1" | "R2" | "I1" | "I2"),
+                    "invalid SeqArc stream '{}'; expected R1, R2, I1, or I2",
+                    stream
+                );
+                let (
+                    stream_read_id,
+                    stream_modality,
+                    stream_primer,
+                    stream_reverse,
+                    stream_min_len,
+                    stream_max_len,
+                ) = if let Ok(name) = config_obj.extract::<String>() {
+                    (
+                        name,
+                        modality.map(str::to_string),
+                        primer_id.map(str::to_string),
+                        is_reverse,
+                        min_len,
+                        max_len,
+                    )
+                } else {
+                    let config = config_obj
+                        .cast::<pyo3::types::PyDict>()
+                        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+                    let name: String = config
+                        .get_item("read_id")?
+                        .ok_or_else(|| {
+                            anyhow::anyhow!("SeqArc stream '{}' is missing read_id", stream)
+                        })?
+                        .extract()?;
+                    let get_string =
+                        |key: &str, fallback: Option<&str>| -> Result<Option<String>> {
+                            Ok(match config.get_item(key)? {
+                                Some(value) => Some(value.extract()?),
+                                None => fallback.map(str::to_string),
+                            })
+                        };
+                    let stream_modality = get_string("modality", modality)?;
+                    let stream_primer = get_string("primer_id", primer_id)?;
+                    let stream_reverse = config
+                        .get_item("is_reverse")?
+                        .map(|value| value.extract())
+                        .transpose()?;
+                    let stream_min_len = config
+                        .get_item("min_len")?
+                        .map(|value| value.extract())
+                        .transpose()?;
+                    let stream_max_len = config
+                        .get_item("max_len")?
+                        .map(|value| value.extract())
+                        .transpose()?;
+                    (
+                        name,
+                        stream_modality,
+                        stream_primer,
+                        stream_reverse.or(is_reverse),
+                        stream_min_len.or(min_len),
+                        stream_max_len.or(max_len),
+                    )
+                };
+                let stream_modality = stream_modality
+                    .as_deref()
+                    .map(Modality::from_str)
+                    .transpose()?;
+                self.0.update_read(
+                    &stream_read_id,
+                    stream_modality,
+                    stream_primer.as_deref(),
+                    stream_reverse,
+                    None::<&[PathBuf]>,
+                    stream_min_len,
+                    stream_max_len,
+                    false,
+                    false,
+                    infer_read_length_sample,
+                )?;
+                let read = self
+                    .0
+                    .sequence_spec
+                    .get_mut(&stream_read_id)
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "failed to create SeqArc read '{}' for stream '{}'",
+                            stream_read_id,
+                            stream
+                        )
+                    })?;
+                read.files = Some(
+                    seqarc_paths
+                        .iter()
+                        .map(|path| File::from_seqarc(path, &stream, compute_md5))
+                        .collect::<Result<Vec<_>>>()?,
+                );
+                for path in &seqarc_paths {
+                    let file = File::from_seqarc(path, &stream, false)?;
+                    let selection = seqarc_selection_for_streams([stream.as_str()])?;
+                    let reader = SeqArcReader::open_with_selection(&file, Some(selection))?
+                        .ok_or_else(|| {
+                            anyhow::anyhow!("failed to open SeqArc archive {:?}", path)
+                        })?;
+                    reader.validate_stream(&stream)?;
+                }
+                if (stream_min_len.is_none() || stream_max_len.is_none()) && infer_read_length {
+                    let range = read.infer_length(infer_read_length_sample);
+                    read.min_len = stream_min_len.unwrap_or(range.start) as u32;
+                    read.max_len = stream_max_len.unwrap_or(range.end) as u32;
+                }
+                let read_for_validation = read.clone();
+                self.0
+                    .validate_read(&read_for_validation, infer_read_length_sample)?;
+            }
+            return Ok(());
+        }
+        let read_id = read_id
+            .ok_or_else(|| anyhow::anyhow!("read_id is required unless seqarc is supplied"))?;
+        anyhow::ensure!(streams.is_none(), "streams requires seqarc");
         let fastqs = fastq.map(|f| {
             if f.is_instance_of::<pyo3::types::PyList>() {
                 f.extract::<Vec<PathBuf>>().unwrap()

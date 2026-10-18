@@ -10,6 +10,11 @@ It is designed to take raw data (fastq files) from a variety of single-cell geno
 platforms and a seqspec file as input, and output a count matrix (RNA) or a fragment file (ATAC)
 for downstream analysis. The seqspec files for common platforms can be found here: https://github.com/IGVF/seqspec.
 
+In addition to FASTQ, precellar can consume lossless SeqArc archives. SeqArc
+archives containing R1/R2 and index reads are declared as grouped seqspec
+inputs; see [SeqArc input](seqarc.md) for the supported YAML format and archive
+requirements.
+
 ## Installation
 
 ### Stable version

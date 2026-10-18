@@ -43,7 +43,7 @@ use log::{debug, info};
 use noodles_fastq as fastq;
 use rayon::iter::ParallelIterator;
 use rayon::slice::ParallelSlice;
-use seqspec::{Assay, AssayType, FastqReader, Modality, SegmentInfo};
+use seqspec::{Assay, AssayType, FastqReader, Modality, SegmentInfo, SeqArcContext};
 use smallvec::SmallVec;
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -195,6 +195,7 @@ impl FastqPlan {
     ) -> Result<MultiAnnotatedFqReader> {
         let num_assays = self.assays.len();
         let mut readers = Vec::with_capacity(num_assays);
+        let seqarc_context = SeqArcContext::default();
         let mut plan_assay_type = None;
 
         for (i, assay) in self.assays.iter().enumerate() {
@@ -231,9 +232,11 @@ impl FastqPlan {
             let physical_fastq_reads: Vec<_> = assay
                 .iter_reads(self.modality)
                 .filter(|read| {
-                    read.files
-                        .as_ref()
-                        .is_some_and(|files| files.iter().any(|file| file.filetype == "fastq"))
+                    read.files.as_ref().is_some_and(|files| {
+                        files
+                            .iter()
+                            .any(|file| file.filetype == "fastq" || file.is_seqarc())
+                    })
                 })
                 .map(|read| read.read_id.as_str())
                 .collect();
@@ -243,7 +246,7 @@ impl FastqPlan {
                 .filter_map(|(read, segment_info)| {
                     FastqAnnotator::new(&read.read_id, segment_info).map(|annotator| {
                         let reader = read
-                            .try_open()
+                            .try_open_with_context(&seqarc_context)
                             .with_context(|| {
                                 format!(
                                     "failed to open FASTQ input for assay '{}' read '{}'",
