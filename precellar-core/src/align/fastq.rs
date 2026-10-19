@@ -47,7 +47,7 @@ use rayon::slice::ParallelSlice;
 use regex::Regex;
 use seqspec::{Assay, AssayType, FastqReader, LibSpec, Modality, Read, Region, SegmentInfo};
 use smallvec::SmallVec;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, RwLock};
 
 /// Configuration for standard barcode correction during FASTQ annotation.
@@ -290,6 +290,225 @@ fn find_field_region(
                 modality
             )
         })
+}
+
+/// Sample size for the plan-build smoke test.
+const SMOKE_TEST_SAMPLE_SIZE: usize = 1_000;
+
+/// Structural threshold for the plan-build smoke test: the fraction of
+/// sampled records that must annotate (split or extract) successfully.
+const SMOKE_TEST_STRUCTURAL_THRESHOLD: f64 = 0.7;
+
+/// Content threshold for the plan-build smoke test: the fraction of parsed
+/// records whose barcode fields must hit their whitelists.
+const SMOKE_TEST_CONTENT_THRESHOLD: f64 = 0.9;
+
+/// Samples records from every modality FASTQ read that has an annotator and
+/// feeds each to `check`. Best effort: reads without FASTQ input are skipped.
+fn sample_reads(
+    assay: &Assay,
+    modality: &Modality,
+    sample_size: usize,
+    mut check: impl FnMut(&FastqAnnotator, &fastq::Record),
+) -> Result<()> {
+    for (read, segment_info) in assay.get_segments_by_modality(*modality) {
+        let Some(annotator) = FastqAnnotator::new(&read.read_id, segment_info) else {
+            continue;
+        };
+        let Some(mut reader) = read.try_open().with_context(|| {
+            format!(
+                "failed to open FASTQ input for assay '{}' read '{}'",
+                assay.assay_id, read.read_id
+            )
+        })?
+        else {
+            continue;
+        };
+        let mut record = fastq::Record::default();
+        for _ in 0..sample_size {
+            if reader.read_record(&mut record)? == 0 {
+                break;
+            }
+            check(&annotator, &record);
+        }
+    }
+    Ok(())
+}
+
+/// Runs a sampling smoke test of one assay against its configured processor.
+///
+/// The test guards against data that does not fit the configuration: it
+/// samples records from every modality FASTQ read, runs the real extraction
+/// path, and returns one warning per metric below its threshold. Structural
+/// metrics (annotation success) use [`SMOKE_TEST_STRUCTURAL_THRESHOLD`];
+/// content metrics (parse and whitelist-hit ratios) use
+/// [`SMOKE_TEST_CONTENT_THRESHOLD`]. The caller is responsible for logging
+/// the returned warnings.
+fn smoke_test_assay(
+    assay: &Assay,
+    modality: &Modality,
+    barcode_processor: &BarcodeProcessor,
+) -> Result<Vec<String>> {
+    let mut warnings = Vec::new();
+    match barcode_processor {
+        BarcodeProcessor::ShortRead(_) => {
+            let mut sampled = 0u64;
+            let mut succeeded = 0u64;
+            let mut onlist_checked = 0u64;
+            let mut onlist_hit = 0u64;
+
+            // Region onlists for exact-match content checks.
+            let mut onlists: HashMap<String, IndexSet<Vec<u8>>> = HashMap::new();
+            let modality_region = assay.library_spec.get_modality(modality).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "assay '{}' does not contain modality {}",
+                    assay.assay_id,
+                    modality
+                )
+            })?;
+            for region in &modality_region.read().unwrap().subregions {
+                let region = region.read().unwrap();
+                if let (true, Some(onlist)) = (region.region_type.is_barcode(), &region.onlist) {
+                    onlists.insert(region.region_id.clone(), onlist.read()?);
+                }
+            }
+
+            sample_reads(
+                assay,
+                modality,
+                SMOKE_TEST_SAMPLE_SIZE,
+                |annotator, record| {
+                    sampled += 1;
+                    let Ok(segments) = annotator.segment_info.split(record) else {
+                        return;
+                    };
+                    succeeded += 1;
+                    for segment in &segments {
+                        if !segment.is_barcode() {
+                            continue;
+                        }
+                        let Some(onlist) = onlists.get(segment.region_id()) else {
+                            continue;
+                        };
+                        onlist_checked += 1;
+                        let sequence = if annotator.segment_info.is_reverse() {
+                            seqspec::utils::rev_compl(segment.seq)
+                        } else {
+                            segment.seq.to_vec()
+                        };
+                        if onlist.contains(&sequence) {
+                            onlist_hit += 1;
+                        }
+                    }
+                },
+            )?;
+
+            if sampled > 0 {
+                let ratio = succeeded as f64 / sampled as f64;
+                if ratio < SMOKE_TEST_STRUCTURAL_THRESHOLD {
+                    warnings.push(format!(
+                        "smoke test for assay '{}': structural ratio {:.3} is below {:.2} \
+                         ({succeeded}/{sampled} records annotated); the seqspec layout may not match the data",
+                        assay.assay_id, ratio, SMOKE_TEST_STRUCTURAL_THRESHOLD
+                    ));
+                }
+            }
+            if onlist_checked > 0 {
+                let ratio = onlist_hit as f64 / onlist_checked as f64;
+                if ratio < SMOKE_TEST_CONTENT_THRESHOLD {
+                    warnings.push(format!(
+                        "smoke test for assay '{}': barcode onlist hit ratio {:.3} is below {:.2} \
+                         ({onlist_hit}/{onlist_checked})",
+                        assay.assay_id, ratio, SMOKE_TEST_CONTENT_THRESHOLD
+                    ));
+                }
+            }
+        }
+        BarcodeProcessor::LongRead(extractor) => {
+            let mut sampled = 0u64;
+            let mut extracted = 0u64;
+            sample_reads(
+                assay,
+                modality,
+                SMOKE_TEST_SAMPLE_SIZE,
+                |_annotator, record| {
+                    sampled += 1;
+                    if let Ok((result, _)) = extractor.extract_barcode(record) {
+                        if result.is_success() {
+                            extracted += 1;
+                        }
+                    }
+                },
+            )?;
+
+            if sampled > 0 {
+                let ratio = extracted as f64 / sampled as f64;
+                if ratio < SMOKE_TEST_STRUCTURAL_THRESHOLD {
+                    warnings.push(format!(
+                        "smoke test for assay '{}': barcode extraction ratio {:.3} is below {:.2} \
+                         ({extracted}/{sampled} records)",
+                        assay.assay_id, ratio, SMOKE_TEST_STRUCTURAL_THRESHOLD
+                    ));
+                }
+            }
+        }
+        BarcodeProcessor::ReadName(parser) => {
+            let mut sampled = 0u64;
+            let mut parsed = 0u64;
+            // region id -> (checked, hit)
+            let mut whitelists: HashMap<String, (u64, u64)> = HashMap::new();
+            sample_reads(
+                assay,
+                modality,
+                SMOKE_TEST_SAMPLE_SIZE,
+                |annotator, record| {
+                    if !parser.applies_to(&annotator.read_id) {
+                        return;
+                    }
+                    sampled += 1;
+                    if let Ok((_, Some(BarcodeStats::ReadName(stats)))) =
+                        annotator.annotate(record, barcode_processor)
+                    {
+                        if stats.parsed {
+                            parsed += 1;
+                        }
+                        for (region_id, hit) in &stats.region_hits {
+                            let entry = whitelists.entry(region_id.clone()).or_insert((0, 0));
+                            entry.0 += 1;
+                            if *hit {
+                                entry.1 += 1;
+                            }
+                        }
+                    }
+                },
+            )?;
+
+            if sampled > 0 {
+                let ratio = parsed as f64 / sampled as f64;
+                if ratio < SMOKE_TEST_CONTENT_THRESHOLD {
+                    warnings.push(format!(
+                        "smoke test for assay '{}': read-name parse ratio {:.3} is below {:.2} \
+                         ({parsed}/{sampled}); check the pattern against the read names",
+                        assay.assay_id, ratio, SMOKE_TEST_CONTENT_THRESHOLD
+                    ));
+                }
+            }
+            for (region_id, (checked, hit)) in &whitelists {
+                if *checked == 0 {
+                    continue;
+                }
+                let ratio = *hit as f64 / *checked as f64;
+                if ratio < SMOKE_TEST_CONTENT_THRESHOLD {
+                    warnings.push(format!(
+                        "smoke test for assay '{}': region '{}' whitelist hit ratio {:.3} is below {:.2} \
+                         ({hit}/{checked}); the capture group may be mapped to the wrong region",
+                        assay.assay_id, region_id, ratio, SMOKE_TEST_CONTENT_THRESHOLD
+                    ));
+                }
+            }
+        }
+    }
+    Ok(warnings)
 }
 
 /// Consuming builder for a single annotated FASTQ execution.
@@ -568,6 +787,10 @@ impl FastqPlan {
                     }
                 }
             };
+
+            for warning in smoke_test_assay(assay, &self.modality, &barcode_processor)? {
+                warn!("{warning}");
+            }
 
             readers.push(AnnotatedFastqReader::new(
                 inputs,
@@ -2371,6 +2594,125 @@ mod tests {
         assert_eq!(json["frac_readname_parsed"]["R1"], serde_json::json!(0.0));
         // No record was parsed, so whitelist ratios cannot exist.
         assert!(json.get("frac_readname_in_whitelist").is_none());
+    }
+
+    /// Section 4: the plan-build smoke test must warn when short-read data
+    /// does not match the seqspec layout.
+    #[test]
+    fn test_smoke_test_short_read_warns_on_wrong_layout() {
+        let directory = tempfile::tempdir().unwrap();
+        let (mut assay, _, _, _) = short_read_fixture(directory.path());
+        let garbage: Vec<u8> = vec![b'A'; 36];
+        let path = directory.path().join("garbage.fastq");
+        write_fastq_records(
+            &path,
+            &[
+                ("read1", &garbage),
+                ("read2", &garbage),
+                ("read3", &garbage),
+            ],
+        );
+        assay.sequence_spec.get_mut("R1").unwrap().files =
+            Some(vec![File::from_fastq(&path, false).unwrap()]);
+
+        let analyzer = BarcodeAnalyzer::new(&assay, Modality::RNA);
+        let warnings = smoke_test_assay(
+            &assay,
+            &Modality::RNA,
+            &BarcodeProcessor::ShortRead(analyzer),
+        )
+        .unwrap();
+        assert!(
+            warnings
+                .iter()
+                .any(|warning| warning.contains("structural ratio")),
+            "{warnings:?}"
+        );
+    }
+
+    /// Section 4: the plan-build smoke test must warn when long-read data
+    /// carries none of the fixed anchors the extractor aligns against.
+    #[test]
+    fn test_smoke_test_long_read_warns_on_wrong_data() {
+        let directory = tempfile::tempdir().unwrap();
+        let garbage: Vec<u8> = vec![b'A'; 600];
+        let path = directory.path().join("garbage.fastq");
+        write_fastq(&path, "read1", &garbage);
+        let assay = long_read_assay(&[path.as_path()], directory.path());
+
+        let extractor = BarcodeExtractor::new(
+            &assay.library_spec,
+            &Modality::ATAC,
+            assay.get_whitelists(Modality::ATAC),
+        )
+        .unwrap();
+        let warnings = smoke_test_assay(
+            &assay,
+            &Modality::ATAC,
+            &BarcodeProcessor::LongRead(extractor),
+        )
+        .unwrap();
+        assert!(
+            warnings
+                .iter()
+                .any(|warning| warning.contains("extraction ratio")),
+            "{warnings:?}"
+        );
+    }
+
+    /// Section 4: the plan-build smoke test must warn when the pattern never
+    /// matches (parse ratio) and when a capture group is mapped to the wrong
+    /// region (whitelist ratio collapses while parsing stays intact).
+    #[test]
+    fn test_smoke_test_read_name_warns_on_mismatch() {
+        let directory = tempfile::tempdir().unwrap();
+        let target: Vec<u8> = vec![b'C'; 600];
+        // bc1's field holds CCCCCCCC, which is not in bc1's whitelist.
+        let records = [("read1:CCCCCCCC_GGGGGGGG_ACGTACGTAC", &target[..])];
+        let assay = read_name_assay(directory.path(), &records);
+
+        // Mapping error: parsing stays intact while bc1's whitelist ratio
+        // collapses to zero.
+        let (config, _) = ReadNameBarcodeConfig::new(
+            ":(?P<bc1>[ACGTN]{8})_(?P<bc2>[ACGTN]{8})_(?P<umi>[ACGTN]{10})$",
+            Some("R1"),
+            std::slice::from_ref(&assay),
+            &Modality::RNA,
+        )
+        .unwrap();
+        let parser = ReadNameParser::new(&config, &assay, &Modality::RNA).unwrap();
+        let warnings =
+            smoke_test_assay(&assay, &Modality::RNA, &BarcodeProcessor::ReadName(parser)).unwrap();
+        assert!(
+            !warnings
+                .iter()
+                .any(|warning| warning.contains("parse ratio")),
+            "{warnings:?}"
+        );
+        assert!(
+            warnings
+                .iter()
+                .any(|warning| warning.contains("bc1") && warning.contains("whitelist hit ratio")),
+            "{warnings:?}"
+        );
+
+        // A pattern that matches nothing produces the parse-ratio warning.
+        let (config, _) = ReadNameBarcodeConfig::new(
+            ":(?P<bc1>[ACGTN]{8})_(?P<bc2>[ACGTN]{8})_(?P<umi>[ACGTN]{10})_ZZ$",
+            Some("R1"),
+            std::slice::from_ref(&assay),
+            &Modality::RNA,
+        )
+        .unwrap();
+        let parser = ReadNameParser::new(&config, &assay, &Modality::RNA).unwrap();
+        let warnings =
+            smoke_test_assay(&assay, &Modality::RNA, &BarcodeProcessor::ReadName(parser)).unwrap();
+        assert!(
+            warnings
+                .iter()
+                .any(|warning| warning.contains("parse ratio")),
+            "{warnings:?}"
+        );
     }
 
     /// Paired-end read-name assays: with `read_id`, exactly one read parses
