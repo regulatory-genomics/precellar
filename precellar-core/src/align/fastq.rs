@@ -39,11 +39,14 @@ use crate::utils::{rev_compl_fastq_record, PrefetchIterator};
 use anyhow::{Context, Result};
 use bstr::BString;
 use itertools::Itertools;
-use log::{debug, info};
+use log::{debug, info, warn};
 use noodles_fastq as fastq;
 use rayon::iter::ParallelIterator;
 use rayon::slice::ParallelSlice;
-use seqspec::{Assay, AssayType, FastqReader, Modality, SegmentInfo, SeqArcContext};
+use regex::Regex;
+use seqspec::{
+    Assay, AssayType, FastqReader, LibSpec, Modality, Read, SegmentInfo, SeqArcContext,
+};
 use smallvec::SmallVec;
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -69,6 +72,212 @@ impl Default for BarcodeCorrectionConfig {
             max_mismatch: 1,
         }
     }
+}
+
+/// Runtime configuration for barcode/UMI extraction from FASTQ read names.
+///
+/// Use this for already-demultiplexed FASTQs whose barcode and UMI are
+/// embedded in the read name (for example LR-splitpipe output) instead of the
+/// sequence. The named capture groups of `pattern` map to `region_id`s of the
+/// assay's library spec; the combined cell barcode is concatenated in
+/// library-spec order, not in name order.
+///
+/// Construction validates the group-to-region mapping against every supplied
+/// assay so that misconfiguration fails at the call site instead of during the
+/// alignment run.
+#[derive(Debug, Clone)]
+pub struct ReadNameBarcodeConfig {
+    pattern: Regex,
+    read_id: Option<String>,
+}
+
+impl ReadNameBarcodeConfig {
+    /// Compile `pattern` and validate it against every supplied assay.
+    ///
+    /// Non-fatal problems (currently: an omitted `read_id` for a modality
+    /// with multiple FASTQ reads) are emitted through [`log::warn!`] and also
+    /// returned so callers can inspect them.
+    pub fn new(
+        pattern: &str,
+        read_id: Option<&str>,
+        assays: &[Assay],
+        modality: &Modality,
+    ) -> Result<(Self, Vec<String>)> {
+        let pattern = Regex::new(pattern)
+            .with_context(|| format!("invalid read-name barcode pattern: {pattern}"))?;
+        let config = Self {
+            pattern,
+            read_id: read_id.map(str::to_owned),
+        };
+        let mut warnings = Vec::new();
+        for assay in assays {
+            config.validate_assay(assay, modality, &mut warnings)?;
+        }
+        for warning in &warnings {
+            warn!("{warning}");
+        }
+        Ok((config, warnings))
+    }
+
+    fn validate_assay(
+        &self,
+        assay: &Assay,
+        modality: &Modality,
+        warnings: &mut Vec<String>,
+    ) -> Result<()> {
+        let reads: Vec<&Read> = assay.sequence_spec.values().collect();
+        Self::validate_parts(
+            &self.pattern,
+            self.read_id.as_deref(),
+            &assay.library_spec,
+            &reads,
+            &assay.assay_id,
+            modality,
+            warnings,
+        )
+    }
+
+    /// Validate one assay's configuration against its library spec and reads.
+    ///
+    /// Checks, in order:
+    ///
+    /// 1. Every named capture group resolves to a direct barcode/umi subregion
+    ///    of the modality.
+    /// 2. At least one barcode group exists and at most one umi group exists.
+    /// 3. Every barcode region of the modality is covered by a group.
+    /// 4. A given `read_id` exists, belongs to the modality, and carries FASTQ
+    ///    files; an omitted `read_id` with multiple FASTQ reads produces a
+    ///    warning.
+    fn validate_parts(
+        pattern: &Regex,
+        read_id: Option<&str>,
+        lib_spec: &LibSpec,
+        reads: &[&Read],
+        assay_id: &str,
+        modality: &Modality,
+        warnings: &mut Vec<String>,
+    ) -> Result<()> {
+        let modality_region = lib_spec.get_modality(modality).ok_or_else(|| {
+            anyhow::anyhow!(
+                "assay '{}' does not contain modality {}",
+                assay_id,
+                modality
+            )
+        })?;
+        let modality_guard = modality_region.read().unwrap();
+        let subregions = &modality_guard.subregions;
+
+        let mut barcode_regions: Vec<String> = Vec::new();
+        for region in subregions {
+            let region = region.read().unwrap();
+            if region.region_type.is_barcode() {
+                barcode_regions.push(region.region_id.clone());
+            }
+        }
+
+        let group_names: Vec<String> = pattern
+            .capture_names()
+            .flatten()
+            .map(str::to_owned)
+            .collect();
+        let mut num_barcode_groups = 0usize;
+        let mut num_umi_groups = 0usize;
+        for name in &group_names {
+            let region = subregions
+                .iter()
+                .find(|region| region.read().unwrap().region_id == *name)
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "read-name capture group '{}' does not match any region of assay '{}' modality {}",
+                        name, assay_id, modality
+                    )
+                })?;
+            let region = region.read().unwrap();
+            anyhow::ensure!(
+                region.region_type.is_barcode() || region.region_type.is_umi(),
+                "read-name capture group '{}' maps to region '{}' of type {} in assay '{}'; \
+                 groups must map to barcode or umi regions",
+                name,
+                region.region_id,
+                region.region_type,
+                assay_id
+            );
+            if region.region_type.is_barcode() {
+                num_barcode_groups += 1;
+            } else {
+                num_umi_groups += 1;
+            }
+        }
+        drop(modality_guard);
+
+        anyhow::ensure!(
+            num_barcode_groups >= 1,
+            "read-name pattern for assay '{}' must contain at least one barcode capture group",
+            assay_id
+        );
+        anyhow::ensure!(
+            num_umi_groups <= 1,
+            "read-name pattern for assay '{}' contains {} umi capture groups; at most 1 is supported",
+            assay_id,
+            num_umi_groups
+        );
+
+        let missing: Vec<String> = barcode_regions
+            .iter()
+            .filter(|id| !group_names.contains(id))
+            .cloned()
+            .collect();
+        anyhow::ensure!(
+            missing.is_empty(),
+            "read-name groups do not cover all barcode regions of assay '{}' modality {}: missing {}",
+            assay_id,
+            modality,
+            missing.join(", ")
+        );
+
+        if let Some(read_id) = read_id {
+            let read = reads
+                .iter()
+                .find(|read| read.read_id == read_id)
+                .ok_or_else(|| {
+                    anyhow::anyhow!("read_id '{}' not found in assay '{}'", read_id, assay_id)
+                })?;
+            anyhow::ensure!(
+                read.modality == *modality,
+                "read '{}' of assay '{}' belongs to modality {}, not {}",
+                read_id,
+                assay_id,
+                read.modality,
+                modality
+            );
+            anyhow::ensure!(
+                has_fastq_input(read),
+                "read '{}' of assay '{}' has no fastq files",
+                read_id,
+                assay_id
+            );
+        } else {
+            let num_fastq_reads = reads
+                .iter()
+                .filter(|read| read.modality == *modality && has_fastq_input(read))
+                .count();
+            if num_fastq_reads > 1 {
+                warnings.push(format!(
+                    "read_id omitted for assay '{}': modality {} has {} reads with fastq input; \
+                     every read parses its name and the parsed barcodes are concatenated once per read",
+                    assay_id, modality, num_fastq_reads
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Whether the read declares at least one FASTQ input file.
+fn has_fastq_input(read: &Read) -> bool {
+    read.files
+        .as_ref()
+        .is_some_and(|files| files.iter().any(|file| file.filetype == "fastq"))
 }
 
 /// Consuming builder for a single annotated FASTQ execution.
@@ -1350,6 +1559,203 @@ mod tests {
     use crate::qc::Metric;
     use seqspec::{File, Strand, UrlType};
     use std::path::Path;
+
+    /// Tests for [`ReadNameBarcodeConfig`] validation (read-name barcode
+    /// feature, configuration step).
+    mod read_name_config {
+        use anyhow::Result;
+        use regex::Regex;
+        use seqspec::{File, LibSpec, Modality, Read, Region, RegionType, SequenceType, UrlType};
+        use std::sync::{Arc, RwLock};
+
+        use crate::align::fastq::ReadNameBarcodeConfig;
+
+        fn region(
+            id: &str,
+            region_type: RegionType,
+            min_len: u32,
+            max_len: u32,
+        ) -> Arc<RwLock<Region>> {
+            let sequence_type = match region_type {
+                RegionType::Barcode | RegionType::Umi => SequenceType::Onlist,
+                _ => SequenceType::Random,
+            };
+            Arc::new(RwLock::new(Region {
+                region_id: id.to_string(),
+                region_type,
+                name: id.to_string(),
+                sequence_type,
+                sequence: String::new(),
+                min_len,
+                max_len,
+                onlist: None,
+                subregions: vec![],
+            }))
+        }
+
+        /// Library layout: bc1(8) -> bc2(8) -> umi(10) -> umi2(10) -> cdna.
+        fn lib_spec() -> LibSpec {
+            LibSpec::new(vec![Region {
+                region_id: "rna".to_string(),
+                region_type: RegionType::Modality(Modality::RNA),
+                name: "RNA".to_string(),
+                sequence_type: SequenceType::Joined,
+                sequence: String::new(),
+                min_len: 0,
+                max_len: 0,
+                onlist: None,
+                subregions: vec![
+                    region("bc1", RegionType::Barcode, 8, 8),
+                    region("bc2", RegionType::Barcode, 8, 8),
+                    region("umi", RegionType::Umi, 10, 10),
+                    region("umi2", RegionType::Umi, 10, 10),
+                    region("cdna", RegionType::Cdna, 100, 1000),
+                ],
+            }])
+            .unwrap()
+        }
+
+        fn fastq_file(name: &str) -> File {
+            File {
+                file_id: name.to_string(),
+                filename: name.to_string(),
+                filetype: "fastq".to_string(),
+                filesize: 0,
+                url: name.to_string(),
+                urltype: UrlType::Local,
+                md5: String::new(),
+            }
+        }
+
+        fn read(id: &str, modality: Modality, with_fastq: bool) -> Read {
+            Read {
+                read_id: id.to_string(),
+                modality,
+                files: with_fastq.then(|| vec![fastq_file(&format!("{id}.fastq.gz"))]),
+                ..Default::default()
+            }
+        }
+
+        fn validate(pattern: &str, read_id: Option<&str>, reads: &[Read]) -> Result<Vec<String>> {
+            let pattern = Regex::new(pattern).unwrap();
+            let lib_spec = lib_spec();
+            let reads: Vec<&Read> = reads.iter().collect();
+            let mut warnings = Vec::new();
+            ReadNameBarcodeConfig::validate_parts(
+                &pattern,
+                read_id,
+                &lib_spec,
+                &reads,
+                "test_assay",
+                &Modality::RNA,
+                &mut warnings,
+            )?;
+            Ok(warnings)
+        }
+
+        #[test]
+        fn valid_config_passes_silently() {
+            let warnings = validate(
+                ":(?P<bc1>[ACGTN]{8})_(?P<bc2>[ACGTN]{8})_(?P<umi>[ACGTN]{10})$",
+                None,
+                &[read("R1", Modality::RNA, true)],
+            )
+            .unwrap();
+            assert!(warnings.is_empty());
+        }
+
+        /// Group names must resolve to barcode/umi regions of the modality.
+        #[test]
+        fn invalid_group_mapping_fails() {
+            let unknown = validate(
+                "(?P<bcx>[ACGTN]{8})",
+                None,
+                &[read("R1", Modality::RNA, true)],
+            )
+            .unwrap_err();
+            assert!(unknown.to_string().contains("does not match any region"));
+
+            let non_barcode = validate(
+                "(?P<cdna>[ACGTN]{8})",
+                None,
+                &[read("R1", Modality::RNA, true)],
+            )
+            .unwrap_err();
+            assert!(non_barcode
+                .to_string()
+                .contains("must map to barcode or umi regions"));
+        }
+
+        /// All barcode regions must be covered, and at most one umi group is
+        /// allowed.
+        #[test]
+        fn structural_rule_violations_fail() {
+            let uncovered = validate(
+                "(?P<bc1>[ACGTN]{8})",
+                None,
+                &[read("R1", Modality::RNA, true)],
+            )
+            .unwrap_err();
+            let message = uncovered.to_string();
+            assert!(message.contains("do not cover all barcode regions"));
+            assert!(message.contains("bc2"));
+
+            let two_umis = validate(
+                "(?P<bc1>[ACGTN]{8})_(?P<bc2>[ACGTN]{8})_(?P<umi>[ACGTN]{10})_(?P<umi2>[ACGTN]{10})",
+                None,
+                &[read("R1", Modality::RNA, true)],
+            )
+            .unwrap_err();
+            assert!(two_umis.to_string().contains("2 umi capture groups"));
+        }
+
+        /// A given read_id must exist, belong to the modality, and carry fastq
+        /// files. An omitted read_id with multiple fastq reads warns.
+        #[test]
+        fn read_id_rules() {
+            let not_found = validate(
+                ":(?P<bc1>[ACGTN]{8})_(?P<bc2>[ACGTN]{8})$",
+                Some("R9"),
+                &[read("R1", Modality::RNA, true)],
+            )
+            .unwrap_err();
+            assert!(not_found.to_string().contains("read_id 'R9' not found"));
+
+            let other_modality = validate(
+                ":(?P<bc1>[ACGTN]{8})_(?P<bc2>[ACGTN]{8})$",
+                Some("R_atac"),
+                &[
+                    read("R1", Modality::RNA, true),
+                    read("R_atac", Modality::ATAC, true),
+                ],
+            )
+            .unwrap_err();
+            assert!(other_modality.to_string().contains("belongs to modality"));
+
+            let no_fastq = validate(
+                ":(?P<bc1>[ACGTN]{8})_(?P<bc2>[ACGTN]{8})$",
+                Some("R_nofq"),
+                &[
+                    read("R1", Modality::RNA, true),
+                    read("R_nofq", Modality::RNA, false),
+                ],
+            )
+            .unwrap_err();
+            assert!(no_fastq.to_string().contains("has no fastq files"));
+
+            let warnings = validate(
+                ":(?P<bc1>[ACGTN]{8})_(?P<bc2>[ACGTN]{8})$",
+                None,
+                &[
+                    read("R1", Modality::RNA, true),
+                    read("R2", Modality::RNA, true),
+                ],
+            )
+            .unwrap();
+            assert_eq!(warnings.len(), 1);
+            assert!(warnings[0].contains("read_id omitted"));
+        }
+    }
 
     fn write_fastq(path: &Path, name: &str, sequence: &[u8]) {
         write_fastq_records(path, &[(name, sequence)]);
