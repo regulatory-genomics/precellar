@@ -6,7 +6,7 @@ use crate::sinks::{
 use anyhow::{bail, Result};
 use indicatif::{ProgressBar, ProgressFinish, ProgressStyle};
 use precellar::align::{Aligner, AlignmentResult, AlignmentRunner};
-use precellar::align::{BarcodeCorrectionConfig, FastqPlan, MultiMapR};
+use precellar::align::{BarcodeCorrectionConfig, FastqPlan, MultiMapR, ReadNameBarcodeConfig};
 use precellar::qc::Metric;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
@@ -71,6 +71,7 @@ pub struct FastqPipeline {
     modality: Modality,
     sequencing_type: Option<AssayType>,
     barcode_config: BarcodeCorrectionConfig,
+    read_name_barcode: Option<ReadNameBarcodeConfig>,
     middleware: Option<Py<PyAny>>,
 }
 
@@ -136,6 +137,7 @@ impl FastqPipeline {
                 confidence_threshold: 0.9,
                 max_mismatch: 1,
             },
+            read_name_barcode: None,
             middleware: None,
         })
     }
@@ -218,6 +220,78 @@ impl FastqPipeline {
         sequencing_type: &str,
     ) -> Result<PyRefMut<'py, Self>> {
         slf.sequencing_type = Some(parse_sequencing_type(sequencing_type)?);
+        Ok(slf)
+    }
+
+    /// Configure barcode/UMI extraction from FASTQ read names.
+    ///
+    /// Use this for already-demultiplexed FASTQs whose barcode and UMI are
+    /// embedded in the read name (for example LR-splitpipe output) instead of
+    /// the sequence. The pattern is matched against the read name (not the
+    /// description); its named capture groups map to ``region_id``\ s of the
+    /// assay's library spec, and the combined cell barcode is concatenated in
+    /// library-spec order, not in the order the fields appear in the name.
+    ///
+    /// The configuration is validated immediately against every assay in the
+    /// pipeline, so an invalid pattern or mapping fails here rather than
+    /// during the alignment run.
+    ///
+    /// Parameters
+    /// ----------
+    /// pattern : str
+    ///     Regular expression applied to each read name. Named capture groups
+    ///     must map to barcode or umi regions of the modality, all barcode
+    ///     regions of the modality must be covered, and at most one umi group
+    ///     is allowed. Anchor the payload with ``$`` so unrelated trailing
+    ///     fields cannot match.
+    /// read_id : str, optional
+    ///     The sequence-spec read that carries the barcode in its name. Must
+    ///     belong to the pipeline modality and carry FASTQ files. Omit it when
+    ///     the modality has exactly one read with FASTQ input. When omitted
+    ///     for a multi-read assay, every read parses its name and the parsed
+    ///     barcodes are concatenated once per read; a warning is emitted.
+    ///
+    /// Returns
+    /// -------
+    /// FastqPipeline
+    ///     The same pipeline object, allowing method chaining.
+    ///
+    /// Raises
+    /// ------
+    /// ValueError
+    ///     If the pattern does not compile or a named capture group violates
+    ///     the mapping rules.
+    ///
+    /// Anti-Patterns
+    /// -------------
+    /// - Do not use this for FASTQs whose barcode is part of the sequence.
+    ///   Describe those segments in the seqspec layout instead.
+    /// - Do not attach reads whose sequence is not the target (for example an
+    ///   index read). Every attached read's sequence is treated as target.
+    ///
+    /// Examples
+    /// --------
+    ///     import precellar
+    ///
+    ///     assay = precellar.Assay("assay.yaml")
+    ///     assay.update_read("R1", fastq="R1.fastq.gz")
+    ///     pipeline = (
+    ///         precellar.FastqPipeline(assay, modality="rna")
+    ///         .with_sequencing_type("long-read")
+    ///         .with_read_name_barcode(
+    ///             r":(?P<bc1>[ACGTN]{8})_(?P<bc2>[ACGTN]{8})_(?P<bc3>[ACGTN]{8})_(?P<umi>[ACGTN]{10})$",
+    ///             read_id="R1",
+    ///         )
+    ///     )
+    #[pyo3(signature = (pattern, *, read_id=None))]
+    pub fn with_read_name_barcode<'py>(
+        mut slf: PyRefMut<'py, Self>,
+        pattern: &str,
+        read_id: Option<&str>,
+    ) -> Result<PyRefMut<'py, Self>> {
+        let (config, _warnings) =
+            ReadNameBarcodeConfig::new(pattern, read_id, &slf.assays, &slf.modality)?;
+        slf.read_name_barcode = Some(config);
         Ok(slf)
     }
 
