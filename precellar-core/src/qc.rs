@@ -1,4 +1,4 @@
-use crate::align::{AnnotatedFastq, MultiMap};
+use crate::align::{AnnotatedFastq, MultiMap, ReadNameStats};
 use crate::fragment::Fragment;
 use crate::transcriptome::TxAlignment;
 
@@ -20,6 +20,30 @@ pub struct QcFastq {
     pub(crate) num_defect: HashMap<String, u64>, // Number of reads with defects, e.g., misformed structure.
     pub(crate) num_q30_bases: HashMap<String, u64>,
     pub(crate) num_total_bases: HashMap<String, u64>,
+    /// Read-name mode: physical records whose name matched the pattern, by read id.
+    pub(crate) num_readname_parsed: HashMap<String, u64>,
+    /// Read-name mode: per-region exact whitelist hits, by region id. Regions without an onlist are absent.
+    pub(crate) num_readname_in_whitelist: HashMap<String, u64>,
+}
+
+impl QcFastq {
+    /// Records one read-name extraction outcome.
+    pub fn record_read_name_stats(&mut self, read_id: &str, stats: &ReadNameStats) {
+        if stats.parsed {
+            *self
+                .num_readname_parsed
+                .entry(read_id.to_string())
+                .or_insert(0) += 1;
+        }
+        for (region_id, hit) in &stats.region_hits {
+            if *hit {
+                *self
+                    .num_readname_in_whitelist
+                    .entry(region_id.clone())
+                    .or_insert(0) += 1;
+            }
+        }
+    }
 }
 
 impl QcFastq {
@@ -85,6 +109,12 @@ impl Extend<Self> for QcFastq {
             }
             for (k, v) in qc.num_total_bases {
                 *self.num_total_bases.entry(k).or_insert(0) += v;
+            }
+            for (k, v) in qc.num_readname_parsed {
+                *self.num_readname_parsed.entry(k).or_insert(0) += v;
+            }
+            for (k, v) in qc.num_readname_in_whitelist {
+                *self.num_readname_in_whitelist.entry(k).or_insert(0) += v;
             }
         }
     }

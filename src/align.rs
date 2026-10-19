@@ -230,7 +230,7 @@ impl FastqPipeline {
     /// the sequence. The pattern is matched against the read name (not the
     /// description); its named capture groups map to ``region_id``\ s of the
     /// assay's library spec, and the combined cell barcode is concatenated in
-    /// library-spec order, not in the order the fields appear in the name.
+    /// the pattern's capture-group order.
     ///
     /// The configuration is validated immediately against every assay in the
     /// pipeline, so an invalid pattern or mapping fails here rather than
@@ -432,6 +432,7 @@ impl FastqPipeline {
                 modality: slf.modality,
                 sequencing_type: slf.sequencing_type,
                 barcode_config: slf.barcode_config.clone(),
+                read_name_barcode: slf.read_name_barcode.clone(),
                 middleware: slf
                     .middleware
                     .as_ref()
@@ -468,6 +469,7 @@ struct AlignmentJobState {
     modality: Modality,
     sequencing_type: Option<AssayType>,
     barcode_config: BarcodeCorrectionConfig,
+    read_name_barcode: Option<ReadNameBarcodeConfig>,
     middleware: Option<Py<PyAny>>,
     aligner: Py<PyAny>,
     num_threads: u16,
@@ -566,6 +568,9 @@ impl AlignmentJobState {
             FastqPlan::new(self.assays, self.modality).with_barcode_config(self.barcode_config);
         if let Some(sequencing_type) = self.sequencing_type {
             plan = plan.with_sequencing_type(sequencing_type);
+        }
+        if let Some(read_name_barcode) = self.read_name_barcode {
+            plan = plan.with_read_name_barcode(read_name_barcode);
         }
         if let Some(middleware) = self.middleware {
             let middleware = middleware
