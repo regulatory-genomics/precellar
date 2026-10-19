@@ -2334,6 +2334,43 @@ mod tests {
         assert_eq!(report.fastq.num_readname_in_whitelist["bc1"], 1);
         // bc2 declares no onlist and is absent from the whitelist stats.
         assert!(!report.fastq.num_readname_in_whitelist.contains_key("bc2"));
+        let json = report.fastq.to_json();
+        assert_eq!(
+            json["frac_readname_parsed"]["R1"],
+            serde_json::json!(2.0 / 3.0)
+        );
+        assert_eq!(
+            json["frac_readname_in_whitelist"]["bc1"],
+            serde_json::json!(0.5)
+        );
+        assert!(json["frac_readname_in_whitelist"].get("bc2").is_none());
+    }
+
+    /// A pattern that matches nothing must still surface a 0.0 parse ratio —
+    /// the misconfiguration signal must not vanish from the QC report.
+    #[test]
+    fn test_read_name_unparsed_ratio_is_visible() {
+        let directory = tempfile::tempdir().unwrap();
+        let target: Vec<u8> = vec![b'C'; 600];
+        let records = [("read1:AAAAAAAA_GGGGGGGG_ACGTACGTAC", &target[..])];
+        let assay = read_name_assay(directory.path(), &records);
+        // The trailing literal `_ZZ` never occurs, so no name matches.
+        let (config, _) = ReadNameBarcodeConfig::new(
+            ":(?P<bc1>[ACGTN]{8})_(?P<bc2>[ACGTN]{8})_(?P<umi>[ACGTN]{10})_ZZ$",
+            Some("R1"),
+            std::slice::from_ref(&assay),
+            &Modality::RNA,
+        )
+        .unwrap();
+        let mut execution = FastqPlan::new(vec![assay], Modality::RNA)
+            .with_read_name_barcode(config)
+            .build(false, 5000)
+            .unwrap();
+        assert!(execution.next_batch().unwrap().is_none());
+        let json = execution.finish().unwrap().fastq.to_json();
+        assert_eq!(json["frac_readname_parsed"]["R1"], serde_json::json!(0.0));
+        // No record was parsed, so whitelist ratios cannot exist.
+        assert!(json.get("frac_readname_in_whitelist").is_none());
     }
 
     /// Paired-end read-name assays: with `read_id`, exactly one read parses
