@@ -11,6 +11,6 @@ pub use aligners::{
 pub use fastq::{
     extend_fastq_record, AlignmentBatch, AlignmentInput, AlignmentResult, AlignmentRunner,
     AnnotatedFastq, Barcode, BarcodeCorrectionConfig, FastqExecution, FastqPlan, FastqReport,
-    ReadMetadata, ReadNameBarcodeConfig, RunReport,
+    ReadMetadata, ReadNameBarcodeConfig, ReadNameStats, RunReport,
 };
 pub use snv::{SNVs, SNV};
