@@ -547,10 +547,18 @@ impl FastqReader {
             record.quality_scores_mut().truncate(self.max_len as usize);
             record.sequence_mut().truncate(self.max_len as usize);
         }
-        if n != 0 && n < self.min_len as usize {
-            bail!("Record is too short: {} < {}", n, self.min_len);
+        if n != 0 && record.sequence().len() < self.min_len as usize {
+            bail!(
+                "Record sequence is too short: {} < {}",
+                record.sequence().len(),
+                self.min_len
+            );
         }
         Ok(n)
+    }
+
+    fn read_record_unchecked(&mut self, record: &mut fastq::Record) -> Result<usize> {
+        Ok(self.reader.read_record(record)?)
     }
 
     pub fn records(&mut self) -> FastqRecords<'_> {
@@ -633,20 +641,26 @@ impl Read {
     }
 
     /// Get the actual length of the read by reading the first N record from the fastq file.
-    pub fn infer_length(&self, n: usize) -> std::ops::Range<usize> {
-        let mut reader = self.open().expect("No fastq files found.");
-        let mut min_len = std::usize::MAX;
+    pub fn infer_length(&self, n: usize) -> Result<std::ops::Range<usize>> {
+        let mut reader = self
+            .open()
+            .ok_or_else(|| anyhow::anyhow!("No fastq files found."))?;
+        let mut record = fastq::Record::default();
+        let mut min_len = usize::MAX;
         let mut max_len = 0;
-        reader.records().take(n).for_each(|r| {
-            let len = r.unwrap().sequence().len();
-            if len < min_len {
-                min_len = len;
+        for _ in 0..n {
+            if reader.read_record_unchecked(&mut record)? == 0 {
+                break;
             }
-            if len > max_len {
-                max_len = len;
-            }
-        });
-        min_len..max_len
+            let len = record.sequence().len();
+            min_len = min_len.min(len);
+            max_len = max_len.max(len);
+        }
+        anyhow::ensure!(
+            min_len != usize::MAX,
+            "No reads found while inferring read length"
+        );
+        Ok(min_len..max_len)
     }
 
     /// Check if the read is reverse.
@@ -791,6 +805,25 @@ mod tests {
         assert!(file.url.ends_with("reads.seqarc#R1"));
         assert!(file.is_seqarc());
         assert!(File::from_seqarc(&path, "R3", false).is_err());
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn infer_length_ignores_stale_length_constraints() {
+        let path = std::env::temp_dir().join(format!(
+            "precellar-infer-length-{}-reads.fastq",
+            std::process::id()
+        ));
+        std::fs::write(&path, b"@read\nACGT\n+\nIIII\n").unwrap();
+        let file = File::from_fastq(&path, false).unwrap();
+        let read = Read {
+            read_id: "R1".into(),
+            files: Some(vec![file]),
+            min_len: 150,
+            max_len: 150,
+            ..Default::default()
+        };
+        assert_eq!(read.infer_length(10).unwrap(), 4..4);
         let _ = std::fs::remove_file(path);
     }
 }

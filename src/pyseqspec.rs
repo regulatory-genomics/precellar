@@ -447,7 +447,7 @@ impl Assay {
                     reader.validate_stream(&stream)?;
                 }
                 if (stream_min_len.is_none() || stream_max_len.is_none()) && infer_read_length {
-                    let range = read.infer_length(infer_read_length_sample);
+                    let range = read.infer_length(infer_read_length_sample)?;
                     read.min_len = stream_min_len.unwrap_or(range.start) as u32;
                     read.max_len = stream_max_len.unwrap_or(range.end) as u32;
                 }

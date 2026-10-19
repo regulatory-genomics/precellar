@@ -393,7 +393,7 @@ impl Assay {
 
         // Setting min_len and max_len
         if (min_len.is_none() || max_len.is_none()) && infer_read_length {
-            let len = read_buffer.infer_length(infer_read_length_sample);
+            let len = read_buffer.infer_length(infer_read_length_sample)?;
             let len_str = if len.start == len.end {
                 format!("{}", len.start)
             } else {
