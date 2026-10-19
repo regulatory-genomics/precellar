@@ -28,19 +28,24 @@ pub struct QcFastq {
 
 impl QcFastq {
     /// Records one read-name extraction outcome.
+    ///
+    /// Entries are created even on a miss so that a pattern matching nothing
+    /// stays visible as a 0.0 ratio instead of disappearing from the report.
     pub fn record_read_name_stats(&mut self, read_id: &str, stats: &ReadNameStats) {
+        let parsed = self
+            .num_readname_parsed
+            .entry(read_id.to_string())
+            .or_insert(0);
         if stats.parsed {
-            *self
-                .num_readname_parsed
-                .entry(read_id.to_string())
-                .or_insert(0) += 1;
+            *parsed += 1;
         }
         for (region_id, hit) in &stats.region_hits {
+            let hits = self
+                .num_readname_in_whitelist
+                .entry(region_id.clone())
+                .or_insert(0);
             if *hit {
-                *self
-                    .num_readname_in_whitelist
-                    .entry(region_id.clone())
-                    .or_insert(0) += 1;
+                *hits += 1;
             }
         }
     }
@@ -148,6 +153,29 @@ impl Metric for QcFastq {
                 .collect::<serde_json::Map<String, Value>>()
                 .into(),
         );
+        // Read-name extraction ratios; both keys are absent when read-name
+        // mode is inactive.
+        if !self.num_readname_parsed.is_empty() {
+            map.insert(
+                "frac_readname_parsed".to_string(),
+                self.num_readname_parsed
+                    .iter()
+                    .map(|(k, v)| (k.clone(), (*v as f64 / self.num_reads[k] as f64).into()))
+                    .collect::<serde_json::Map<String, Value>>()
+                    .into(),
+            );
+        }
+        if !self.num_readname_in_whitelist.is_empty() {
+            let total_parsed: u64 = self.num_readname_parsed.values().sum();
+            map.insert(
+                "frac_readname_in_whitelist".to_string(),
+                self.num_readname_in_whitelist
+                    .iter()
+                    .map(|(k, v)| (k.clone(), (*v as f64 / total_parsed as f64).into()))
+                    .collect::<serde_json::Map<String, Value>>()
+                    .into(),
+            );
+        }
         map.into()
     }
 }
@@ -708,5 +736,38 @@ mod tests {
         assert_eq!(report["sequenced_reads"], json!(2));
         assert_eq!(report["sequenced_read_pairs"], json!(1));
         assert_eq!(report["frac_properly_paired"], json!(1.0));
+    }
+
+    /// Read-name ratios: absent when read-name mode is inactive, 0.0 on a
+    /// full miss, and per-region whitelist ratios against the parsed total.
+    #[test]
+    fn test_read_name_stats_json() {
+        use crate::align::ReadNameStats;
+
+        // Inactive read-name mode: both keys are absent.
+        let mut qc = QcFastq::default();
+        qc.num_reads.entry("R1".to_string()).or_insert(2);
+        let report = qc.to_json();
+        assert!(report.get("frac_readname_parsed").is_none());
+        assert!(report.get("frac_readname_in_whitelist").is_none());
+
+        // A miss still creates the entry: a fully failing pattern shows 0.0.
+        qc.record_read_name_stats("R1", &ReadNameStats::default());
+        let report = qc.to_json();
+        assert_eq!(report["frac_readname_parsed"]["R1"], json!(0.0));
+        assert!(report.get("frac_readname_in_whitelist").is_none());
+
+        // Hits and misses per region; the denominator is the parsed total.
+        qc.record_read_name_stats(
+            "R1",
+            &ReadNameStats {
+                parsed: true,
+                region_hits: vec![("bc1".to_string(), true), ("bc2".to_string(), false)],
+            },
+        );
+        let report = qc.to_json();
+        assert_eq!(report["frac_readname_parsed"]["R1"], json!(0.5));
+        assert_eq!(report["frac_readname_in_whitelist"]["bc1"], json!(1.0));
+        assert_eq!(report["frac_readname_in_whitelist"]["bc2"], json!(0.0));
     }
 }
