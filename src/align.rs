@@ -5,6 +5,7 @@ use crate::sinks::{
 };
 use anyhow::{bail, Result};
 use indicatif::{ProgressBar, ProgressFinish, ProgressStyle};
+use log::warn;
 use precellar::align::{Aligner, AlignmentResult, AlignmentRunner};
 use precellar::align::{BarcodeCorrectionConfig, FastqPlan, MultiMapR, ReadNameBarcodeConfig};
 use precellar::qc::Metric;
@@ -289,8 +290,11 @@ impl FastqPipeline {
         pattern: &str,
         read_id: Option<&str>,
     ) -> Result<PyRefMut<'py, Self>> {
-        let (config, _warnings) =
+        let (config, warnings) =
             ReadNameBarcodeConfig::new(pattern, read_id, &slf.assays, &slf.modality)?;
+        for warning in &warnings {
+            warn!("{warning}");
+        }
         slf.read_name_barcode = Some(config);
         Ok(slf)
     }
