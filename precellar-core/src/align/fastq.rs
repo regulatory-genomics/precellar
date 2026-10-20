@@ -90,10 +90,17 @@ impl Default for BarcodeCorrectionConfig {
 pub struct ReadNameBarcodeConfig {
     pattern: Regex,
     read_id: Option<String>,
+    /// Explicit concatenation order for the barcode fields (region ids);
+    /// `None` = the pattern's capture-group order.
+    barcode_order: Option<Vec<String>>,
 }
 
 impl ReadNameBarcodeConfig {
     /// Compile `pattern` and validate it against every supplied assay.
+    ///
+    /// `barcode_order` optionally names the barcode capture groups in the
+    /// desired concatenation order; it must be a duplicate-free permutation
+    /// of the pattern's barcode groups. UMI groups are rejected.
     ///
     /// Non-fatal problems (currently: an omitted `read_id` for a modality
     /// with multiple FASTQ reads) are returned as warnings. The caller is
@@ -101,6 +108,7 @@ impl ReadNameBarcodeConfig {
     pub fn new(
         pattern: &str,
         read_id: Option<&str>,
+        barcode_order: Option<&[String]>,
         assays: &[Assay],
         modality: &Modality,
     ) -> Result<(Self, Vec<String>)> {
@@ -109,6 +117,7 @@ impl ReadNameBarcodeConfig {
         let config = Self {
             pattern,
             read_id: read_id.map(str::to_owned),
+            barcode_order: barcode_order.map(|order| order.to_vec()),
         };
         let mut warnings = Vec::new();
         for assay in assays {
@@ -127,6 +136,7 @@ impl ReadNameBarcodeConfig {
         Self::validate_parts(
             &self.pattern,
             self.read_id.as_deref(),
+            self.barcode_order.as_deref(),
             &assay.library_spec,
             &reads,
             &assay.assay_id,
@@ -146,9 +156,12 @@ impl ReadNameBarcodeConfig {
     /// 4. A given `read_id` exists, belongs to the modality, and carries FASTQ
     ///    files; an omitted `read_id` with multiple FASTQ reads produces a
     ///    warning.
+    /// 5. A given `barcode_order` is a duplicate-free permutation of the
+    ///    pattern's barcode groups; umi groups are rejected.
     fn validate_parts(
         pattern: &Regex,
         read_id: Option<&str>,
+        barcode_order: Option<&[String]>,
         lib_spec: &LibSpec,
         reads: &[&Read],
         assay_id: &str,
@@ -178,7 +191,7 @@ impl ReadNameBarcodeConfig {
             .flatten()
             .map(str::to_owned)
             .collect();
-        let mut num_barcode_groups = 0usize;
+        let mut barcode_groups: Vec<String> = Vec::new();
         let mut num_umi_groups = 0usize;
         for name in &group_names {
             let region = find_field_region(subregions, name, assay_id, modality)?;
@@ -193,15 +206,14 @@ impl ReadNameBarcodeConfig {
                 assay_id
             );
             if region.region_type.is_barcode() {
-                num_barcode_groups += 1;
+                barcode_groups.push(name.clone());
             } else {
                 num_umi_groups += 1;
             }
         }
-        drop(modality_guard);
 
         anyhow::ensure!(
-            num_barcode_groups >= 1,
+            !barcode_groups.is_empty(),
             "read-name pattern for assay '{}' must contain at least one barcode capture group",
             assay_id
         );
@@ -224,6 +236,50 @@ impl ReadNameBarcodeConfig {
             modality,
             missing.join(", ")
         );
+
+        if let Some(order) = barcode_order {
+            // Entries must be duplicate-free.
+            let mut seen = std::collections::HashSet::new();
+            for name in order {
+                anyhow::ensure!(
+                    seen.insert(name),
+                    "barcode_order contains duplicate entry '{}' in assay '{}'",
+                    name,
+                    assay_id
+                );
+            }
+            // Every entry must be a pattern group naming a barcode region.
+            for name in order {
+                anyhow::ensure!(
+                    group_names.contains(name),
+                    "barcode_order entry '{}' is not a named capture group of the pattern in assay '{}'",
+                    name,
+                    assay_id
+                );
+                let region = find_field_region(subregions, name, assay_id, modality)?;
+                let region = region.read().unwrap();
+                anyhow::ensure!(
+                    region.region_type.is_barcode(),
+                    "barcode_order entry '{}' maps to region '{}' of type {} in assay '{}'; \
+                     only barcode regions participate in concatenation",
+                    name,
+                    region.region_id,
+                    region.region_type,
+                    assay_id
+                );
+            }
+            // The entries must cover every barcode group of the pattern.
+            let missing: Vec<&String> = barcode_groups
+                .iter()
+                .filter(|group| !order.contains(group))
+                .collect();
+            anyhow::ensure!(
+                missing.is_empty(),
+                "barcode_order for assay '{}' does not cover the pattern's barcode groups: missing [{}]",
+                assay_id,
+                missing.iter().join(", ")
+            );
+        }
 
         if let Some(read_id) = read_id {
             let read = reads
@@ -1169,8 +1225,9 @@ impl BarcodeProcessor {
 /// One resolved named-capture group of a read-name pattern.
 ///
 /// `region_id` is both the capture-group name and the library-spec region the
-/// group maps to. Fields are stored in the pattern's capture-group order,
-/// which is the order the combined cell barcode is concatenated in.
+/// group maps to. Fields are stored in concatenation order: barcode fields
+/// follow the configured `barcode_order` (default: the pattern's
+/// capture-group order); the umi field is appended last.
 #[derive(Debug)]
 struct FieldRegion {
     region_id: String,
@@ -1214,7 +1271,9 @@ pub enum BarcodeStats {
 
 impl ReadNameParser {
     /// Resolves the config's named capture groups against one assay's library
-    /// spec. Field regions are stored in the pattern's capture-group order.
+    /// spec. Field regions are stored in concatenation order: barcode fields
+    /// follow the configured `barcode_order` (default: the pattern's
+    /// capture-group order); the umi field is appended last.
     fn new(config: &ReadNameBarcodeConfig, assay: &Assay, modality: &Modality) -> Result<Self> {
         let modality_region = assay.library_spec.get_modality(modality).ok_or_else(|| {
             anyhow::anyhow!(
@@ -1225,7 +1284,7 @@ impl ReadNameParser {
         })?;
         let modality_guard = modality_region.read().unwrap();
 
-        let mut field_regions = Vec::new();
+        let mut resolved: Vec<FieldRegion> = Vec::new();
         for name in config.pattern.capture_names().flatten() {
             let region =
                 find_field_region(&modality_guard.subregions, name, &assay.assay_id, modality)?;
@@ -1239,13 +1298,37 @@ impl ReadNameParser {
                 })?),
                 None => None,
             };
-            field_regions.push(FieldRegion {
+            resolved.push(FieldRegion {
                 is_umi: region.region_type.is_umi(),
                 region_id: region.region_id.clone(),
                 whitelist,
             });
         }
         drop(modality_guard);
+
+        // Barcode fields follow `barcode_order` when given; the remaining
+        // groups (at most one umi, guaranteed by validation) keep pattern
+        // order after them.
+        let field_regions = match &config.barcode_order {
+            None => resolved,
+            Some(order) => {
+                let mut by_name: HashMap<String, FieldRegion> = resolved
+                    .into_iter()
+                    .map(|field| (field.region_id.clone(), field))
+                    .collect();
+                let mut ordered = Vec::with_capacity(by_name.len());
+                for name in order {
+                    ordered.push(by_name.remove(name).ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "barcode_order entry '{}' does not match any capture group of assay '{}'",
+                            name, assay.assay_id
+                        )
+                    })?);
+                }
+                ordered.extend(by_name.into_values());
+                ordered
+            }
+        };
 
         Ok(Self {
             config: config.clone(),
@@ -2135,6 +2218,7 @@ mod tests {
             ReadNameBarcodeConfig::validate_parts(
                 &pattern,
                 read_id,
+                None,
                 &lib_spec,
                 &reads,
                 "test_assay",
@@ -2496,6 +2580,7 @@ mod tests {
         let (config, warnings) = ReadNameBarcodeConfig::new(
             ":(?P<umi>[ACGTN]{10})_(?P<bc2>[ACGTN]{8})_(?P<bc1>[ACGTN]{8})$",
             Some("R1"),
+            None,
             std::slice::from_ref(&assay),
             &Modality::RNA,
         )
@@ -2548,6 +2633,7 @@ mod tests {
         let (config, _) = ReadNameBarcodeConfig::new(
             ":(?P<bc1>[ACGTN]{8})_(?P<bc2>[ACGTN]{8})_(?P<umi>[ACGTN]{10})$",
             Some("R1"),
+            None,
             std::slice::from_ref(&assay),
             &Modality::RNA,
         )
@@ -2590,6 +2676,7 @@ mod tests {
         let (config, _) = ReadNameBarcodeConfig::new(
             ":(?P<bc1>[ACGTN]{8})_(?P<bc2>[ACGTN]{8})_(?P<umi>[ACGTN]{10})_ZZ$",
             Some("R1"),
+            None,
             std::slice::from_ref(&assay),
             &Modality::RNA,
         )
@@ -2685,6 +2772,7 @@ mod tests {
         let (config, _) = ReadNameBarcodeConfig::new(
             ":(?P<bc1>[ACGTN]{8})_(?P<bc2>[ACGTN]{8})_(?P<umi>[ACGTN]{10})$",
             Some("R1"),
+            None,
             std::slice::from_ref(&assay),
             &Modality::RNA,
         )
@@ -2709,6 +2797,7 @@ mod tests {
         let (config, _) = ReadNameBarcodeConfig::new(
             ":(?P<bc1>[ACGTN]{8})_(?P<bc2>[ACGTN]{8})_(?P<umi>[ACGTN]{10})_ZZ$",
             Some("R1"),
+            None,
             std::slice::from_ref(&assay),
             &Modality::RNA,
         )
@@ -2722,6 +2811,82 @@ mod tests {
                 .any(|warning| warning.contains("parse ratio")),
             "{warnings:?}"
         );
+    }
+
+    /// `barcode_order` overrides the barcode concatenation order; invalid
+    /// lists fail at configuration time.
+    #[test]
+    fn test_read_name_barcode_order() {
+        let directory = tempfile::tempdir().unwrap();
+        let target: Vec<u8> = vec![b'C'; 600];
+        // Name/capture order: umi, bc2, bc1.
+        let records = [("read1:ACGTACGTAC_CCCCCCCC_AAAAAAAA", &target[..])];
+        let pattern = ":(?P<umi>[ACGTN]{10})_(?P<bc2>[ACGTN]{8})_(?P<bc1>[ACGTN]{8})$";
+
+        // Explicit order: bc1 before bc2 (the reverse of capture order).
+        let assay = read_name_assay(directory.path(), &records);
+        let order: Vec<String> = vec!["bc1".into(), "bc2".into()];
+        let (config, warnings) = ReadNameBarcodeConfig::new(
+            pattern,
+            Some("R1"),
+            Some(order.as_slice()),
+            std::slice::from_ref(&assay),
+            &Modality::RNA,
+        )
+        .unwrap();
+        assert!(warnings.is_empty());
+        let mut execution = FastqPlan::new(vec![assay], Modality::RNA)
+            .with_read_name_barcode(config)
+            .build(false, 5000)
+            .unwrap();
+        let batch = execution.next_batch().unwrap().unwrap();
+        assert_eq!(batch.len(), 1);
+        assert_eq!(
+            batch[0].barcode.as_ref().unwrap().raw.sequence(),
+            b"AAAAAAAACCCCCCCC"
+        );
+        assert_eq!(batch[0].umi.as_ref().unwrap().sequence(), b"ACGTACGTAC");
+        assert!(execution.next_batch().unwrap().is_none());
+        execution.finish().unwrap();
+
+        // Invalid lists fail at configuration time.
+        let assay = read_name_assay(directory.path(), &records);
+        let duplicate: Vec<String> = vec!["bc1".into(), "bc1".into()];
+        let error = ReadNameBarcodeConfig::new(
+            pattern,
+            Some("R1"),
+            Some(duplicate.as_slice()),
+            std::slice::from_ref(&assay),
+            &Modality::RNA,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("duplicate entry"));
+
+        let with_umi: Vec<String> = vec!["bc1".into(), "bc2".into(), "umi".into()];
+        let error = ReadNameBarcodeConfig::new(
+            pattern,
+            Some("R1"),
+            Some(with_umi.as_slice()),
+            std::slice::from_ref(&assay),
+            &Modality::RNA,
+        )
+        .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("only barcode regions participate"));
+
+        let missing: Vec<String> = vec!["bc1".into()];
+        let error = ReadNameBarcodeConfig::new(
+            pattern,
+            Some("R1"),
+            Some(missing.as_slice()),
+            std::slice::from_ref(&assay),
+            &Modality::RNA,
+        )
+        .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("does not cover the pattern's barcode groups"));
     }
 
     /// Section 4: the smoke test's short-read content check must honor the
@@ -2818,6 +2983,7 @@ mod tests {
         let (config, warnings) = ReadNameBarcodeConfig::new(
             ":(?P<bc1>[ACGTN]{8})_(?P<bc2>[ACGTN]{8})_(?P<umi>[ACGTN]{10})$",
             Some("R1"),
+            None,
             std::slice::from_ref(&assay),
             &Modality::RNA,
         )
@@ -2846,6 +3012,7 @@ mod tests {
         let assay = make_assay(true);
         let (config, warnings) = ReadNameBarcodeConfig::new(
             ":(?P<bc1>[ACGTN]{8})_(?P<bc2>[ACGTN]{8})_(?P<umi>[ACGTN]{10})$",
+            None,
             None,
             std::slice::from_ref(&assay),
             &Modality::RNA,
