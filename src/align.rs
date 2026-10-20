@@ -231,7 +231,8 @@ impl FastqPipeline {
     /// the sequence. The pattern is matched against the read name (not the
     /// description); its named capture groups map to ``region_id``\ s of the
     /// assay's library spec, and the combined cell barcode is concatenated in
-    /// the pattern's capture-group order.
+    /// the order given by ``barcode_order`` (default: the pattern's
+    /// capture-group order).
     ///
     /// The configuration is validated immediately against every assay in the
     /// pipeline, so an invalid pattern or mapping fails here rather than
@@ -251,6 +252,11 @@ impl FastqPipeline {
     ///     the modality has exactly one read with FASTQ input. When omitted
     ///     for a multi-read assay, every read parses its name and the parsed
     ///     barcodes are concatenated once per read; a warning is emitted.
+    /// barcode_order : list[str], optional
+    ///     Concatenation order of the barcode fields, given as region ids
+    ///     (= named capture groups). Must be a duplicate-free permutation of
+    ///     the pattern's barcode groups; umi groups are rejected. Defaults to
+    ///     the pattern's capture-group order.
     ///
     /// Returns
     /// -------
@@ -282,16 +288,23 @@ impl FastqPipeline {
     ///         .with_read_name_barcode(
     ///             r":(?P<bc1>[ACGTN]{8})_(?P<bc2>[ACGTN]{8})_(?P<bc3>[ACGTN]{8})_(?P<umi>[ACGTN]{10})$",
     ///             read_id="R1",
+    ///             barcode_order=["bc1", "bc2", "bc3"],
     ///         )
     ///     )
-    #[pyo3(signature = (pattern, *, read_id=None))]
+    #[pyo3(signature = (pattern, *, read_id=None, barcode_order=None))]
     pub fn with_read_name_barcode<'py>(
         mut slf: PyRefMut<'py, Self>,
         pattern: &str,
         read_id: Option<&str>,
+        barcode_order: Option<Vec<String>>,
     ) -> Result<PyRefMut<'py, Self>> {
-        let (config, warnings) =
-            ReadNameBarcodeConfig::new(pattern, read_id, &slf.assays, &slf.modality)?;
+        let (config, warnings) = ReadNameBarcodeConfig::new(
+            pattern,
+            read_id,
+            barcode_order.as_deref(),
+            &slf.assays,
+            &slf.modality,
+        )?;
         for warning in &warnings {
             warn!("{warning}");
         }
