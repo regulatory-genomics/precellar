@@ -94,8 +94,8 @@ impl ReadNameBarcodeConfig {
     /// Compile `pattern` and validate it against every supplied assay.
     ///
     /// Non-fatal problems (currently: an omitted `read_id` for a modality
-    /// with multiple FASTQ reads) are emitted through [`log::warn!`] and also
-    /// returned so callers can inspect them.
+    /// with multiple FASTQ reads) are returned as warnings. The caller is
+    /// responsible for logging them.
     pub fn new(
         pattern: &str,
         read_id: Option<&str>,
@@ -111,9 +111,6 @@ impl ReadNameBarcodeConfig {
         let mut warnings = Vec::new();
         for assay in assays {
             config.validate_assay(assay, modality, &mut warnings)?;
-        }
-        for warning in &warnings {
-            warn!("{warning}");
         }
         Ok((config, warnings))
     }
