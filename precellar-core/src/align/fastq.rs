@@ -356,8 +356,9 @@ fn smoke_test_assay(
             let mut onlist_checked = 0u64;
             let mut onlist_hit = 0u64;
 
-            // Region onlists for exact-match content checks.
-            let mut onlists: HashMap<String, IndexSet<Vec<u8>>> = HashMap::new();
+            // Region onlists for exact-match content checks. The bool flag is
+            // the per-region `reverse_complement` setting of the onlist.
+            let mut onlists: HashMap<String, (IndexSet<Vec<u8>>, bool)> = HashMap::new();
             let modality_region = assay.library_spec.get_modality(modality).ok_or_else(|| {
                 anyhow::anyhow!(
                     "assay '{}' does not contain modality {}",
@@ -368,7 +369,7 @@ fn smoke_test_assay(
             for region in &modality_region.read().unwrap().subregions {
                 let region = region.read().unwrap();
                 if let (true, Some(onlist)) = (region.region_type.is_barcode(), &region.onlist) {
-                    onlists.insert(region.region_id.clone(), onlist.read()?);
+                    onlists.insert(region.region_id.clone(), (onlist.read()?, onlist.rc));
                 }
             }
 
@@ -386,11 +387,14 @@ fn smoke_test_assay(
                         if !segment.is_barcode() {
                             continue;
                         }
-                        let Some(onlist) = onlists.get(segment.region_id()) else {
+                        let Some((onlist, rc)) = onlists.get(segment.region_id()) else {
                             continue;
                         };
                         onlist_checked += 1;
-                        let sequence = if annotator.segment_info.is_reverse() {
+                        // Same rule as `annotate_short_read`: the onlist is
+                        // matched in library orientation.
+                        let should_rc = annotator.segment_info.is_reverse() ^ *rc;
+                        let sequence = if should_rc {
                             seqspec::utils::rev_compl(segment.seq)
                         } else {
                             segment.seq.to_vec()
@@ -1833,6 +1837,9 @@ impl FastqAnnotator {
             };
             let sequence = sequence.as_str();
             if let Some(whitelist) = &field.whitelist {
+                // rc is intentionally not applied: name fields are the
+                // demultiplexer's canonical output, already in whitelist
+                // orientation.
                 let hit = whitelist.contains(sequence.as_bytes());
                 region_hits.push((field.region_id.clone(), hit));
             }
@@ -2713,6 +2720,66 @@ mod tests {
             warnings
                 .iter()
                 .any(|warning| warning.contains("parse ratio")),
+            "{warnings:?}"
+        );
+    }
+
+    /// Section 4: the smoke test's short-read content check must honor the
+    /// per-region `reverse_complement` flag, same as `annotate_short_read`.
+    #[test]
+    fn test_smoke_test_short_read_honors_onlist_rc() {
+        let directory = tempfile::tempdir().unwrap();
+        let (mut assay, _, _, _) = short_read_fixture(directory.path());
+
+        // Point both barcode onlists at files with known content: the
+        // fixture's barcodes verbatim (AAAAAAAAAA for hairpin, GGGGGGGGGG for
+        // rt).
+        let hp_list = directory.path().join("hp.txt");
+        let rt_list = directory.path().join("rt.txt");
+        std::fs::write(&hp_list, "AAAAAAAAAA\n").unwrap();
+        std::fs::write(&rt_list, "GGGGGGGGGG\n").unwrap();
+        for (region_id, url) in [
+            ("hairpin_barcode", hp_list.as_path()),
+            ("rt_barcode", rt_list.as_path()),
+        ] {
+            let region = assay.library_spec.get(region_id).unwrap();
+            let mut region = region.write().unwrap();
+            let onlist = region.onlist.as_mut().unwrap();
+            onlist.url = url.to_str().unwrap().to_string();
+            onlist.urltype = UrlType::Local;
+        }
+
+        // Baseline: both segments hit their onlists verbatim, so no content
+        // warning fires.
+        let analyzer = BarcodeAnalyzer::new(&assay, Modality::RNA);
+        let warnings = smoke_test_assay(
+            &assay,
+            &Modality::RNA,
+            &BarcodeProcessor::ShortRead(analyzer),
+        )
+        .unwrap();
+        assert!(
+            !warnings
+                .iter()
+                .any(|warning| warning.contains("onlist hit ratio")),
+            "{warnings:?}"
+        );
+
+        // Flip rt's reverse_complement: the check must RC the segment before
+        // matching, which turns the rt hit into a miss (ratio 0.5 < 0.9).
+        let region = assay.library_spec.get("rt_barcode").unwrap();
+        region.write().unwrap().onlist.as_mut().unwrap().rc = true;
+        let analyzer = BarcodeAnalyzer::new(&assay, Modality::RNA);
+        let warnings = smoke_test_assay(
+            &assay,
+            &Modality::RNA,
+            &BarcodeProcessor::ShortRead(analyzer),
+        )
+        .unwrap();
+        assert!(
+            warnings
+                .iter()
+                .any(|warning| warning.contains("onlist hit ratio")),
             "{warnings:?}"
         );
     }
