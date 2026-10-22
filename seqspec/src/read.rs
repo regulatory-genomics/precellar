@@ -6,6 +6,7 @@ pub use segment::{Segment, SegmentInfo, SegmentInfoElem, SplitError};
 use anyhow::{bail, Result};
 use file_download::download::Downloader;
 use indexmap::IndexMap;
+use log::info;
 use noodles_fastq as fastq;
 use seqarc::{AlignedRecordGroup, DecompressionOptions, SequenceRecordGroup};
 use serde::{Deserialize, Serialize, Serializer};
@@ -157,6 +158,11 @@ pub struct FastqReader {
     reader: Box<dyn RecordSource + Send>,
     min_len: u32,
     max_len: u32,
+    /// Id of the `Read` this reader was opened from, used in diagnostics.
+    read_id: String,
+    /// How to handle a record shorter than `min_len`.
+    discard_short: bool,
+    n_skipped: u64,
 }
 
 trait RecordSource {
@@ -290,6 +296,9 @@ impl SeqArcContext {
             }),
             min_len: 0,
             max_len: 0,
+            read_id: String::new(),
+            discard_short: false,
+            n_skipped: 0,
         })
     }
 }
@@ -538,23 +547,68 @@ impl FastqReader {
             }),
             min_len,
             max_len,
+            read_id: String::new(),
+            discard_short: false,
+            n_skipped: 0,
         }
     }
 
+    pub fn with_read_id(mut self, read_id: impl Into<String>) -> Self {
+        self.read_id = read_id.into();
+        self
+    }
+
+    pub fn with_discard_short(mut self, discard_short: bool) -> Self {
+        self.discard_short = discard_short;
+        self
+    }
+
+    /// Number of records discarded so far because they were shorter than
+    /// `min_len`. Always 0 unless `discard_short` is set.
+    pub fn num_skipped(&self) -> u64 {
+        self.n_skipped
+    }
+
+    /// Reads the next record satisfying the length constraints of the `Read`
+    /// this reader was opened from.
+    ///
+    /// `max_len` truncates the sequence and the quality scores. A record whose
+    /// truncated sequence is shorter than `min_len` is then either discarded or
+    /// reported as an error, depending on `discard_short`.
+    ///
+    /// Returns the number of bytes consumed from the underlying stream for the
+    /// returned record, or 0 at end of input.
     pub fn read_record(&mut self, record: &mut fastq::Record) -> Result<usize> {
-        let n = self.reader.read_record(record)?;
-        if self.max_len > 0 {
-            record.quality_scores_mut().truncate(self.max_len as usize);
-            record.sequence_mut().truncate(self.max_len as usize);
+        loop {
+            let n = self.reader.read_record(record)?;
+            if n == 0 {
+                if self.n_skipped > 0 {
+                    info!(
+                        "Read '{}': discarded {} records shorter than min_len {}bp.",
+                        self.read_id, self.n_skipped, self.min_len
+                    );
+                }
+                return Ok(0);
+            }
+            if self.max_len > 0 {
+                record.quality_scores_mut().truncate(self.max_len as usize);
+                record.sequence_mut().truncate(self.max_len as usize);
+            }
+            if record.sequence().len() >= self.min_len as usize {
+                return Ok(n);
+            }
+            if self.discard_short {
+                self.n_skipped += 1;
+            } else {
+                bail!(
+                    "Read '{}': record '{}' is too short: {}bp < min_len {}bp",
+                    self.read_id,
+                    String::from_utf8_lossy(record.name()),
+                    record.sequence().len(),
+                    self.min_len,
+                );
+            }
         }
-        if n != 0 && record.sequence().len() < self.min_len as usize {
-            bail!(
-                "Record sequence is too short: {} < {}",
-                record.sequence().len(),
-                self.min_len
-            );
-        }
-        Ok(n)
     }
 
     fn read_record_unchecked(&mut self, record: &mut fastq::Record) -> Result<usize> {
@@ -592,6 +646,14 @@ impl Read {
         self.try_open_with_context(&SeqArcContext::default())
     }
 
+    /// Same as [`Read::try_open`], but records shorter than `min_len` are
+    /// discarded instead of reported as an error when `discard` is set.
+    pub fn try_open_discarding_short(&self, discard: bool) -> Result<Option<FastqReader>> {
+        Ok(self
+            .try_open()?
+            .map(|reader| reader.with_discard_short(discard)))
+    }
+
     /// Open this read using a shared SeqArc context.
     pub fn try_open_with_context(&self, context: &SeqArcContext) -> Result<Option<FastqReader>> {
         let files = self
@@ -619,6 +681,7 @@ impl Read {
             let mut reader = context.open_stream(&files, stream)?;
             reader.min_len = self.min_len;
             reader.max_len = self.max_len;
+            reader.read_id = self.read_id.clone();
             return Ok(Some(reader));
         }
         let readers = files
@@ -626,11 +689,14 @@ impl Read {
             .map(|file| file.open())
             .collect::<Result<Vec<_>>>()?;
         let reader = multi_reader::MultiReader::new(readers.into_iter());
-        Ok(Some(FastqReader::new(
-            Box::new(BufReader::new(reader)),
-            self.min_len,
-            self.max_len,
-        )))
+        Ok(Some(
+            FastqReader::new(
+                Box::new(BufReader::new(reader)),
+                self.min_len,
+                self.max_len,
+            )
+            .with_read_id(self.read_id.clone()),
+        ))
     }
 
     /// Open the fastq files for reading, and return a fastq reader.
