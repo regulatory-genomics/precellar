@@ -340,7 +340,7 @@ Each entry in `sequence_spec` describes one sequencing read (one FASTQ file).
 | `name` | optional | Human-readable name. |
 | `modality` | yes | Which modality this read belongs to (`rna`, `atac`, etc.). |
 | `primer_id` | yes | `region_id` of the sequencing primer region in `library_spec` where this read starts. Must be a direct child of the modality region and must have a sequencing primer `region_type`. |
-| `min_len` | yes | Minimum read length in bp. Records shorter than this are discarded. |
+| `min_len` | yes | Minimum read length in bp, compared against the sequence length after `max_len` truncation. Handling depends on the assay type: a short-read assay aborts the run on a shorter record, because uniform read lengths mean the record indicates a wrong layout or wrong data; a long-read assay discards the record and logs the total count at end of input. |
 | `max_len` | yes | Maximum read length in bp. For long reads, use `2147483647` (`i32::MAX`, meaning no upper limit). |
 | `strand` | yes | Orientation of the read relative to the library structure. See below. |
 | `files` | optional | List of FASTQ file entries. Can be left empty and set later via the Python API (`assay.update_read(read_id, fastq=...)`). |

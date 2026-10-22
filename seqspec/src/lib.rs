@@ -603,8 +603,11 @@ impl Assay {
                     .any(|segment| segment.region_type.is_target())
             })
             .ok_or_else(|| anyhow!("No target-bearing Read found for modality: {:?}", modality))?;
+        // The assay type is not known yet, so `min_len` must not reject records
+        // here: that would turn length measurement into a hard error before we
+        // can tell whether short records are expected.
         let mut reader = read
-            .try_open()?
+            .try_open_discarding_short(true)?
             .ok_or_else(|| anyhow!("Failed to open FASTQ file for modality: {:?}", modality))?;
 
         let mut total_length = 0usize;

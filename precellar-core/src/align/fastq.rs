@@ -362,18 +362,21 @@ fn sample_reads(
     assay: &Assay,
     modality: &Modality,
     sample_size: usize,
+    discard_short: bool,
     mut check: impl FnMut(&FastqAnnotator, &fastq::Record),
 ) -> Result<()> {
     for (read, segment_info) in assay.get_segments_by_modality(*modality) {
         let Some(annotator) = FastqAnnotator::new(&read.read_id, segment_info) else {
             continue;
         };
-        let Some(mut reader) = read.try_open().with_context(|| {
-            format!(
-                "failed to open FASTQ input for assay '{}' read '{}'",
-                assay.assay_id, read.read_id
-            )
-        })?
+        let Some(mut reader) = read
+            .try_open_discarding_short(discard_short)
+            .with_context(|| {
+                format!(
+                    "failed to open FASTQ input for assay '{}' read '{}'",
+                    assay.assay_id, read.read_id
+                )
+            })?
         else {
             continue;
         };
@@ -431,6 +434,7 @@ fn smoke_test_assay(
                 assay,
                 modality,
                 SMOKE_TEST_SAMPLE_SIZE,
+                false,
                 |annotator, record| {
                     sampled += 1;
                     let Ok(segments) = annotator.segment_info.split(record) else {
@@ -488,6 +492,7 @@ fn smoke_test_assay(
                 assay,
                 modality,
                 SMOKE_TEST_SAMPLE_SIZE,
+                true,
                 |_annotator, record| {
                     sampled += 1;
                     if let Ok((result, _)) = extractor.extract_barcode(record) {
@@ -518,6 +523,7 @@ fn smoke_test_assay(
                 assay,
                 modality,
                 SMOKE_TEST_SAMPLE_SIZE,
+                true,
                 |annotator, record| {
                     if !parser.applies_to(&annotator.read_id) {
                         return;
@@ -748,12 +754,17 @@ impl FastqPlan {
                 .map(|read| read.read_id.as_str())
                 .collect();
 
+            // Short-read lengths are uniform, so a record below `min_len` means
+            // the spec or the data is wrong and the run must stop. Long-read
+            // data legitimately contains very short reads; discard those.
+            let discard_short = assay_type == AssayType::LongRead;
+
             let inputs: Vec<(FastqAnnotator, FastqReader)> = assay
                 .get_segments_by_modality(self.modality)
                 .filter_map(|(read, segment_info)| {
                     FastqAnnotator::new(&read.read_id, segment_info).map(|annotator| {
                         let reader = read
-                            .try_open()
+                            .try_open_discarding_short(discard_short)
                             .with_context(|| {
                                 format!(
                                     "failed to open FASTQ input for assay '{}' read '{}'",
@@ -1625,7 +1636,7 @@ impl Iterator for BatchedFqReader {
                     let mut buffer = fastq::Record::default();
                     let n = reader
                         .read_record(&mut buffer)
-                        .expect("error reading fastq record");
+                        .unwrap_or_else(|e| panic!("error reading fastq record: {e:#}"));
                     min_read = min_read.min(n);
                     max_read = max_read.max(n);
                     if n > 0 {
