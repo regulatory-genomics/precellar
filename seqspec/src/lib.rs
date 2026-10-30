@@ -410,7 +410,11 @@ impl Assay {
             read_buffer.max_len = max_len.unwrap_or(0) as u32;
         }
 
-        self.verify(&read_buffer, infer_read_length_sample)?;
+        // Data checks moved to the pipeline: precellar-core runs a sampling
+        // smoke test when a FastqPlan is built. This check only fits
+        // short-read sequence layouts and misreports long-read data and
+        // barcode-in-read-name data.
+        // self.verify(&read_buffer, infer_read_length_sample)?;
         if let Some(region) = self.library_spec.get(&read_buffer.primer_id) {
             if !region.read().unwrap().region_type.is_sequencing_primer() {
                 warn!(
@@ -510,11 +514,12 @@ impl Assay {
     }
 
     /// Verify reads in the sequence spec.
-    pub fn validate_read(&self, read: &Read, sample_size: usize) -> Result<()> {
-        self.verify(read, sample_size)
-    }
-
-    /// Verify reads in the sequence spec.
+    ///
+    /// Superseded by the sampling smoke test that `FastqPlan::build` runs in
+    /// precellar-core: this check only fits short-read sequence layouts and
+    /// misreports long-read data and barcode-in-read-name data. Kept for
+    /// reference; not called.
+    #[allow(dead_code)]
     fn verify(&self, read: &Read, sample_size: usize) -> Result<()> {
         let region = self
             .library_spec
@@ -599,8 +604,11 @@ impl Assay {
                     .any(|segment| segment.region_type.is_target())
             })
             .ok_or_else(|| anyhow!("No target-bearing Read found for modality: {:?}", modality))?;
+        // The assay type is not known yet, so `min_len` must not reject records
+        // here: that would turn length measurement into a hard error before we
+        // can tell whether short records are expected.
         let mut reader = read
-            .try_open()?
+            .try_open_discarding_short(true)?
             .ok_or_else(|| anyhow!("Failed to open FASTQ file for modality: {:?}", modality))?;
 
         let mut total_length = 0usize;

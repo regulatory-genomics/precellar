@@ -38,15 +38,19 @@ use crate::qc::{QcAlign, QcFastq, QcLongRead};
 use crate::utils::{rev_compl_fastq_record, PrefetchIterator};
 use anyhow::{Context, Result};
 use bstr::BString;
+use indexmap::IndexSet;
 use itertools::Itertools;
-use log::{debug, info};
+use log::{debug, info, warn};
 use noodles_fastq as fastq;
 use rayon::iter::ParallelIterator;
 use rayon::slice::ParallelSlice;
-use seqspec::{Assay, AssayType, FastqReader, Modality, SegmentInfo, SeqArcContext};
+use regex::Regex;
+use seqspec::{
+    Assay, AssayType, FastqReader, LibSpec, Modality, Read, Region, SegmentInfo, SeqArcContext,
+};
 use smallvec::SmallVec;
-use std::collections::HashSet;
-use std::sync::Arc;
+use std::collections::{HashMap, HashSet};
+use std::sync::{Arc, RwLock};
 
 /// Configuration for standard barcode correction during FASTQ annotation.
 ///
@@ -71,6 +75,507 @@ impl Default for BarcodeCorrectionConfig {
     }
 }
 
+/// Runtime configuration for barcode/UMI extraction from FASTQ read names.
+///
+/// Use this for already-demultiplexed FASTQs whose barcode and UMI are
+/// embedded in the read name (for example LR-splitpipe output) instead of the
+/// sequence. The named capture groups of `pattern` map to `region_id`s of the
+/// assay's library spec; the combined cell barcode is concatenated in the
+/// pattern's capture-group order.
+///
+/// Construction validates the group-to-region mapping against every supplied
+/// assay so that misconfiguration fails at the call site instead of during the
+/// alignment run.
+#[derive(Debug, Clone)]
+pub struct ReadNameBarcodeConfig {
+    pattern: Regex,
+    read_id: Option<String>,
+    /// Explicit concatenation order for the barcode fields (region ids);
+    /// `None` = the pattern's capture-group order.
+    barcode_order: Option<Vec<String>>,
+}
+
+impl ReadNameBarcodeConfig {
+    /// Compile `pattern` and validate it against every supplied assay.
+    ///
+    /// `barcode_order` optionally names the barcode capture groups in the
+    /// desired concatenation order; it must be a duplicate-free permutation
+    /// of the pattern's barcode groups. UMI groups are rejected.
+    ///
+    /// Non-fatal problems (currently: an omitted `read_id` for a modality
+    /// with multiple FASTQ reads) are returned as warnings. The caller is
+    /// responsible for logging them.
+    pub fn new(
+        pattern: &str,
+        read_id: Option<&str>,
+        barcode_order: Option<&[String]>,
+        assays: &[Assay],
+        modality: &Modality,
+    ) -> Result<(Self, Vec<String>)> {
+        let pattern = Regex::new(pattern)
+            .with_context(|| format!("invalid read-name barcode pattern: {pattern}"))?;
+        let config = Self {
+            pattern,
+            read_id: read_id.map(str::to_owned),
+            barcode_order: barcode_order.map(|order| order.to_vec()),
+        };
+        let mut warnings = Vec::new();
+        for assay in assays {
+            config.validate_assay(assay, modality, &mut warnings)?;
+        }
+        Ok((config, warnings))
+    }
+
+    fn validate_assay(
+        &self,
+        assay: &Assay,
+        modality: &Modality,
+        warnings: &mut Vec<String>,
+    ) -> Result<()> {
+        let reads: Vec<&Read> = assay.sequence_spec.values().collect();
+        Self::validate_parts(
+            &self.pattern,
+            self.read_id.as_deref(),
+            self.barcode_order.as_deref(),
+            &assay.library_spec,
+            &reads,
+            &assay.assay_id,
+            modality,
+            warnings,
+        )
+    }
+
+    /// Validate one assay's configuration against its library spec and reads.
+    ///
+    /// Checks, in order:
+    ///
+    /// 1. Every named capture group resolves to a direct barcode/umi subregion
+    ///    of the modality.
+    /// 2. At least one barcode group exists and at most one umi group exists.
+    /// 3. Every barcode region of the modality is covered by a group.
+    /// 4. A given `read_id` exists, belongs to the modality, and carries FASTQ
+    ///    files; an omitted `read_id` with multiple FASTQ reads produces a
+    ///    warning.
+    /// 5. A given `barcode_order` is a duplicate-free permutation of the
+    ///    pattern's barcode groups; umi groups are rejected.
+    fn validate_parts(
+        pattern: &Regex,
+        read_id: Option<&str>,
+        barcode_order: Option<&[String]>,
+        lib_spec: &LibSpec,
+        reads: &[&Read],
+        assay_id: &str,
+        modality: &Modality,
+        warnings: &mut Vec<String>,
+    ) -> Result<()> {
+        let modality_region = lib_spec.get_modality(modality).ok_or_else(|| {
+            anyhow::anyhow!(
+                "assay '{}' does not contain modality {}",
+                assay_id,
+                modality
+            )
+        })?;
+        let modality_guard = modality_region.read().unwrap();
+        let subregions = &modality_guard.subregions;
+
+        let mut barcode_regions: Vec<String> = Vec::new();
+        for region in subregions {
+            let region = region.read().unwrap();
+            if region.region_type.is_barcode() {
+                barcode_regions.push(region.region_id.clone());
+            }
+        }
+
+        let group_names: Vec<String> = pattern
+            .capture_names()
+            .flatten()
+            .map(str::to_owned)
+            .collect();
+        let mut barcode_groups: Vec<String> = Vec::new();
+        let mut num_umi_groups = 0usize;
+        for name in &group_names {
+            let region = find_field_region(subregions, name, assay_id, modality)?;
+            let region = region.read().unwrap();
+            anyhow::ensure!(
+                region.region_type.is_barcode() || region.region_type.is_umi(),
+                "read-name capture group '{}' maps to region '{}' of type {} in assay '{}'; \
+                 groups must map to barcode or umi regions",
+                name,
+                region.region_id,
+                region.region_type,
+                assay_id
+            );
+            if region.region_type.is_barcode() {
+                barcode_groups.push(name.clone());
+            } else {
+                num_umi_groups += 1;
+            }
+        }
+
+        anyhow::ensure!(
+            !barcode_groups.is_empty(),
+            "read-name pattern for assay '{}' must contain at least one barcode capture group",
+            assay_id
+        );
+        anyhow::ensure!(
+            num_umi_groups <= 1,
+            "read-name pattern for assay '{}' contains {} umi capture groups; at most 1 is supported",
+            assay_id,
+            num_umi_groups
+        );
+
+        let missing: Vec<String> = barcode_regions
+            .iter()
+            .filter(|id| !group_names.contains(id))
+            .cloned()
+            .collect();
+        anyhow::ensure!(
+            missing.is_empty(),
+            "read-name groups do not cover all barcode regions of assay '{}' modality {}: missing {}",
+            assay_id,
+            modality,
+            missing.join(", ")
+        );
+
+        if let Some(order) = barcode_order {
+            // Entries must be duplicate-free.
+            let mut seen = std::collections::HashSet::new();
+            for name in order {
+                anyhow::ensure!(
+                    seen.insert(name),
+                    "barcode_order contains duplicate entry '{}' in assay '{}'",
+                    name,
+                    assay_id
+                );
+            }
+            // Every entry must be a pattern group naming a barcode region.
+            for name in order {
+                anyhow::ensure!(
+                    group_names.contains(name),
+                    "barcode_order entry '{}' is not a named capture group of the pattern in assay '{}'",
+                    name,
+                    assay_id
+                );
+                let region = find_field_region(subregions, name, assay_id, modality)?;
+                let region = region.read().unwrap();
+                anyhow::ensure!(
+                    region.region_type.is_barcode(),
+                    "barcode_order entry '{}' maps to region '{}' of type {} in assay '{}'; \
+                     only barcode regions participate in concatenation",
+                    name,
+                    region.region_id,
+                    region.region_type,
+                    assay_id
+                );
+            }
+            // The entries must cover every barcode group of the pattern.
+            let missing: Vec<&String> = barcode_groups
+                .iter()
+                .filter(|group| !order.contains(group))
+                .collect();
+            anyhow::ensure!(
+                missing.is_empty(),
+                "barcode_order for assay '{}' does not cover the pattern's barcode groups: missing [{}]",
+                assay_id,
+                missing.iter().join(", ")
+            );
+        }
+
+        if let Some(read_id) = read_id {
+            let read = reads
+                .iter()
+                .find(|read| read.read_id == read_id)
+                .ok_or_else(|| {
+                    anyhow::anyhow!("read_id '{}' not found in assay '{}'", read_id, assay_id)
+                })?;
+            anyhow::ensure!(
+                read.modality == *modality,
+                "read '{}' of assay '{}' belongs to modality {}, not {}",
+                read_id,
+                assay_id,
+                read.modality,
+                modality
+            );
+            anyhow::ensure!(
+                has_fastq_input(read),
+                "read '{}' of assay '{}' has no fastq files",
+                read_id,
+                assay_id
+            );
+        } else {
+            let num_fastq_reads = reads
+                .iter()
+                .filter(|read| read.modality == *modality && has_fastq_input(read))
+                .count();
+            if num_fastq_reads > 1 {
+                warnings.push(format!(
+                    "read_id omitted for assay '{}': modality {} has {} reads with fastq input; \
+                     every read parses its name and the parsed barcodes are concatenated once per read",
+                    assay_id, modality, num_fastq_reads
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Whether the read declares at least one FASTQ input file.
+fn has_fastq_input(read: &Read) -> bool {
+    read.files
+        .as_ref()
+        .is_some_and(|files| files.iter().any(|file| file.filetype == "fastq"))
+}
+
+/// Finds the modality subregion that a read-name capture group maps to.
+fn find_field_region(
+    subregions: &[Arc<RwLock<Region>>],
+    name: &str,
+    assay_id: &str,
+    modality: &Modality,
+) -> Result<Arc<RwLock<Region>>> {
+    subregions
+        .iter()
+        .find(|region| region.read().unwrap().region_id == name)
+        .cloned()
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "read-name capture group '{}' does not match any region of assay '{}' modality {}",
+                name,
+                assay_id,
+                modality
+            )
+        })
+}
+
+/// Sample size for the plan-build smoke test.
+const SMOKE_TEST_SAMPLE_SIZE: usize = 1_000;
+
+/// Structural threshold for the plan-build smoke test: the fraction of
+/// sampled records that must annotate (split or extract) successfully.
+const SMOKE_TEST_STRUCTURAL_THRESHOLD: f64 = 0.7;
+
+/// Content threshold for the plan-build smoke test: the fraction of parsed
+/// records whose barcode fields must hit their whitelists.
+const SMOKE_TEST_CONTENT_THRESHOLD: f64 = 0.9;
+
+/// Samples records from every modality FASTQ read that has an annotator and
+/// feeds each to `check`. Best effort: reads without FASTQ input are skipped.
+fn sample_reads(
+    assay: &Assay,
+    modality: &Modality,
+    sample_size: usize,
+    discard_short: bool,
+    mut check: impl FnMut(&FastqAnnotator, &fastq::Record),
+) -> Result<()> {
+    for (read, segment_info) in assay.get_segments_by_modality(*modality) {
+        let Some(annotator) = FastqAnnotator::new(&read.read_id, segment_info) else {
+            continue;
+        };
+        let Some(mut reader) = read
+            .try_open_discarding_short(discard_short)
+            .with_context(|| {
+                format!(
+                    "failed to open FASTQ input for assay '{}' read '{}'",
+                    assay.assay_id, read.read_id
+                )
+            })?
+        else {
+            continue;
+        };
+        let mut record = fastq::Record::default();
+        for _ in 0..sample_size {
+            if reader.read_record(&mut record)? == 0 {
+                break;
+            }
+            check(&annotator, &record);
+        }
+    }
+    Ok(())
+}
+
+/// Runs a sampling smoke test of one assay against its configured processor.
+///
+/// The test guards against data that does not fit the configuration: it
+/// samples records from every modality FASTQ read, runs the real extraction
+/// path, and returns one warning per metric below its threshold. Structural
+/// metrics (annotation success) use [`SMOKE_TEST_STRUCTURAL_THRESHOLD`];
+/// content metrics (parse and whitelist-hit ratios) use
+/// [`SMOKE_TEST_CONTENT_THRESHOLD`]. The caller is responsible for logging
+/// the returned warnings.
+fn smoke_test_assay(
+    assay: &Assay,
+    modality: &Modality,
+    barcode_processor: &BarcodeProcessor,
+) -> Result<Vec<String>> {
+    let mut warnings = Vec::new();
+    match barcode_processor {
+        BarcodeProcessor::ShortRead(_) => {
+            let mut sampled = 0u64;
+            let mut succeeded = 0u64;
+            let mut onlist_checked = 0u64;
+            let mut onlist_hit = 0u64;
+
+            // Region onlists for exact-match content checks. The bool flag is
+            // the per-region `reverse_complement` setting of the onlist.
+            let mut onlists: HashMap<String, (IndexSet<Vec<u8>>, bool)> = HashMap::new();
+            let modality_region = assay.library_spec.get_modality(modality).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "assay '{}' does not contain modality {}",
+                    assay.assay_id,
+                    modality
+                )
+            })?;
+            for region in &modality_region.read().unwrap().subregions {
+                let region = region.read().unwrap();
+                if let (true, Some(onlist)) = (region.region_type.is_barcode(), &region.onlist) {
+                    onlists.insert(region.region_id.clone(), (onlist.read()?, onlist.rc));
+                }
+            }
+
+            sample_reads(
+                assay,
+                modality,
+                SMOKE_TEST_SAMPLE_SIZE,
+                false,
+                |annotator, record| {
+                    sampled += 1;
+                    let Ok(segments) = annotator.segment_info.split(record) else {
+                        return;
+                    };
+                    succeeded += 1;
+                    for segment in &segments {
+                        if !segment.is_barcode() {
+                            continue;
+                        }
+                        let Some((onlist, rc)) = onlists.get(segment.region_id()) else {
+                            continue;
+                        };
+                        onlist_checked += 1;
+                        // Same rule as `annotate_short_read`: the onlist is
+                        // matched in library orientation.
+                        let should_rc = annotator.segment_info.is_reverse() ^ *rc;
+                        let sequence = if should_rc {
+                            seqspec::utils::rev_compl(segment.seq)
+                        } else {
+                            segment.seq.to_vec()
+                        };
+                        if onlist.contains(&sequence) {
+                            onlist_hit += 1;
+                        }
+                    }
+                },
+            )?;
+
+            if sampled > 0 {
+                let ratio = succeeded as f64 / sampled as f64;
+                if ratio < SMOKE_TEST_STRUCTURAL_THRESHOLD {
+                    warnings.push(format!(
+                        "smoke test for assay '{}': structural ratio {:.3} is below {:.2} \
+                         ({succeeded}/{sampled} records annotated); the seqspec layout may not match the data",
+                        assay.assay_id, ratio, SMOKE_TEST_STRUCTURAL_THRESHOLD
+                    ));
+                }
+            }
+            if onlist_checked > 0 {
+                let ratio = onlist_hit as f64 / onlist_checked as f64;
+                if ratio < SMOKE_TEST_CONTENT_THRESHOLD {
+                    warnings.push(format!(
+                        "smoke test for assay '{}': barcode onlist hit ratio {:.3} is below {:.2} \
+                         ({onlist_hit}/{onlist_checked})",
+                        assay.assay_id, ratio, SMOKE_TEST_CONTENT_THRESHOLD
+                    ));
+                }
+            }
+        }
+        BarcodeProcessor::LongRead(extractor) => {
+            let mut sampled = 0u64;
+            let mut extracted = 0u64;
+            sample_reads(
+                assay,
+                modality,
+                SMOKE_TEST_SAMPLE_SIZE,
+                true,
+                |_annotator, record| {
+                    sampled += 1;
+                    if let Ok((result, _)) = extractor.extract_barcode(record) {
+                        if result.is_success() {
+                            extracted += 1;
+                        }
+                    }
+                },
+            )?;
+
+            if sampled > 0 {
+                let ratio = extracted as f64 / sampled as f64;
+                if ratio < SMOKE_TEST_STRUCTURAL_THRESHOLD {
+                    warnings.push(format!(
+                        "smoke test for assay '{}': barcode extraction ratio {:.3} is below {:.2} \
+                         ({extracted}/{sampled} records)",
+                        assay.assay_id, ratio, SMOKE_TEST_STRUCTURAL_THRESHOLD
+                    ));
+                }
+            }
+        }
+        BarcodeProcessor::ReadName(parser) => {
+            let mut sampled = 0u64;
+            let mut parsed = 0u64;
+            // region id -> (checked, hit)
+            let mut whitelists: HashMap<String, (u64, u64)> = HashMap::new();
+            sample_reads(
+                assay,
+                modality,
+                SMOKE_TEST_SAMPLE_SIZE,
+                true,
+                |annotator, record| {
+                    if !parser.applies_to(&annotator.read_id) {
+                        return;
+                    }
+                    sampled += 1;
+                    if let Ok((_, Some(BarcodeStats::ReadName(stats)))) =
+                        annotator.annotate(record, barcode_processor)
+                    {
+                        if stats.parsed {
+                            parsed += 1;
+                        }
+                        for (region_id, hit) in &stats.region_hits {
+                            let entry = whitelists.entry(region_id.clone()).or_insert((0, 0));
+                            entry.0 += 1;
+                            if *hit {
+                                entry.1 += 1;
+                            }
+                        }
+                    }
+                },
+            )?;
+
+            if sampled > 0 {
+                let ratio = parsed as f64 / sampled as f64;
+                if ratio < SMOKE_TEST_CONTENT_THRESHOLD {
+                    warnings.push(format!(
+                        "smoke test for assay '{}': read-name parse ratio {:.3} is below {:.2} \
+                         ({parsed}/{sampled}); check the pattern against the read names",
+                        assay.assay_id, ratio, SMOKE_TEST_CONTENT_THRESHOLD
+                    ));
+                }
+            }
+            for (region_id, (checked, hit)) in &whitelists {
+                if *checked == 0 {
+                    continue;
+                }
+                let ratio = *hit as f64 / *checked as f64;
+                if ratio < SMOKE_TEST_CONTENT_THRESHOLD {
+                    warnings.push(format!(
+                        "smoke test for assay '{}': region '{}' whitelist hit ratio {:.3} is below {:.2} \
+                         ({hit}/{checked}); the capture group may be mapped to the wrong region",
+                        assay.assay_id, region_id, ratio, SMOKE_TEST_CONTENT_THRESHOLD
+                    ));
+                }
+            }
+        }
+    }
+    Ok(warnings)
+}
+
 /// Consuming builder for a single annotated FASTQ execution.
 ///
 /// A plan owns the configured middleware stages. Calling [`Self::build`]
@@ -83,6 +588,7 @@ pub struct FastqPlan {
     modality: Modality,
     sequencing_type: Option<AssayType>,
     barcode_config: BarcodeCorrectionConfig,
+    read_name_barcode: Option<ReadNameBarcodeConfig>,
     stages: FastqStagePipeline,
 }
 
@@ -98,6 +604,7 @@ impl FastqPlan {
             modality,
             sequencing_type: None,
             barcode_config: BarcodeCorrectionConfig::default(),
+            read_name_barcode: None,
             stages: FastqStagePipeline::default(),
         }
     }
@@ -109,6 +616,17 @@ impl FastqPlan {
     /// modality and applies to every assay in the plan.
     pub fn with_sequencing_type(mut self, sequencing_type: AssayType) -> Self {
         self.sequencing_type = Some(sequencing_type);
+        self
+    }
+
+    /// Installs the read-name barcode/UMI extraction configuration.
+    ///
+    /// When set, the plan's processor parses barcode/UMI fields from FASTQ
+    /// read names instead of the sequence; see [`ReadNameBarcodeConfig`].
+    /// The configuration takes precedence over the sequencing-type branch
+    /// selection in [`Self::build`].
+    pub fn with_read_name_barcode(mut self, config: ReadNameBarcodeConfig) -> Self {
+        self.read_name_barcode = Some(config);
         self
     }
 
@@ -241,6 +759,11 @@ impl FastqPlan {
                 .map(|read| read.read_id.as_str())
                 .collect();
 
+            // Short-read lengths are uniform, so a record below `min_len` means
+            // the spec or the data is wrong and the run must stop. Long-read
+            // data legitimately contains very short reads; discard those.
+            let discard_short = assay_type == AssayType::LongRead;
+
             let inputs: Vec<(FastqAnnotator, FastqReader)> = assay
                 .get_segments_by_modality(self.modality)
                 .filter_map(|(read, segment_info)| {
@@ -259,70 +782,89 @@ impl FastqPlan {
                                     assay.assay_id,
                                     read.read_id
                                 )
-                            })?;
+                            })?
+                            .with_discard_short(discard_short);
                         Ok((annotator, reader))
                     })
                 })
                 .collect::<Result<_>>()?;
 
-            let barcode_processor = match assay_type {
-                AssayType::ShortRead => {
-                    let mut barcode_analyzer = BarcodeAnalyzer::new(assay, self.modality);
-                    barcode_analyzer.summary();
-                    if correct_barcode {
-                        barcode_analyzer.barcode_correct_options = Some(BarcodeCorrectOptions {
-                            bc_confidence_threshold: self.barcode_config.confidence_threshold,
-                            max_mismatch: self.barcode_config.max_mismatch,
-                            ..Default::default()
-                        });
-                    }
-                    BarcodeProcessor::ShortRead(barcode_analyzer)
-                }
-                AssayType::LongRead => {
-                    anyhow::ensure!(
-                        physical_fastq_reads.len() == 1,
-                        "long-read assay '{}' modality {} must have exactly one physical FASTQ Read; found {} ({})",
-                        assay.assay_id,
-                        self.modality,
-                        physical_fastq_reads.len(),
-                        physical_fastq_reads.join(", ")
-                    );
-                    anyhow::ensure!(
-                        inputs.len() == 1,
-                        "long-read assay '{}' modality {} must have exactly one full-length FASTQ Read; found {}",
-                        assay.assay_id,
-                        self.modality,
-                        inputs.len()
-                    );
-                    anyhow::ensure!(
-                        inputs[0].0.target_count() == 1,
-                        "long-read assay '{}' modality {} must contain exactly one target segment in its full-length Read; found {}",
-                        assay.assay_id,
-                        self.modality,
-                        inputs[0].0.target_count()
-                    );
-
-                    let whitelists = assay.get_whitelists(self.modality);
-                    anyhow::ensure!(
-                        !whitelists.is_empty(),
-                        "long-read assay '{}' modality {} requires at least one barcode whitelist",
-                        assay.assay_id,
-                        self.modality
-                    );
-                    let barcode_extractor = BarcodeExtractor::new(
-                        &assay.library_spec,
-                        &self.modality,
-                        whitelists,
-                    )
-                    .with_context(|| {
+            let barcode_processor = if let Some(config) = &self.read_name_barcode {
+                BarcodeProcessor::ReadName(
+                    ReadNameParser::new(config, assay, &self.modality).with_context(|| {
                         format!(
-                            "failed to configure long-read barcode extraction for assay '{}' and modality {}",
-                            assay.assay_id, self.modality
+                            "failed to configure read-name barcode extraction for assay '{}'",
+                            assay.assay_id
                         )
-                    })?;
-                    BarcodeProcessor::LongRead(barcode_extractor)
+                    })?,
+                )
+            } else {
+                match assay_type {
+                    AssayType::ShortRead => {
+                        let mut barcode_analyzer = BarcodeAnalyzer::new(assay, self.modality);
+                        barcode_analyzer.summary();
+                        if correct_barcode {
+                            barcode_analyzer.barcode_correct_options =
+                                Some(BarcodeCorrectOptions {
+                                    bc_confidence_threshold: self
+                                        .barcode_config
+                                        .confidence_threshold,
+                                    max_mismatch: self.barcode_config.max_mismatch,
+                                    ..Default::default()
+                                });
+                        }
+                        BarcodeProcessor::ShortRead(barcode_analyzer)
+                    }
+                    AssayType::LongRead => {
+                        anyhow::ensure!(
+                            physical_fastq_reads.len() == 1,
+                            "long-read assay '{}' modality {} must have exactly one physical FASTQ Read; found {} ({})",
+                            assay.assay_id,
+                            self.modality,
+                            physical_fastq_reads.len(),
+                            physical_fastq_reads.join(", ")
+                        );
+                        anyhow::ensure!(
+                            inputs.len() == 1,
+                            "long-read assay '{}' modality {} must have exactly one full-length FASTQ Read; found {}",
+                            assay.assay_id,
+                            self.modality,
+                            inputs.len()
+                        );
+                        anyhow::ensure!(
+                            inputs[0].0.target_count() == 1,
+                            "long-read assay '{}' modality {} must contain exactly one target segment in its full-length Read; found {}",
+                            assay.assay_id,
+                            self.modality,
+                            inputs[0].0.target_count()
+                        );
+
+                        let whitelists = assay.get_whitelists(self.modality);
+                        anyhow::ensure!(
+                            !whitelists.is_empty(),
+                            "long-read assay '{}' modality {} requires at least one barcode whitelist",
+                            assay.assay_id,
+                            self.modality
+                        );
+                        let barcode_extractor = BarcodeExtractor::new(
+                            &assay.library_spec,
+                            &self.modality,
+                            whitelists,
+                        )
+                        .with_context(|| {
+                            format!(
+                                "failed to configure long-read barcode extraction for assay '{}' and modality {}",
+                                assay.assay_id, self.modality
+                            )
+                        })?;
+                        BarcodeProcessor::LongRead(barcode_extractor)
+                    }
                 }
             };
+
+            for warning in smoke_test_assay(assay, &self.modality, &barcode_processor)? {
+                warn!("{warning}");
+            }
 
             readers.push(AnnotatedFastqReader::new(
                 inputs,
@@ -662,22 +1204,161 @@ impl<'a, A: Aligner> Iterator for AlignmentResult<'a, A> {
 enum BarcodeProcessor {
     ShortRead(BarcodeAnalyzer),
     LongRead(BarcodeExtractor),
+    ReadName(ReadNameParser),
 }
 
 impl BarcodeProcessor {
     fn num_reads(&self) -> usize {
         match self {
             Self::ShortRead(analyzer) => analyzer.num_reads(),
-            Self::LongRead(_) => 0,
+            Self::LongRead(_) | Self::ReadName(_) => 0,
         }
     }
 
+    /// Whether this processor walks the composite-alignment extraction path.
+    ///
+    /// The name is historical: this flag gates behavior that only makes sense
+    /// for composite-alignment extraction (paired-end handling, long-read QC,
+    /// the `make_fastq` bail), not the sequencing modality of the data. A
+    /// read-name processor must return `false` even for long-read data.
     fn is_long_read(&self) -> bool {
         matches!(self, Self::LongRead(_))
     }
 
     fn expects_umi(&self) -> bool {
-        matches!(self, Self::LongRead(extractor) if extractor.expects_umi())
+        match self {
+            Self::ShortRead(_) => false,
+            Self::LongRead(extractor) => extractor.expects_umi(),
+            Self::ReadName(parser) => parser.has_umi(),
+        }
+    }
+}
+
+/// One resolved named-capture group of a read-name pattern.
+///
+/// `region_id` is both the capture-group name and the library-spec region the
+/// group maps to. Fields are stored in concatenation order: barcode fields
+/// follow the configured `barcode_order` (default: the pattern's
+/// capture-group order); the umi field is appended last.
+#[derive(Debug)]
+struct FieldRegion {
+    region_id: String,
+    /// Whether the field is a UMI (false = barcode).
+    is_umi: bool,
+    /// Whitelist for exact-match statistics; `None` when the region declares
+    /// no onlist and the field is therefore excluded from whitelist stats.
+    whitelist: Option<IndexSet<Vec<u8>>>,
+}
+
+/// Extracts barcode/UMI fields from the read names of an already
+/// demultiplexed assay (LR-splitpipe and similar outputs).
+///
+/// The named capture groups of the pattern map to barcode/umi regions of the
+/// modality. The whole FASTQ sequence is the target; the pattern is matched
+/// against the read name only (never the description).
+#[derive(Debug)]
+struct ReadNameParser {
+    /// Validated user configuration.
+    config: ReadNameBarcodeConfig,
+    /// Resolved fields in the pattern's capture-group order.
+    field_regions: Vec<FieldRegion>,
+}
+
+/// Statistics from read-name barcode extraction of one physical record.
+#[derive(Debug, Default)]
+pub struct ReadNameStats {
+    /// Whether the pattern matched the read name and every declared group
+    /// participated in the match.
+    pub parsed: bool,
+    /// Per-region exact whitelist hits; only regions with an onlist appear.
+    pub region_hits: Vec<(String, bool)>,
+}
+
+/// Statistics produced by whichever barcode extraction strategy ran.
+#[derive(Debug)]
+pub enum BarcodeStats {
+    Composite(LrBarcodeExtractionStats),
+    ReadName(ReadNameStats),
+}
+
+impl ReadNameParser {
+    /// Resolves the config's named capture groups against one assay's library
+    /// spec. Field regions are stored in concatenation order: barcode fields
+    /// follow the configured `barcode_order` (default: the pattern's
+    /// capture-group order); the umi field is appended last.
+    fn new(config: &ReadNameBarcodeConfig, assay: &Assay, modality: &Modality) -> Result<Self> {
+        let modality_region = assay.library_spec.get_modality(modality).ok_or_else(|| {
+            anyhow::anyhow!(
+                "assay '{}' does not contain modality {}",
+                assay.assay_id,
+                modality
+            )
+        })?;
+        let modality_guard = modality_region.read().unwrap();
+
+        let mut resolved: Vec<FieldRegion> = Vec::new();
+        for name in config.pattern.capture_names().flatten() {
+            let region =
+                find_field_region(&modality_guard.subregions, name, &assay.assay_id, modality)?;
+            let region = region.read().unwrap();
+            let whitelist = match &region.onlist {
+                Some(onlist) => Some(onlist.read().with_context(|| {
+                    format!(
+                        "failed to read onlist for region '{}' of assay '{}'",
+                        region.region_id, assay.assay_id
+                    )
+                })?),
+                None => None,
+            };
+            resolved.push(FieldRegion {
+                is_umi: region.region_type.is_umi(),
+                region_id: region.region_id.clone(),
+                whitelist,
+            });
+        }
+        drop(modality_guard);
+
+        // Barcode fields follow `barcode_order` when given; the remaining
+        // groups (at most one umi, guaranteed by validation) keep pattern
+        // order after them.
+        let field_regions = match &config.barcode_order {
+            None => resolved,
+            Some(order) => {
+                let mut by_name: HashMap<String, FieldRegion> = resolved
+                    .into_iter()
+                    .map(|field| (field.region_id.clone(), field))
+                    .collect();
+                let mut ordered = Vec::with_capacity(by_name.len());
+                for name in order {
+                    ordered.push(by_name.remove(name).ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "barcode_order entry '{}' does not match any capture group of assay '{}'",
+                            name, assay.assay_id
+                        )
+                    })?);
+                }
+                ordered.extend(by_name.into_values());
+                ordered
+            }
+        };
+
+        Ok(Self {
+            config: config.clone(),
+            field_regions,
+        })
+    }
+
+    /// Whether this physical read parses its name.
+    fn applies_to(&self, read_id: &str) -> bool {
+        self.config
+            .read_id
+            .as_deref()
+            .is_none_or(|id| id == read_id)
+    }
+
+    /// Whether the pattern declares a umi group.
+    fn has_umi(&self) -> bool {
+        self.field_regions.iter().any(|field| field.is_umi)
     }
 }
 
@@ -856,7 +1537,9 @@ fn process_chunk<'a, I: IntoIterator<Item = &'a SmallVec<[fastq::Record; 4]>>>(
     let mut qc_long_read = barcode_processor.is_long_read().then(QcLongRead::default);
     let expects_umi = barcode_processor.expects_umi();
     if expects_umi {
-        qc_long_read.as_mut().unwrap().enable_umi_extraction();
+        if let Some(qc_long_read) = qc_long_read.as_mut() {
+            qc_long_read.enable_umi_extraction();
+        }
     }
     let annotated = chunk
         .into_iter()
@@ -869,20 +1552,33 @@ fn process_chunk<'a, I: IntoIterator<Item = &'a SmallVec<[fastq::Record; 4]>>>(
                     let id = &annotator.read_id;
                     *qc.num_reads.entry(id.clone()).or_insert(0) += 1;
                     match annotator.annotate(record, barcode_processor) {
-                        Ok((anno, long_read_stats)) => {
-                            if let (Some(qc_long_read), Some(stats)) =
-                                (&mut qc_long_read, long_read_stats)
-                            {
-                                qc_long_read
-                                    .record_orientation(stats.is_reverse, !stats.composite_pass);
-                                qc_long_read.record_composite_alignment(stats.composite_pass);
-                                qc_long_read.record_barcode_extraction(anno.barcode.is_some());
-                                if expects_umi {
-                                    qc_long_read.record_umi_extraction(anno.umi.is_some());
+                        Ok((anno, stats)) => {
+                            match stats {
+                                Some(BarcodeStats::Composite(stats)) => {
+                                    if let Some(qc_long_read) = qc_long_read.as_mut() {
+                                        qc_long_read.record_orientation(
+                                            stats.is_reverse,
+                                            !stats.composite_pass,
+                                        );
+                                        qc_long_read
+                                            .record_composite_alignment(stats.composite_pass);
+                                        qc_long_read
+                                            .record_barcode_extraction(anno.barcode.is_some());
+                                        if expects_umi {
+                                            qc_long_read.record_umi_extraction(anno.umi.is_some());
+                                        }
+                                        for (group_name, intersection_hit) in
+                                            stats.consensus_results
+                                        {
+                                            qc_long_read
+                                                .record_consensus(&group_name, intersection_hit);
+                                        }
+                                    }
                                 }
-                                for (group_name, intersection_hit) in stats.consensus_results {
-                                    qc_long_read.record_consensus(&group_name, intersection_hit);
+                                Some(BarcodeStats::ReadName(stats)) => {
+                                    qc.record_read_name_stats(id, &stats);
                                 }
+                                None => {}
                             }
                             Some(anno)
                         }
@@ -946,7 +1642,7 @@ impl Iterator for BatchedFqReader {
                     let mut buffer = fastq::Record::default();
                     let n = reader
                         .read_record(&mut buffer)
-                        .expect("error reading fastq record");
+                        .unwrap_or_else(|e| panic!("error reading fastq record: {e:#}"));
                     min_read = min_read.min(n);
                     max_read = max_read.max(n);
                     if n > 0 {
@@ -1033,14 +1729,22 @@ impl FastqAnnotator {
         &self,
         record: &fastq::Record,
         barcode_processor: &BarcodeProcessor,
-    ) -> Result<(AnnotatedFastq, Option<LrBarcodeExtractionStats>)> {
+    ) -> Result<(AnnotatedFastq, Option<BarcodeStats>)> {
         match barcode_processor {
             BarcodeProcessor::ShortRead(barcode_analyzer) => {
                 Ok((self.annotate_short_read(record, barcode_analyzer)?, None))
             }
             BarcodeProcessor::LongRead(barcode_extractor) => {
                 let (annotated, stats) = self.annotate_long_read(record, barcode_extractor)?;
-                Ok((annotated, Some(stats)))
+                Ok((annotated, Some(BarcodeStats::Composite(stats))))
+            }
+            BarcodeProcessor::ReadName(parser) => {
+                if parser.applies_to(&self.read_id) {
+                    let (annotated, stats) = self.annotate_from_read_name(record, parser)?;
+                    Ok((annotated, Some(BarcodeStats::ReadName(stats))))
+                } else {
+                    Ok((self.annotate_target_only(record)?, None))
+                }
             }
         }
     }
@@ -1172,6 +1876,97 @@ impl FastqAnnotator {
                 read2,
             },
             extraction_stats,
+        ))
+    }
+
+    /// The whole record as the target, assigned to read 1 or read 2 by the
+    /// read's strand.
+    fn annotate_target_only(&self, record: &fastq::Record) -> Result<AnnotatedFastq> {
+        let (read1, read2) = if self.segment_info.is_reverse() {
+            (None, Some(record.clone()))
+        } else {
+            (Some(record.clone()), None)
+        };
+        Ok(AnnotatedFastq {
+            barcode: None,
+            umi: None,
+            read1,
+            read2,
+        })
+    }
+
+    /// Annotates a record whose barcode/UMI live in the read name.
+    ///
+    /// The whole sequence is the target, assigned to read 1 or read 2 by the
+    /// read's strand. On a pattern miss — or when an optional group drops out
+    /// of the match — the barcode and UMI are `None` and the record is dropped
+    /// by the usual barcode-less filter; the target is still produced so QC
+    /// sees the full record, mirroring the long-read failure path.
+    ///
+    /// Barcode and UMI quality scores are synthetic (`I`) because the read
+    /// name carries no base qualities, and the corrected barcode is the raw
+    /// one: the header barcode is the demultiplexer's canonical output.
+    fn annotate_from_read_name(
+        &self,
+        record: &fastq::Record,
+        parser: &ReadNameParser,
+    ) -> Result<(AnnotatedFastq, ReadNameStats)> {
+        let miss_stats = ReadNameStats {
+            parsed: false,
+            region_hits: Vec::new(),
+        };
+        // Read names are `&BStr`; a non-UTF-8 name cannot match the pattern.
+        let Ok(name) = std::str::from_utf8(record.name()) else {
+            return Ok((self.annotate_target_only(record)?, miss_stats));
+        };
+        let Some(captures) = parser.config.pattern.captures(name) else {
+            return Ok((self.annotate_target_only(record)?, miss_stats));
+        };
+
+        let mut barcode_seq: Vec<u8> = Vec::new();
+        let mut umi: Option<fastq::Record> = None;
+        let mut region_hits = Vec::new();
+        for field in &parser.field_regions {
+            let Some(sequence) = captures.name(&field.region_id) else {
+                return Ok((self.annotate_target_only(record)?, miss_stats));
+            };
+            let sequence = sequence.as_str();
+            if let Some(whitelist) = &field.whitelist {
+                // rc is intentionally not applied: name fields are the
+                // demultiplexer's canonical output, already in whitelist
+                // orientation.
+                let hit = whitelist.contains(sequence.as_bytes());
+                region_hits.push((field.region_id.clone(), hit));
+            }
+            if field.is_umi {
+                umi = Some(fastq::Record::new(
+                    record.definition().clone(),
+                    sequence.as_bytes().to_vec(),
+                    vec![b'I'; sequence.len()],
+                ));
+            } else {
+                barcode_seq.extend_from_slice(sequence.as_bytes());
+            }
+        }
+
+        let barcode = Barcode {
+            raw: fastq::Record::new(
+                record.definition().clone(),
+                barcode_seq.clone(),
+                vec![b'I'; barcode_seq.len()],
+            ),
+            corrected: Some(barcode_seq),
+        };
+        let mut annotated = self.annotate_target_only(record)?;
+        annotated.barcode = Some(barcode);
+        annotated.umi = umi;
+
+        Ok((
+            annotated,
+            ReadNameStats {
+                parsed: true,
+                region_hits,
+            },
         ))
     }
 }
@@ -1350,6 +2145,204 @@ mod tests {
     use crate::qc::Metric;
     use seqspec::{File, Strand, UrlType};
     use std::path::Path;
+
+    /// Tests for [`ReadNameBarcodeConfig`] validation (read-name barcode
+    /// feature, configuration step).
+    mod read_name_config {
+        use anyhow::Result;
+        use regex::Regex;
+        use seqspec::{File, LibSpec, Modality, Read, Region, RegionType, SequenceType, UrlType};
+        use std::sync::{Arc, RwLock};
+
+        use crate::align::fastq::ReadNameBarcodeConfig;
+
+        fn region(
+            id: &str,
+            region_type: RegionType,
+            min_len: u32,
+            max_len: u32,
+        ) -> Arc<RwLock<Region>> {
+            let sequence_type = match region_type {
+                RegionType::Barcode | RegionType::Umi => SequenceType::Onlist,
+                _ => SequenceType::Random,
+            };
+            Arc::new(RwLock::new(Region {
+                region_id: id.to_string(),
+                region_type,
+                name: id.to_string(),
+                sequence_type,
+                sequence: String::new(),
+                min_len,
+                max_len,
+                onlist: None,
+                subregions: vec![],
+            }))
+        }
+
+        /// Library layout: bc1(8) -> bc2(8) -> umi(10) -> umi2(10) -> cdna.
+        fn lib_spec() -> LibSpec {
+            LibSpec::new(vec![Region {
+                region_id: "rna".to_string(),
+                region_type: RegionType::Modality(Modality::RNA),
+                name: "RNA".to_string(),
+                sequence_type: SequenceType::Joined,
+                sequence: String::new(),
+                min_len: 0,
+                max_len: 0,
+                onlist: None,
+                subregions: vec![
+                    region("bc1", RegionType::Barcode, 8, 8),
+                    region("bc2", RegionType::Barcode, 8, 8),
+                    region("umi", RegionType::Umi, 10, 10),
+                    region("umi2", RegionType::Umi, 10, 10),
+                    region("cdna", RegionType::Cdna, 100, 1000),
+                ],
+            }])
+            .unwrap()
+        }
+
+        fn fastq_file(name: &str) -> File {
+            File {
+                file_id: name.to_string(),
+                filename: name.to_string(),
+                filetype: "fastq".to_string(),
+                filesize: 0,
+                url: name.to_string(),
+                urltype: UrlType::Local,
+                md5: String::new(),
+            }
+        }
+
+        fn read(id: &str, modality: Modality, with_fastq: bool) -> Read {
+            Read {
+                read_id: id.to_string(),
+                modality,
+                files: with_fastq.then(|| vec![fastq_file(&format!("{id}.fastq.gz"))]),
+                ..Default::default()
+            }
+        }
+
+        fn validate(pattern: &str, read_id: Option<&str>, reads: &[Read]) -> Result<Vec<String>> {
+            let pattern = Regex::new(pattern).unwrap();
+            let lib_spec = lib_spec();
+            let reads: Vec<&Read> = reads.iter().collect();
+            let mut warnings = Vec::new();
+            ReadNameBarcodeConfig::validate_parts(
+                &pattern,
+                read_id,
+                None,
+                &lib_spec,
+                &reads,
+                "test_assay",
+                &Modality::RNA,
+                &mut warnings,
+            )?;
+            Ok(warnings)
+        }
+
+        #[test]
+        fn valid_config_passes_silently() {
+            let warnings = validate(
+                ":(?P<bc1>[ACGTN]{8})_(?P<bc2>[ACGTN]{8})_(?P<umi>[ACGTN]{10})$",
+                None,
+                &[read("R1", Modality::RNA, true)],
+            )
+            .unwrap();
+            assert!(warnings.is_empty());
+        }
+
+        /// Group names must resolve to barcode/umi regions of the modality.
+        #[test]
+        fn invalid_group_mapping_fails() {
+            let unknown = validate(
+                "(?P<bcx>[ACGTN]{8})",
+                None,
+                &[read("R1", Modality::RNA, true)],
+            )
+            .unwrap_err();
+            assert!(unknown.to_string().contains("does not match any region"));
+
+            let non_barcode = validate(
+                "(?P<cdna>[ACGTN]{8})",
+                None,
+                &[read("R1", Modality::RNA, true)],
+            )
+            .unwrap_err();
+            assert!(non_barcode
+                .to_string()
+                .contains("must map to barcode or umi regions"));
+        }
+
+        /// All barcode regions must be covered, and at most one umi group is
+        /// allowed.
+        #[test]
+        fn structural_rule_violations_fail() {
+            let uncovered = validate(
+                "(?P<bc1>[ACGTN]{8})",
+                None,
+                &[read("R1", Modality::RNA, true)],
+            )
+            .unwrap_err();
+            let message = uncovered.to_string();
+            assert!(message.contains("do not cover all barcode regions"));
+            assert!(message.contains("bc2"));
+
+            let two_umis = validate(
+                "(?P<bc1>[ACGTN]{8})_(?P<bc2>[ACGTN]{8})_(?P<umi>[ACGTN]{10})_(?P<umi2>[ACGTN]{10})",
+                None,
+                &[read("R1", Modality::RNA, true)],
+            )
+            .unwrap_err();
+            assert!(two_umis.to_string().contains("2 umi capture groups"));
+        }
+
+        /// A given read_id must exist, belong to the modality, and carry fastq
+        /// files. An omitted read_id with multiple fastq reads warns.
+        #[test]
+        fn read_id_rules() {
+            let not_found = validate(
+                ":(?P<bc1>[ACGTN]{8})_(?P<bc2>[ACGTN]{8})$",
+                Some("R9"),
+                &[read("R1", Modality::RNA, true)],
+            )
+            .unwrap_err();
+            assert!(not_found.to_string().contains("read_id 'R9' not found"));
+
+            let other_modality = validate(
+                ":(?P<bc1>[ACGTN]{8})_(?P<bc2>[ACGTN]{8})$",
+                Some("R_atac"),
+                &[
+                    read("R1", Modality::RNA, true),
+                    read("R_atac", Modality::ATAC, true),
+                ],
+            )
+            .unwrap_err();
+            assert!(other_modality.to_string().contains("belongs to modality"));
+
+            let no_fastq = validate(
+                ":(?P<bc1>[ACGTN]{8})_(?P<bc2>[ACGTN]{8})$",
+                Some("R_nofq"),
+                &[
+                    read("R1", Modality::RNA, true),
+                    read("R_nofq", Modality::RNA, false),
+                ],
+            )
+            .unwrap_err();
+            assert!(no_fastq.to_string().contains("has no fastq files"));
+
+            let warnings = validate(
+                ":(?P<bc1>[ACGTN]{8})_(?P<bc2>[ACGTN]{8})$",
+                None,
+                &[
+                    read("R1", Modality::RNA, true),
+                    read("R2", Modality::RNA, true),
+                ],
+            )
+            .unwrap();
+            assert_eq!(warnings.len(), 1);
+            assert!(warnings[0].contains("read_id omitted"));
+        }
+    }
 
     fn write_fastq(path: &Path, name: &str, sequence: &[u8]) {
         write_fastq_records(path, &[(name, sequence)]);
@@ -1558,6 +2551,505 @@ mod tests {
         }
         execution.finish()?;
         Ok(output)
+    }
+
+    /// Attaches `records` (read name, target sequence) to the read-name assay
+    /// (`data/test_readname.yaml`) as read R1.
+    fn read_name_assay(directory: &Path, records: &[(&str, &[u8])]) -> Assay {
+        let path = directory.join("R1.fastq");
+        write_fastq_records(&path, records);
+        let mut assay = Assay::from_path("data/test_readname.yaml").unwrap();
+        assay.sequence_spec.get_mut("R1").unwrap().files =
+            Some(vec![File::from_fastq(&path, false).unwrap()]);
+        assay
+    }
+
+    /// Read-name extraction must concatenate barcodes in the pattern's
+    /// capture-group order, and must pass the whole sequence through as the
+    /// target. PacBio, ONT, and short prefixes are all handled by the same
+    /// pattern.
+    #[test]
+    fn test_read_name_extraction() {
+        let directory = tempfile::tempdir().unwrap();
+        let bc1 = b"AAAAAAAA".as_slice();
+        let bc2 = b"CCCCCCCC".as_slice();
+        let umi = b"ACGTACGTAC".as_slice();
+        let target: Vec<u8> = vec![b'C'; 600];
+        // The pattern's capture order (umi, bc2, bc1) differs from the
+        // library-spec order (bc1, bc2, umi).
+        let records = [
+            (
+                "m54284U_210909_065506/102302155/ccs:ACGTACGTAC_CCCCCCCC_AAAAAAAA",
+                &target[..],
+            ),
+            (
+                "be0ebe90-9d3a-4cc6-8a5e-ce17ba8b4094:ACGTACGTAC_CCCCCCCC_AAAAAAAA",
+                &target[..],
+            ),
+            ("read1:ACGTACGTAC_CCCCCCCC_AAAAAAAA", &target[..]),
+        ];
+        let assay = read_name_assay(directory.path(), &records);
+        let (config, warnings) = ReadNameBarcodeConfig::new(
+            ":(?P<umi>[ACGTN]{10})_(?P<bc2>[ACGTN]{8})_(?P<bc1>[ACGTN]{8})$",
+            Some("R1"),
+            None,
+            std::slice::from_ref(&assay),
+            &Modality::RNA,
+        )
+        .unwrap();
+        assert!(warnings.is_empty());
+
+        let mut execution = FastqPlan::new(vec![assay], Modality::RNA)
+            .with_read_name_barcode(config)
+            .build(false, 5000)
+            .unwrap();
+        assert!(!execution.is_long_read());
+        let batch = execution.next_batch().unwrap().unwrap();
+        assert_eq!(batch.len(), 3);
+        // Pattern capture order: umi first, then bc2, then bc1. The barcode
+        // therefore concatenates bc2 before bc1.
+        let expected_barcode: Vec<u8> = [bc2, bc1].concat();
+        for annotated in &batch {
+            let barcode = annotated.barcode.as_ref().unwrap();
+            assert_eq!(barcode.raw.sequence(), &expected_barcode);
+            assert_eq!(
+                barcode.corrected.as_deref(),
+                Some(expected_barcode.as_slice())
+            );
+            assert_eq!(barcode.raw.quality_scores(), vec![b'I'; 16]);
+            assert_eq!(annotated.umi.as_ref().unwrap().sequence(), umi);
+            assert_eq!(
+                annotated.umi.as_ref().unwrap().quality_scores(),
+                vec![b'I'; 10]
+            );
+            assert!(annotated.read2.is_none());
+            assert_eq!(annotated.read1.as_ref().unwrap().sequence(), &target);
+        }
+        assert!(execution.next_batch().unwrap().is_none());
+        execution.finish().unwrap();
+    }
+
+    /// Parse failures are filtered by the usual barcode-less gate, and the QC
+    /// counters separate name parsing from whitelist membership.
+    #[test]
+    fn test_read_name_qc_and_filtering() {
+        let directory = tempfile::tempdir().unwrap();
+        // data/bc1_readname.txt contains AAAAAAAA and GGGGGGGG but not CCCCCCCC.
+        let target: Vec<u8> = vec![b'C'; 600];
+        let records = [
+            ("read1:AAAAAAAA_GGGGGGGG_ACGTACGTAC", &target[..]),
+            ("read2:CCCCCCCC_GGGGGGGG_ACGTACGTAC", &target[..]),
+            ("read3_no_payload", &target[..]),
+        ];
+        let assay = read_name_assay(directory.path(), &records);
+        let (config, _) = ReadNameBarcodeConfig::new(
+            ":(?P<bc1>[ACGTN]{8})_(?P<bc2>[ACGTN]{8})_(?P<umi>[ACGTN]{10})$",
+            Some("R1"),
+            None,
+            std::slice::from_ref(&assay),
+            &Modality::RNA,
+        )
+        .unwrap();
+        let mut execution = FastqPlan::new(vec![assay], Modality::RNA)
+            .with_read_name_barcode(config)
+            .build(false, 5000)
+            .unwrap();
+        let batch = execution.next_batch().unwrap().unwrap();
+        // The unparsed record is dropped; the two parsed records survive.
+        assert_eq!(batch.len(), 2);
+        assert!(execution.next_batch().unwrap().is_none());
+        let report = execution.finish().unwrap();
+        assert_eq!(report.fastq.num_reads["R1"], 3);
+        assert_eq!(report.fastq.num_readname_parsed["R1"], 2);
+        assert_eq!(report.fastq.num_readname_in_whitelist["bc1"], 1);
+        // bc2 declares no onlist and is absent from the whitelist stats.
+        assert!(!report.fastq.num_readname_in_whitelist.contains_key("bc2"));
+        let json = report.fastq.to_json();
+        assert_eq!(
+            json["frac_readname_parsed"]["R1"],
+            serde_json::json!(2.0 / 3.0)
+        );
+        assert_eq!(
+            json["frac_readname_in_whitelist"]["bc1"],
+            serde_json::json!(0.5)
+        );
+        assert!(json["frac_readname_in_whitelist"].get("bc2").is_none());
+    }
+
+    /// A pattern that matches nothing must still surface a 0.0 parse ratio —
+    /// the misconfiguration signal must not vanish from the QC report.
+    #[test]
+    fn test_read_name_unparsed_ratio_is_visible() {
+        let directory = tempfile::tempdir().unwrap();
+        let target: Vec<u8> = vec![b'C'; 600];
+        let records = [("read1:AAAAAAAA_GGGGGGGG_ACGTACGTAC", &target[..])];
+        let assay = read_name_assay(directory.path(), &records);
+        // The trailing literal `_ZZ` never occurs, so no name matches.
+        let (config, _) = ReadNameBarcodeConfig::new(
+            ":(?P<bc1>[ACGTN]{8})_(?P<bc2>[ACGTN]{8})_(?P<umi>[ACGTN]{10})_ZZ$",
+            Some("R1"),
+            None,
+            std::slice::from_ref(&assay),
+            &Modality::RNA,
+        )
+        .unwrap();
+        let mut execution = FastqPlan::new(vec![assay], Modality::RNA)
+            .with_read_name_barcode(config)
+            .build(false, 5000)
+            .unwrap();
+        assert!(execution.next_batch().unwrap().is_none());
+        let json = execution.finish().unwrap().fastq.to_json();
+        assert_eq!(json["frac_readname_parsed"]["R1"], serde_json::json!(0.0));
+        // No record was parsed, so whitelist ratios cannot exist.
+        assert!(json.get("frac_readname_in_whitelist").is_none());
+    }
+
+    /// Section 4: the plan-build smoke test must warn when short-read data
+    /// does not match the seqspec layout.
+    #[test]
+    fn test_smoke_test_short_read_warns_on_wrong_layout() {
+        let directory = tempfile::tempdir().unwrap();
+        let (mut assay, _, _, _) = short_read_fixture(directory.path());
+        let garbage: Vec<u8> = vec![b'A'; 36];
+        let path = directory.path().join("garbage.fastq");
+        write_fastq_records(
+            &path,
+            &[
+                ("read1", &garbage),
+                ("read2", &garbage),
+                ("read3", &garbage),
+            ],
+        );
+        assay.sequence_spec.get_mut("R1").unwrap().files =
+            Some(vec![File::from_fastq(&path, false).unwrap()]);
+
+        let analyzer = BarcodeAnalyzer::new(&assay, Modality::RNA);
+        let warnings = smoke_test_assay(
+            &assay,
+            &Modality::RNA,
+            &BarcodeProcessor::ShortRead(analyzer),
+        )
+        .unwrap();
+        assert!(
+            warnings
+                .iter()
+                .any(|warning| warning.contains("structural ratio")),
+            "{warnings:?}"
+        );
+    }
+
+    /// Section 4: the plan-build smoke test must warn when long-read data
+    /// carries none of the fixed anchors the extractor aligns against.
+    #[test]
+    fn test_smoke_test_long_read_warns_on_wrong_data() {
+        let directory = tempfile::tempdir().unwrap();
+        let garbage: Vec<u8> = vec![b'A'; 600];
+        let path = directory.path().join("garbage.fastq");
+        write_fastq(&path, "read1", &garbage);
+        let assay = long_read_assay(&[path.as_path()], directory.path());
+
+        let extractor = BarcodeExtractor::new(
+            &assay.library_spec,
+            &Modality::ATAC,
+            assay.get_whitelists(Modality::ATAC),
+        )
+        .unwrap();
+        let warnings = smoke_test_assay(
+            &assay,
+            &Modality::ATAC,
+            &BarcodeProcessor::LongRead(extractor),
+        )
+        .unwrap();
+        assert!(
+            warnings
+                .iter()
+                .any(|warning| warning.contains("extraction ratio")),
+            "{warnings:?}"
+        );
+    }
+
+    /// Section 4: the plan-build smoke test must warn when the pattern never
+    /// matches (parse ratio) and when a capture group is mapped to the wrong
+    /// region (whitelist ratio collapses while parsing stays intact).
+    #[test]
+    fn test_smoke_test_read_name_warns_on_mismatch() {
+        let directory = tempfile::tempdir().unwrap();
+        let target: Vec<u8> = vec![b'C'; 600];
+        // bc1's field holds CCCCCCCC, which is not in bc1's whitelist.
+        let records = [("read1:CCCCCCCC_GGGGGGGG_ACGTACGTAC", &target[..])];
+        let assay = read_name_assay(directory.path(), &records);
+
+        // Mapping error: parsing stays intact while bc1's whitelist ratio
+        // collapses to zero.
+        let (config, _) = ReadNameBarcodeConfig::new(
+            ":(?P<bc1>[ACGTN]{8})_(?P<bc2>[ACGTN]{8})_(?P<umi>[ACGTN]{10})$",
+            Some("R1"),
+            None,
+            std::slice::from_ref(&assay),
+            &Modality::RNA,
+        )
+        .unwrap();
+        let parser = ReadNameParser::new(&config, &assay, &Modality::RNA).unwrap();
+        let warnings =
+            smoke_test_assay(&assay, &Modality::RNA, &BarcodeProcessor::ReadName(parser)).unwrap();
+        assert!(
+            !warnings
+                .iter()
+                .any(|warning| warning.contains("parse ratio")),
+            "{warnings:?}"
+        );
+        assert!(
+            warnings
+                .iter()
+                .any(|warning| warning.contains("bc1") && warning.contains("whitelist hit ratio")),
+            "{warnings:?}"
+        );
+
+        // A pattern that matches nothing produces the parse-ratio warning.
+        let (config, _) = ReadNameBarcodeConfig::new(
+            ":(?P<bc1>[ACGTN]{8})_(?P<bc2>[ACGTN]{8})_(?P<umi>[ACGTN]{10})_ZZ$",
+            Some("R1"),
+            None,
+            std::slice::from_ref(&assay),
+            &Modality::RNA,
+        )
+        .unwrap();
+        let parser = ReadNameParser::new(&config, &assay, &Modality::RNA).unwrap();
+        let warnings =
+            smoke_test_assay(&assay, &Modality::RNA, &BarcodeProcessor::ReadName(parser)).unwrap();
+        assert!(
+            warnings
+                .iter()
+                .any(|warning| warning.contains("parse ratio")),
+            "{warnings:?}"
+        );
+    }
+
+    /// `barcode_order` overrides the barcode concatenation order; invalid
+    /// lists fail at configuration time.
+    #[test]
+    fn test_read_name_barcode_order() {
+        let directory = tempfile::tempdir().unwrap();
+        let target: Vec<u8> = vec![b'C'; 600];
+        // Name/capture order: umi, bc2, bc1.
+        let records = [("read1:ACGTACGTAC_CCCCCCCC_AAAAAAAA", &target[..])];
+        let pattern = ":(?P<umi>[ACGTN]{10})_(?P<bc2>[ACGTN]{8})_(?P<bc1>[ACGTN]{8})$";
+
+        // Explicit order: bc1 before bc2 (the reverse of capture order).
+        let assay = read_name_assay(directory.path(), &records);
+        let order: Vec<String> = vec!["bc1".into(), "bc2".into()];
+        let (config, warnings) = ReadNameBarcodeConfig::new(
+            pattern,
+            Some("R1"),
+            Some(order.as_slice()),
+            std::slice::from_ref(&assay),
+            &Modality::RNA,
+        )
+        .unwrap();
+        assert!(warnings.is_empty());
+        let mut execution = FastqPlan::new(vec![assay], Modality::RNA)
+            .with_read_name_barcode(config)
+            .build(false, 5000)
+            .unwrap();
+        let batch = execution.next_batch().unwrap().unwrap();
+        assert_eq!(batch.len(), 1);
+        assert_eq!(
+            batch[0].barcode.as_ref().unwrap().raw.sequence(),
+            b"AAAAAAAACCCCCCCC"
+        );
+        assert_eq!(batch[0].umi.as_ref().unwrap().sequence(), b"ACGTACGTAC");
+        assert!(execution.next_batch().unwrap().is_none());
+        execution.finish().unwrap();
+
+        // Invalid lists fail at configuration time.
+        let assay = read_name_assay(directory.path(), &records);
+        let duplicate: Vec<String> = vec!["bc1".into(), "bc1".into()];
+        let error = ReadNameBarcodeConfig::new(
+            pattern,
+            Some("R1"),
+            Some(duplicate.as_slice()),
+            std::slice::from_ref(&assay),
+            &Modality::RNA,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("duplicate entry"));
+
+        let with_umi: Vec<String> = vec!["bc1".into(), "bc2".into(), "umi".into()];
+        let error = ReadNameBarcodeConfig::new(
+            pattern,
+            Some("R1"),
+            Some(with_umi.as_slice()),
+            std::slice::from_ref(&assay),
+            &Modality::RNA,
+        )
+        .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("only barcode regions participate"));
+
+        let missing: Vec<String> = vec!["bc1".into()];
+        let error = ReadNameBarcodeConfig::new(
+            pattern,
+            Some("R1"),
+            Some(missing.as_slice()),
+            std::slice::from_ref(&assay),
+            &Modality::RNA,
+        )
+        .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("does not cover the pattern's barcode groups"));
+    }
+
+    /// Section 4: the smoke test's short-read content check must honor the
+    /// per-region `reverse_complement` flag, same as `annotate_short_read`.
+    #[test]
+    fn test_smoke_test_short_read_honors_onlist_rc() {
+        let directory = tempfile::tempdir().unwrap();
+        let (mut assay, _, _, _) = short_read_fixture(directory.path());
+
+        // Point both barcode onlists at files with known content: the
+        // fixture's barcodes verbatim (AAAAAAAAAA for hairpin, GGGGGGGGGG for
+        // rt).
+        let hp_list = directory.path().join("hp.txt");
+        let rt_list = directory.path().join("rt.txt");
+        std::fs::write(&hp_list, "AAAAAAAAAA\n").unwrap();
+        std::fs::write(&rt_list, "GGGGGGGGGG\n").unwrap();
+        for (region_id, url) in [
+            ("hairpin_barcode", hp_list.as_path()),
+            ("rt_barcode", rt_list.as_path()),
+        ] {
+            let region = assay.library_spec.get(region_id).unwrap();
+            let mut region = region.write().unwrap();
+            let onlist = region.onlist.as_mut().unwrap();
+            onlist.url = url.to_str().unwrap().to_string();
+            onlist.urltype = UrlType::Local;
+        }
+
+        // Baseline: both segments hit their onlists verbatim, so no content
+        // warning fires.
+        let analyzer = BarcodeAnalyzer::new(&assay, Modality::RNA);
+        let warnings = smoke_test_assay(
+            &assay,
+            &Modality::RNA,
+            &BarcodeProcessor::ShortRead(analyzer),
+        )
+        .unwrap();
+        assert!(
+            !warnings
+                .iter()
+                .any(|warning| warning.contains("onlist hit ratio")),
+            "{warnings:?}"
+        );
+
+        // Flip rt's reverse_complement: the check must RC the segment before
+        // matching, which turns the rt hit into a miss (ratio 0.5 < 0.9).
+        let region = assay.library_spec.get("rt_barcode").unwrap();
+        region.write().unwrap().onlist.as_mut().unwrap().rc = true;
+        let analyzer = BarcodeAnalyzer::new(&assay, Modality::RNA);
+        let warnings = smoke_test_assay(
+            &assay,
+            &Modality::RNA,
+            &BarcodeProcessor::ShortRead(analyzer),
+        )
+        .unwrap();
+        assert!(
+            warnings
+                .iter()
+                .any(|warning| warning.contains("onlist hit ratio")),
+            "{warnings:?}"
+        );
+    }
+
+    /// Paired-end read-name assays: with `read_id`, exactly one read parses
+    /// and the other contributes read 2. Omitting `read_id` makes every read
+    /// parse, doubling the barcode and UMI while the targets stay single.
+    #[test]
+    fn test_read_name_paired_end() {
+        let directory = tempfile::tempdir().unwrap();
+        let target1: Vec<u8> = vec![b'C'; 600];
+        let target2: Vec<u8> = vec![b'G'; 600];
+        let r1_path = directory.path().join("R1.fastq");
+        let r2_path = directory.path().join("R2.fastq");
+        write_fastq(&r1_path, "read1:AAAAAAAA_GGGGGGGG_ACGTACGTAC", &target1);
+        write_fastq(&r2_path, "read1:AAAAAAAA_GGGGGGGG_ACGTACGTAC", &target2);
+        let make_assay = |attach_r2: bool| -> Assay {
+            let mut assay = Assay::from_path("data/test_readname.yaml").unwrap();
+            assay.sequence_spec.get_mut("R1").unwrap().files =
+                Some(vec![File::from_fastq(&r1_path, false).unwrap()]);
+            if attach_r2 {
+                let mut r2 = assay.sequence_spec.get("R1").unwrap().clone();
+                r2.read_id = "R2".to_string();
+                r2.strand = Strand::Neg;
+                // A neg-strand read walks the library layout in reverse, so
+                // its primer is the 3'-side sequencing primer.
+                r2.primer_id = "p7".to_string();
+                r2.files = Some(vec![File::from_fastq(&r2_path, false).unwrap()]);
+                assay.sequence_spec.insert("R2".to_string(), r2);
+            }
+            assay
+        };
+
+        // Default: only R1 parses its name.
+        let assay = make_assay(true);
+        let (config, warnings) = ReadNameBarcodeConfig::new(
+            ":(?P<bc1>[ACGTN]{8})_(?P<bc2>[ACGTN]{8})_(?P<umi>[ACGTN]{10})$",
+            Some("R1"),
+            None,
+            std::slice::from_ref(&assay),
+            &Modality::RNA,
+        )
+        .unwrap();
+        assert!(warnings.is_empty());
+        let mut execution = FastqPlan::new(vec![assay], Modality::RNA)
+            .with_read_name_barcode(config)
+            .build(false, 5000)
+            .unwrap();
+        assert!(execution.is_paired_end());
+        let batch = execution.next_batch().unwrap().unwrap();
+        assert_eq!(batch.len(), 1);
+        let annotated = &batch[0];
+        assert_eq!(
+            annotated.barcode.as_ref().unwrap().raw.sequence(),
+            b"AAAAAAAAGGGGGGGG"
+        );
+        assert_eq!(annotated.umi.as_ref().unwrap().sequence(), b"ACGTACGTAC");
+        assert_eq!(annotated.read1.as_ref().unwrap().sequence(), &target1);
+        assert_eq!(annotated.read2.as_ref().unwrap().sequence(), &target2);
+        assert!(execution.next_batch().unwrap().is_none());
+        execution.finish().unwrap();
+
+        // Omitted read_id: both reads parse and the barcode is concatenated
+        // once per read; a warning is emitted at configuration time.
+        let assay = make_assay(true);
+        let (config, warnings) = ReadNameBarcodeConfig::new(
+            ":(?P<bc1>[ACGTN]{8})_(?P<bc2>[ACGTN]{8})_(?P<umi>[ACGTN]{10})$",
+            None,
+            None,
+            std::slice::from_ref(&assay),
+            &Modality::RNA,
+        )
+        .unwrap();
+        assert_eq!(warnings.len(), 1);
+        let mut execution = FastqPlan::new(vec![assay], Modality::RNA)
+            .with_read_name_barcode(config)
+            .build(false, 5000)
+            .unwrap();
+        let batch = execution.next_batch().unwrap().unwrap();
+        assert_eq!(batch.len(), 1);
+        let annotated = &batch[0];
+        assert_eq!(
+            annotated.barcode.as_ref().unwrap().raw.sequence(),
+            b"AAAAAAAAGGGGGGGGAAAAAAAAGGGGGGGG"
+        );
+        assert_eq!(
+            annotated.umi.as_ref().unwrap().sequence(),
+            b"ACGTACGTACACGTACGTAC"
+        );
+        assert_eq!(annotated.read1.as_ref().unwrap().sequence(), &target1);
+        assert_eq!(annotated.read2.as_ref().unwrap().sequence(), &target2);
+        assert!(execution.next_batch().unwrap().is_none());
+        execution.finish().unwrap();
     }
 
     /// A missing FASTQ must be reported while building the execution plan.

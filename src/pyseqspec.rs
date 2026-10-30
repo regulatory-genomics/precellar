@@ -451,9 +451,6 @@ impl Assay {
                     read.min_len = stream_min_len.unwrap_or(range.start) as u32;
                     read.max_len = stream_max_len.unwrap_or(range.end) as u32;
                 }
-                let read_for_validation = read.clone();
-                self.0
-                    .validate_read(&read_for_validation, infer_read_length_sample)?;
             }
             return Ok(());
         }
