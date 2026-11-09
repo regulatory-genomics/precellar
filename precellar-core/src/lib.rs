@@ -7,6 +7,7 @@ pub mod long;
 pub mod middleware;
 pub mod pipeline;
 pub mod qc;
+pub mod threads;
 pub mod timing;
 pub mod transcriptome;
 pub mod utils;

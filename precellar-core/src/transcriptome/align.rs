@@ -617,9 +617,12 @@ impl TxAligner {
                 warn!("Strandedness not provided, detecting from data ...");
                 strandedness = Some(self.detect_strandedness(&recs));
             }
-            recs.par_chunks(4096)
-                .flat_map_iter(|chunk| helper(self, chunk, strandedness.unwrap()))
-                .collect::<Vec<_>>()
+            let strandedness = strandedness.unwrap();
+            crate::threads::run(|| {
+                recs.par_chunks(4096)
+                    .flat_map_iter(|chunk| helper(self, chunk, strandedness))
+                    .collect::<Vec<_>>()
+            })
         })
     }
 

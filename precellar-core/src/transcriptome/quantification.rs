@@ -201,20 +201,22 @@ impl Quantifier {
     ) -> CellCounts {
         let alignments = alignments.collect::<Vec<_>>();
         let chunk_size = (alignments.len() / self.num_threads).max(1);
-        let per_cell: Vec<_> = alignments
-            .par_chunks(chunk_size)
-            .flat_map_iter(|chunk| {
-                chunk.into_iter().map(|aln| {
-                    let umi_group = GeneCounter::new(aln, &self.genes);
-                    let coverage = index.count_fragments(umi_group.to_fragments());
-                    (
-                        umi_group.to_counts(),
-                        umi_group.to_spliced_counts(),
-                        coverage,
-                    )
+        let per_cell: Vec<_> = crate::threads::run(|| {
+            alignments
+                .par_chunks(chunk_size)
+                .flat_map_iter(|chunk| {
+                    chunk.into_iter().map(|aln| {
+                        let umi_group = GeneCounter::new(aln, &self.genes);
+                        let coverage = index.count_fragments(umi_group.to_fragments());
+                        (
+                            umi_group.to_counts(),
+                            umi_group.to_spliced_counts(),
+                            coverage,
+                        )
+                    })
                 })
-            })
-            .collect();
+                .collect()
+        });
 
         let mut counts = CellCounts::default();
         for (umi, spliced, coverage) in per_cell {
@@ -246,9 +248,12 @@ fn sort_alignments<I>(
 where
     I: Iterator<Item = TxAlignment>,
 {
+    // The sorter sorts and writes chunks on its own pool; size it like the
+    // shared pool instead of rayon's default of one thread per core.
     let mut sorter = ExternalSorterBuilder::new()
         .with_chunk_size(chunk_size)
-        .with_compression(2);
+        .with_compression(2)
+        .num_threads(crate::threads::current_num_threads());
     if let Some(tmp) = temp_dir {
         sorter = sorter.with_tmp_dir(tmp);
     }

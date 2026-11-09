@@ -831,10 +831,12 @@ impl Iterator for AnnotatedFastqReader {
 
         let parallel_chunk_size = (chunk.len() / 128).max(1);
         let annotation = &self.annotation;
-        let processed: Vec<_> = chunk
-            .par_chunks(parallel_chunk_size)
-            .map(|chunk| annotation.process_chunk(chunk))
-            .collect();
+        let processed: Vec<_> = crate::threads::run(|| {
+            chunk
+                .par_chunks(parallel_chunk_size)
+                .map(|chunk| annotation.process_chunk(chunk))
+                .collect()
+        });
         let mut records = Vec::new();
         let mut qc = QcFastq::default();
         let mut qc_long_read = self.annotation.is_long_read().then(QcLongRead::default);

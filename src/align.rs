@@ -290,7 +290,8 @@ impl FastqPipeline {
     /// aligner : precellar.aligners.Star | BwaMem2 | MiniBwa | Minimap2
     ///     Configured aligner object.
     /// num_threads : int, keyword-only, default=8
-    ///     Number of threads used for FASTQ processing and alignment.
+    ///     Number of threads used for FASTQ processing, alignment, and the
+    ///     output sink. The job never runs more parallel work than this.
     /// chunk_size : int, keyword-only, default=10000000
     ///     Approximate number of bases per synchronized FASTQ batch per thread.
     /// mito_dna : list[str], keyword-only, default=["chrM", "M"]
@@ -470,7 +471,13 @@ impl AlignmentJob {
 }
 
 impl AlignmentJobState {
+    /// Runs the job with every parallel stage capped at `num_threads` threads.
     fn run_sink<'py, S: AlignmentSink>(self, py: Python<'py>, sink: &S) -> Result<Py<PyAny>> {
+        let num_threads = self.num_threads as usize;
+        precellar::threads::with_threads(num_threads, || self.run_sink_inner(py, sink))?
+    }
+
+    fn run_sink_inner<'py, S: AlignmentSink>(self, py: Python<'py>, sink: &S) -> Result<Py<PyAny>> {
         let strandedness = sink.strandedness(&self.assays, self.modality)?;
         let mut aligner = AlignerRef::try_from(self.aligner.bind(py).clone())?;
         let header = aligner.header();
