@@ -58,6 +58,10 @@ impl Quantifier {
         I: Iterator<Item = Vec<(Option<MultiMapR>, Option<MultiMapR>)>> + 'a,
         P: AsRef<std::path::Path>,
     {
+        // The stream is consumed lazily inside the external sorter. Its end
+        // marks the start of the `quantify` stage (sort collection, counting
+        // and writing), which `end_quantify` closes after the output is written.
+        let records = crate::timing::trace_tail(records);
         let mut qc = QcGeneQuant::default();
         let genome_index = GenomeBaseIndex::new(header);
 
@@ -185,6 +189,7 @@ impl Quantifier {
         )?)?;
 
         adata.close()?;
+        crate::timing::end_quantify();
         Ok(qc)
     }
 

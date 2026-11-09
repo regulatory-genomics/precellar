@@ -376,6 +376,7 @@ library_spec:
 /// A Python module implemented in Rust.
 #[pymodule]
 fn precellar(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    ::precellar::timing::init();
     env_logger::builder()
         .format(|buf, record| {
             let timestamp = buf.timestamp();

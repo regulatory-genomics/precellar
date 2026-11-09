@@ -526,6 +526,7 @@ impl AlignmentJobState {
             report,
             output_qc.map(|report| (report.name, report.metrics)),
         );
+        precellar::timing::flush();
         Ok(value_into_pyobject(report, py).unbind())
     }
 }

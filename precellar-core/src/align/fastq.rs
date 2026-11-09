@@ -35,6 +35,7 @@ use crate::barcode::{BarcodeAnalyzer, BarcodeCorrectOptions};
 use crate::long::{BarcodeExtractor, LrBarcodeExtractionStats};
 use crate::pipeline::{FastqStage, FastqStagePipeline, MiddlewareQcReport};
 use crate::qc::{QcAlign, QcFastq, QcLongRead};
+use crate::timing::{self, Stage};
 use crate::utils::{rev_compl_fastq_record, PrefetchIterator};
 use anyhow::{Context, Result};
 use bstr::BString;
@@ -617,7 +618,11 @@ impl<'a, A> AlignmentResult<'a, A> {
 impl<'a, A: Aligner> Iterator for AlignmentResult<'a, A> {
     type Item = AlignmentBatch;
     fn next(&mut self) -> Option<Self::Item> {
-        let data = match self.execution.next_batch() {
+        timing::finish_prepare();
+        let data = match {
+            let _span = timing::stage(Stage::FastqAnnotation);
+            self.execution.next_batch()
+        } {
             Ok(Some(data)) => data,
             Ok(None) => {
                 if self.num_records > 0 {
@@ -635,24 +640,28 @@ impl<'a, A: Aligner> Iterator for AlignmentResult<'a, A> {
         self.num_processed += data.len();
 
         // Align the reads.
-        let records = data.into_iter().map(AlignmentInput::from).collect();
-        let results: Vec<_> = self.aligner.align_reads(self.num_threads, records);
-        for alignment in &results {
-            let result = match alignment {
-                (Some(ali1), Some(ali2)) => self.qc.add_pair(&self.header, ali1, ali2),
-                (Some(ali1), None) => self.qc.add_read1(&self.header, ali1),
-                (None, Some(ali2)) => self.qc.add_read2(&self.header, ali2),
-                _ => {
-                    debug!("No alignment found for read");
-                    Ok(())
+        let results: Vec<_> = {
+            let _span = timing::stage(Stage::Alignment);
+            let records = data.into_iter().map(AlignmentInput::from).collect();
+            let results: Vec<_> = self.aligner.align_reads(self.num_threads, records);
+            for alignment in &results {
+                let result = match alignment {
+                    (Some(ali1), Some(ali2)) => self.qc.add_pair(&self.header, ali1, ali2),
+                    (Some(ali1), None) => self.qc.add_read1(&self.header, ali1),
+                    (None, Some(ali2)) => self.qc.add_read2(&self.header, ali2),
+                    _ => {
+                        debug!("No alignment found for read");
+                        Ok(())
+                    }
+                };
+                if let Err(error) = result {
+                    self.error = Some(error);
+                    self.complete = true;
+                    return None;
                 }
-            };
-            if let Err(error) = result {
-                self.error = Some(error);
-                self.complete = true;
-                return None;
             }
-        }
+            results
+        };
         Some(results)
     }
 }

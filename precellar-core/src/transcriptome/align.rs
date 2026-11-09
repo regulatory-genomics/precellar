@@ -14,6 +14,7 @@ use seqspec::ChemistryStrandedness;
 
 use crate::align::MultiMapR;
 use crate::fragment::Fragment;
+use crate::timing::{self, Stage};
 use crate::transcriptome::{Exon, Transcript};
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Encode, Decode)]
@@ -609,6 +610,9 @@ impl TxAligner {
 
         let mut strandedness = self.strandedness;
         data.into_iter().flat_map(move |recs| {
+            // The transcriptome annotation of one batch runs eagerly inside the
+            // closure, so the span covers exactly this batch.
+            let _span = timing::stage(Stage::TxAlign);
             if strandedness.is_none() {
                 warn!("Strandedness not provided, detecting from data ...");
                 strandedness = Some(self.detect_strandedness(&recs));
