@@ -104,6 +104,11 @@ impl<R: Record> TryFrom<Vec<R>> for MultiMap<R> {
     }
 }
 
+/// Records per alignment task. Small enough that rayon can rebalance work
+/// between threads while a batch runs, large enough that per-task overhead
+/// stays negligible.
+const ALIGN_CHUNK_SIZE: usize = 1024;
+
 /// Trait defining the behavior of aligners like BWA and STAR.
 pub trait Aligner {
     /// Retrieves the SAM header associated with the aligner.
@@ -306,42 +311,47 @@ impl Aligner for StarAligner {
 
     fn align_reads(
         &mut self,
-        num_threads: u16,
+        _num_threads: u16,
         records: Vec<AlignmentInput>,
     ) -> Vec<(Option<MultiMapR>, Option<MultiMapR>)> {
-        let chunk_size = get_chunk_size(records.len(), num_threads as usize);
-
         records
-            .par_chunks(chunk_size)
-            .flat_map_iter(|chunk| {
-                let mut aligner = self.clone();
-                chunk.iter().map(move |rec| {
-                    let bc = &rec.metadata.barcode;
-                    let read1 = rec.read1.as_ref();
-                    let read2 = rec.read2.as_ref();
+            .par_chunks(ALIGN_CHUNK_SIZE)
+            .map_init(
+                || self.clone(),
+                |aligner, chunk| {
+                    chunk
+                        .iter()
+                        .map(|rec| {
+                            let bc = &rec.metadata.barcode;
+                            let read1 = rec.read1.as_ref();
+                            let read2 = rec.read2.as_ref();
 
-                    if read1.is_some() && read2.is_some() {
-                        let (mut ali1, mut ali2) =
-                            aligner.align_read_pair(&read1.unwrap(), &read2.unwrap()).unwrap();
-                        ali1.iter_mut()
-                            .chain(ali2.iter_mut())
-                            .for_each(|alignment| {
-                                attach_read_metadata(alignment, bc, rec.metadata.umi.as_ref());
-                            });
-                        (Some(ali1.try_into().unwrap()), Some(ali2.try_into().unwrap()))
-                    } else if let Some((read, slot)) = select_single_read(read1, read2) {
-                        let mut ali = aligner.align_read(read).unwrap();
-                        ali.iter_mut().for_each(|alignment| {
-                            attach_read_metadata(alignment, bc, rec.metadata.umi.as_ref());
-                        });
-                        restore_single_slot(ali.try_into().unwrap(), slot)
-                    } else {
-                        log::warn!("Found record with no reads (read1 and read2 are both None). Barcode: {:?}",
-                                  String::from_utf8_lossy(bc.raw.sequence()));
-                        (None, None)
-                    }
-                })
-            })
+                            if read1.is_some() && read2.is_some() {
+                                let (mut ali1, mut ali2) = aligner
+                                    .align_read_pair(&read1.unwrap(), &read2.unwrap())
+                                    .unwrap();
+                                ali1.iter_mut()
+                                    .chain(ali2.iter_mut())
+                                    .for_each(|alignment| {
+                                        attach_read_metadata(alignment, bc, rec.metadata.umi.as_ref());
+                                    });
+                                (Some(ali1.try_into().unwrap()), Some(ali2.try_into().unwrap()))
+                            } else if let Some((read, slot)) = select_single_read(read1, read2) {
+                                let mut ali = aligner.align_read(read).unwrap();
+                                ali.iter_mut().for_each(|alignment| {
+                                    attach_read_metadata(alignment, bc, rec.metadata.umi.as_ref());
+                                });
+                                restore_single_slot(ali.try_into().unwrap(), slot)
+                            } else {
+                                log::warn!("Found record with no reads (read1 and read2 are both None). Barcode: {:?}",
+                                          String::from_utf8_lossy(bc.raw.sequence()));
+                                (None, None)
+                            }
+                        })
+                        .collect::<Vec<_>>()
+                },
+            )
+            .flatten()
             .collect()
     }
 }
@@ -353,55 +363,49 @@ impl Aligner for Minimap2Aligner {
 
     fn align_reads(
         &mut self,
-        num_threads: u16,
+        _num_threads: u16,
         records: Vec<AlignmentInput>,
     ) -> Vec<(Option<MultiMapR>, Option<MultiMapR>)> {
-        let chunk_size = get_chunk_size(records.len(), num_threads as usize);
-
-        // Use Rayon for parallel processing with chunks
         records
-            .par_chunks(chunk_size)
-            .flat_map_iter(|chunk| {
-                // Clone aligner for this thread (efficient: only clones Arc pointers to shared index)
-                let mut thread_aligner = self.clone();
+            .par_chunks(ALIGN_CHUNK_SIZE)
+            .map_init(
+                || self.clone(),
+                // Cloning is efficient: only clones Arc pointers to the shared index.
+                |thread_aligner, chunk| {
+                    chunk
+                        .iter()
+                        .map(|rec| {
+                            let bc = &rec.metadata.barcode;
+                            let read1 = rec.read1.as_ref();
+                            let read2 = rec.read2.as_ref();
 
-                chunk.iter().map(move |rec| {
-                    let bc = &rec.metadata.barcode;
-                    let read1 = rec.read1.as_ref();
-                    let read2 = rec.read2.as_ref();
-
-                    if read1.is_some() && read2.is_some() {
-                        let (mut ali1, mut ali2) =
-                            thread_aligner.align_read_pair(&read1.unwrap(), &read2.unwrap()).unwrap();
-                        ali1.iter_mut()
-                            .chain(ali2.iter_mut())
-                            .for_each(|alignment| {
-                                attach_read_metadata(alignment, bc, rec.metadata.umi.as_ref());
-                            });
-                        (Some(ali1.try_into().unwrap()), Some(ali2.try_into().unwrap()))
-                    } else if let Some((read, slot)) = select_single_read(read1, read2) {
-                        let mut ali = thread_aligner.align_read(read).unwrap();
-                        ali.iter_mut().for_each(|alignment| {
-                            attach_read_metadata(alignment, bc, rec.metadata.umi.as_ref());
-                        });
-                        restore_single_slot(ali.try_into().unwrap(), slot)
-                    } else {
-                        log::warn!("Found record with no reads (read1 and read2 are both None). Barcode: {:?}",
-                                  String::from_utf8_lossy(bc.raw.sequence()));
-                        (None, None)
-                    }
-                })
-            })
+                            if read1.is_some() && read2.is_some() {
+                                let (mut ali1, mut ali2) = thread_aligner
+                                    .align_read_pair(&read1.unwrap(), &read2.unwrap())
+                                    .unwrap();
+                                ali1.iter_mut()
+                                    .chain(ali2.iter_mut())
+                                    .for_each(|alignment| {
+                                        attach_read_metadata(alignment, bc, rec.metadata.umi.as_ref());
+                                    });
+                                (Some(ali1.try_into().unwrap()), Some(ali2.try_into().unwrap()))
+                            } else if let Some((read, slot)) = select_single_read(read1, read2) {
+                                let mut ali = thread_aligner.align_read(read).unwrap();
+                                ali.iter_mut().for_each(|alignment| {
+                                    attach_read_metadata(alignment, bc, rec.metadata.umi.as_ref());
+                                });
+                                restore_single_slot(ali.try_into().unwrap(), slot)
+                            } else {
+                                log::warn!("Found record with no reads (read1 and read2 are both None). Barcode: {:?}",
+                                          String::from_utf8_lossy(bc.raw.sequence()));
+                                (None, None)
+                            }
+                        })
+                        .collect::<Vec<_>>()
+                },
+            )
+            .flatten()
             .collect()
-    }
-}
-
-fn get_chunk_size(total_length: usize, num_threads: usize) -> usize {
-    let chunk_size = total_length / num_threads.max(1);
-    if chunk_size == 0 {
-        1
-    } else {
-        chunk_size
     }
 }
 
