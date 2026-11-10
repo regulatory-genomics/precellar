@@ -1,6 +1,9 @@
 name: build-wheels
 on:
-  workflow_call
+  workflow_call:
+    secrets:
+      UCF_REPO_TOKEN:
+        required: true
 
 jobs:
   build_wheels:
@@ -27,6 +30,8 @@ jobs:
         uses: nschloe/action-cached-lfs-checkout@v1
 
       - uses: ./.github/actions/setup-rust
+        with:
+          ucf_repo_token: ${{ secrets.UCF_REPO_TOKEN }}
 
       # Used to host cibuildwheel
       - uses: actions/setup-python@v6

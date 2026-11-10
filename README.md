@@ -29,6 +29,10 @@ pip install precellar
 pip install 'git+https://github.com/regulatory-genomics/precellar.git'
 ```
 
+CI builds also need a repository secret named `UCF_REPO_TOKEN` with read access
+to the private UCF repository. The Rust setup action rewrites the pinned SSH
+dependency to authenticated HTTPS before Cargo resolves it.
+
 ## Examples
 
 Alignment uses the chainable `FastqPipeline -> AlignmentJob -> terminal output`

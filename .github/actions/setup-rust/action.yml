@@ -5,6 +5,9 @@ inputs:
     description: 'Cache'
     required: false
     default: false
+  ucf_repo_token:
+    description: 'GitHub token that can read the private UCF repository'
+    required: true
 runs:
   using: "composite"
   steps: 
@@ -14,6 +17,18 @@ runs:
         profile: minimal
         toolchain: stable
         override: true
+
+    - name: Configure private UCF dependency
+      shell: bash
+      env:
+        UCF_REPO_TOKEN: ${{ inputs.ucf_repo_token }}
+      run: |
+        if [[ -z "${UCF_REPO_TOKEN}" ]]; then
+          echo "::error::The UCF_REPO_TOKEN secret must be configured for Rust builds."
+          exit 1
+        fi
+        git config --global url."https://x-access-token:${UCF_REPO_TOKEN}@github.com/".insteadOf "ssh://git@github.com/"
+        echo "CARGO_NET_GIT_FETCH_WITH_CLI=true" >> "$GITHUB_ENV"
 
     - name: Cache rust build
       uses: Swatinem/rust-cache@v2

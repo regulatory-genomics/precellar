@@ -119,16 +119,18 @@ fn single_assay_id(assays: &[seqspec::Assay]) -> Result<Option<String>> {
     }
 }
 
-/// Sidecar output that only replaces the requested path after a successful
-/// write. The staging file is removed on drop unless it was committed, and it
-/// is created with normal file permissions so the sidecar stays readable.
-struct AtomicSidecar {
+/// One output in the pair of files published by the scATAC sink.
+///
+/// The staging file is removed on drop unless it was published. The caller
+/// publishes the main UCF and optional sidecar together with rollback for
+/// ordinary rename errors.
+struct AtomicOutput {
     output: PathBuf,
     staging: PathBuf,
     committed: bool,
 }
 
-impl AtomicSidecar {
+impl AtomicOutput {
     fn new(output: &Path) -> Result<Self> {
         let parent = output
             .parent()
@@ -143,8 +145,6 @@ impl AtomicSidecar {
             std::process::id(),
             epoch_nanos()
         ));
-        std::fs::File::create(&staging)
-            .map_err(|error| anyhow!("cannot stage {}: {error}", output.display()))?;
         Ok(Self {
             output: output.to_path_buf(),
             staging,
@@ -156,21 +156,150 @@ impl AtomicSidecar {
         &self.staging
     }
 
-    fn commit(mut self) -> Result<()> {
-        std::fs::rename(&self.staging, &self.output).map_err(|error| {
-            anyhow!("cannot publish {}: {error}", self.output.display())
-        })?;
-        self.committed = true;
-        Ok(())
-    }
 }
 
-impl Drop for AtomicSidecar {
+impl Drop for AtomicOutput {
     fn drop(&mut self) {
         if !self.committed {
             let _ = std::fs::remove_file(&self.staging);
         }
     }
+}
+
+fn comparable_output_path(path: &Path) -> Result<PathBuf> {
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()?.join(path)
+    };
+    let mut normalized = PathBuf::new();
+    for component in absolute.components() {
+        match component {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                normalized.pop();
+            }
+            _ => normalized.push(component.as_os_str()),
+        }
+    }
+    if normalized.exists() {
+        return Ok(std::fs::canonicalize(normalized)?);
+    }
+    if let (Some(parent), Some(name)) = (normalized.parent(), normalized.file_name()) {
+        if let Ok(parent) = std::fs::canonicalize(parent) {
+            return Ok(parent.join(name));
+        }
+    }
+    Ok(normalized)
+}
+
+fn validate_output_paths(main: &Path, sidecar: &Path) -> Result<()> {
+    if comparable_output_path(main)? == comparable_output_path(sidecar)? {
+        bail!("UCF and SNV sidecar outputs must be different paths");
+    }
+    Ok(())
+}
+
+fn write_sidecar_line(writer: &mut dyn Write, line: &str) -> std::io::Result<()> {
+    writeln!(writer, "{line}")
+}
+
+fn backup_existing_output(output: &Path) -> Result<Option<PathBuf>> {
+    let metadata = match std::fs::symlink_metadata(output) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    if !metadata.file_type().is_file() && !metadata.file_type().is_symlink() {
+        bail!("output path is not a regular file: {}", output.display());
+    }
+    let parent = output
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let name = output
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("output");
+    let backup = parent.join(format!(
+        ".{name}.backup-{}-{}",
+        std::process::id(),
+        epoch_nanos()
+    ));
+    std::fs::rename(output, &backup)
+        .map_err(|error| anyhow!("cannot stage existing {}: {error}", output.display()))?;
+    Ok(Some(backup))
+}
+
+fn restore_output(
+    output: &Path,
+    backup: Option<PathBuf>,
+    published: bool,
+) -> Result<()> {
+    if published && output.exists() {
+        std::fs::remove_file(output)
+            .map_err(|error| anyhow!("cannot remove published {}: {error}", output.display()))?;
+    }
+    if let Some(backup) = backup {
+        std::fs::rename(&backup, output).map_err(|error| {
+            anyhow!("cannot restore previous {}: {error}", output.display())
+        })?;
+    }
+    Ok(())
+}
+
+fn publish_output_pair(
+    main: &mut AtomicOutput,
+    mut sidecar: Option<&mut AtomicOutput>,
+) -> Result<()> {
+    if let Some(sidecar) = sidecar.as_deref() {
+        validate_output_paths(&main.output, &sidecar.output)?;
+    }
+
+    let mut main_backup = None;
+    let mut sidecar_backup = None;
+    let mut main_published = false;
+    let mut sidecar_published = false;
+    let result = (|| {
+        main_backup = backup_existing_output(&main.output)?;
+        if let Some(sidecar) = sidecar.as_deref_mut() {
+            sidecar_backup = backup_existing_output(&sidecar.output)?;
+            std::fs::rename(&sidecar.staging, &sidecar.output).map_err(|error| {
+                anyhow!("cannot publish {}: {error}", sidecar.output.display())
+            })?;
+            sidecar.committed = true;
+            sidecar_published = true;
+        }
+        std::fs::rename(&main.staging, &main.output)
+            .map_err(|error| anyhow!("cannot publish {}: {error}", main.output.display()))?;
+        main.committed = true;
+        main_published = true;
+        Ok(())
+    })();
+
+    if let Err(error) = result {
+        let rollback = restore_output(&main.output, main_backup, main_published)
+            .and_then(|_| match sidecar.as_deref() {
+                Some(sidecar) => restore_output(
+                    &sidecar.output,
+                    sidecar_backup,
+                    sidecar_published,
+                ),
+                None => Ok(()),
+            });
+        return match rollback {
+            Ok(()) => Err(error),
+            Err(rollback_error) => Err(anyhow!("{error}; rollback failed: {rollback_error}")),
+        };
+    }
+
+    if let Some(backup) = main_backup {
+        let _ = std::fs::remove_file(backup);
+    }
+    if let Some(backup) = sidecar_backup {
+        let _ = std::fs::remove_file(backup);
+    }
+    Ok(())
 }
 
 fn parse_alignment_policy(value: &str) -> Result<AlignmentPolicy> {
@@ -284,6 +413,12 @@ impl ScAtacUcfSink {
         if snv_output.is_some() && !compute_snv {
             bail!("snv_output requires compute_snv=True");
         }
+        if compute_snv {
+            let sidecar = snv_output
+                .clone()
+                .unwrap_or_else(|| default_snv_path(&output));
+            validate_output_paths(&output, &sidecar)?;
+        }
         Ok(Self {
             output,
             shift_left,
@@ -325,6 +460,7 @@ impl AlignmentSink for ScAtacUcfSink {
             shift_right: self.shift_right,
             temp_dir: context.temp_dir.clone(),
             compute_snv: self.compute_snv,
+            chunk_size: self.sort_chunk_size,
             ..Default::default()
         };
 
@@ -416,8 +552,9 @@ impl AlignmentSink for ScAtacUcfSink {
         } else {
             None
         };
-        let sidecar = match &sidecar_path {
-            Some(path) => Some(AtomicSidecar::new(path)?),
+        let mut main_output = AtomicOutput::new(&self.output)?;
+        let mut sidecar = match &sidecar_path {
+            Some(path) => Some(AtomicOutput::new(path)?),
             None => None,
         };
         let mut snv_writer = match &sidecar {
@@ -446,16 +583,16 @@ impl AlignmentSink for ScAtacUcfSink {
             chromosomes,
         );
         let mut records = records;
-        let error_slot = Rc::clone(&error);
         let stream = std::iter::from_fn(|| {
             let next = match records.next()? {
                 Ok(next) => next,
                 Err(error) => return Some(Err(ScAtacError::Invalid(error.to_string()))),
             };
             if let Some(sidecar) = snv_writer.as_mut() {
-                if let Err(error) = writeln!(sidecar, "{}", next.line) {
-                    record_error(&error_slot, error);
-                    return None;
+                if let Err(error) = write_sidecar_line(sidecar.as_mut(), &next.line) {
+                    return Some(Err(ScAtacError::Invalid(format!(
+                        "write SNV sidecar: {error}"
+                    ))));
                 }
             }
             Some(Ok(ScAtacRecordV2::new(
@@ -468,7 +605,7 @@ impl AlignmentSink for ScAtacUcfSink {
             )))
         });
         ScAtacWriter::write_file_v2_iter_fallible_with_options_auto_counts_zstd(
-            &self.output,
+            main_output.path(),
             &metadata,
             &cell_entries,
             stream,
@@ -482,13 +619,15 @@ impl AlignmentSink for ScAtacUcfSink {
         if let Some(error) = error.borrow_mut().take() {
             return Err(error);
         }
-        if let Some(mut writer) = snv_writer {
+        if let Some(mut writer) = snv_writer.take() {
             writer.flush()?;
             drop(writer);
-            let sidecar = sidecar.expect("sidecar writer implies staged sidecar");
-            std::fs::File::open(sidecar.path())?.sync_all()?;
-            sidecar.commit()?;
+            if let Some(sidecar) = sidecar.as_ref() {
+                std::fs::File::open(sidecar.path())?.sync_all()?;
+            }
         }
+        std::fs::File::open(main_output.path())?.sync_all()?;
+        publish_output_pair(&mut main_output, sidecar.as_mut())?;
 
         let serde_json::Value::Object(mut metrics) =
             std::mem::take(&mut *qc.borrow_mut()).into()
@@ -780,5 +919,63 @@ impl AlignmentSink for ScRnaUcfSink {
             name: "sc_rna_ucf".to_owned(),
             metrics: serde_json::Value::Object(metrics),
         }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io;
+
+    struct FailingWriter;
+
+    impl Write for FailingWriter {
+        fn write(&mut self, _buf: &[u8]) -> io::Result<usize> {
+            Err(io::Error::new(io::ErrorKind::Other, "injected sidecar failure"))
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn rejects_identical_ucf_and_snv_paths() {
+        assert!(validate_output_paths(
+            Path::new("results/sample.ucf"),
+            Path::new("./results/./sample.ucf"),
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn sidecar_write_failure_is_returned() {
+        let mut writer = FailingWriter;
+        let error = write_sidecar_line(&mut writer, "fragment").unwrap_err();
+        assert!(error.to_string().contains("injected sidecar failure"));
+    }
+
+    #[test]
+    fn publishing_pair_rolls_back_if_main_publish_fails() {
+        let directory = tempfile::tempdir().unwrap();
+        let main_output = directory.path().join("main.ucf");
+        let sidecar_output = directory.path().join("main.snv.tsv.zst");
+        std::fs::create_dir(&main_output).unwrap();
+        std::fs::write(&sidecar_output, b"old sidecar").unwrap();
+
+        let (main_stage, sidecar_stage, publish_error) = {
+            let mut main = AtomicOutput::new(&main_output).unwrap();
+            let mut sidecar = AtomicOutput::new(&sidecar_output).unwrap();
+            let main_stage = main.path().to_owned();
+            let sidecar_stage = sidecar.path().to_owned();
+            std::fs::write(sidecar.path(), b"new sidecar").unwrap();
+            let publish_error = publish_output_pair(&mut main, Some(&mut sidecar)).unwrap_err();
+            (main_stage, sidecar_stage, publish_error)
+        };
+        assert!(publish_error.to_string().contains("not a regular file"));
+        assert!(main_output.is_dir());
+        assert_eq!(std::fs::read(&sidecar_output).unwrap(), b"old sidecar");
+        assert!(!main_stage.exists());
+        assert!(!sidecar_stage.exists());
     }
 }

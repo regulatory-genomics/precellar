@@ -39,6 +39,7 @@ jobs:
     - uses: ./.github/actions/setup-rust
       with:
         cache: true
+        ucf_repo_token: ${{ secrets.UCF_REPO_TOKEN }}
 
     - name: Install the project
       run: uv sync --all-groups
@@ -47,6 +48,7 @@ jobs:
     needs: build-and-test
     if: ${{ startsWith(github.ref, 'refs/tags/') || contains(github.event.head_commit.message, '[wheel]') }}
     uses: regulatory-genomics/precellar/.github/workflows/wheels.yml@main
+    secrets: inherit
 
   publish:
     needs: build-wheel

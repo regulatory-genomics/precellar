@@ -38,12 +38,9 @@ def fastq_records(path: Path) -> int:
         return sum(1 for _ in handle) // 4
 
 
-def fragment_rows(path: Path) -> list[str] | None:
-    """Read a zstd TSV, or return ``None`` when no zstd binding is installed."""
-    try:
-        import zstandard
-    except ImportError:
-        return None
+def fragment_rows(path: Path) -> list[str]:
+    """Read a zstd-compressed TSV and return its data rows."""
+    import zstandard
 
     with path.open("rb") as handle, zstandard.ZstdDecompressor().stream_reader(handle) as reader:
         text = reader.read().decode()
@@ -108,8 +105,6 @@ def run(assay, modality: str, sink, options: argparse.Namespace):
 
 
 def ucf_cli(options: argparse.Namespace, command: str, path: Path) -> str:
-    if options.ucf_cli is None:
-        return ""
     return subprocess.run(
         [str(options.ucf_cli), command, str(path)],
         check=True,
@@ -118,15 +113,22 @@ def ucf_cli(options: argparse.Namespace, command: str, path: Path) -> str:
     ).stdout
 
 
+def inspected_row_count(text: str, path: Path) -> int:
+    match = re.search(r"row_count=(\d+)", text)
+    if match is None:
+        raise RuntimeError(f"ucf-cli inspect did not report row_count for {path}")
+    return int(match.group(1))
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--ucf-cli", type=Path)
+    parser.add_argument("--ucf-cli", type=Path, required=True)
     parser.add_argument("--index", type=Path, required=True)
     parser.add_argument("--aligner", choices=["bwa-mem2", "minibwa"], default="bwa-mem2")
     parser.add_argument("--atac-assay", type=Path, required=True)
     parser.add_argument("--atac-r1", type=Path, required=True)
     parser.add_argument("--atac-r2", type=Path, required=True)
-    parser.add_argument("--atac-i1", type=Path)
+    parser.add_argument("--atac-i1", type=Path, required=True)
     parser.add_argument("--scrna-assay", type=Path)
     parser.add_argument("--scrna-r1", type=Path)
     parser.add_argument("--scrna-r2", type=Path)
@@ -136,13 +138,16 @@ def main() -> int:
     parser.add_argument("--chunk-size", type=int, default=1000)
     parser.add_argument("--sort-chunk-size", type=int, default=1_000_000)
     options = parser.parse_args()
+    try:
+        import zstandard  # noqa: F401
+    except ImportError:
+        parser.error("zstandard is required for the sidecar multiset check")
     options.output_dir.mkdir(parents=True, exist_ok=True)
 
     report: dict[str, object] = {"command": sys.argv}
 
     atac_dir = options.output_dir / "atac"
     atac_dir.mkdir(exist_ok=True)
-    assert options.atac_i1 is not None, "ATAC needs an index read for the generic assay"
     report["atac"] = run(
         atac_assay(options),
         "atac",
@@ -161,20 +166,19 @@ def main() -> int:
     )
 
     inspect = ucf_cli(options, "inspect", atac_dir / "direct.ucf")
-    report["atac_rows"] = int(re.search(r"row_count=(\d+)", inspect).group(1)) if inspect else None
+    report["atac_rows"] = inspected_row_count(inspect, atac_dir / "direct.ucf")
     fragments = fragment_rows(atac_dir / "fragments.tsv.zst")
     sidecar = fragment_rows(atac_dir / "direct.ucf.snv.tsv.zst")
-    if fragments is None or sidecar is None:
-        report["atac_sidecar_matches_fragments"] = None
-        report["atac_sidecar_note"] = "install zstandard to compare sidecar rows"
-    else:
-        report["atac_fragment_rows"] = len(fragments)
-        report["atac_sidecar_rows"] = len(sidecar)
-        report["atac_sidecar_matches_fragments"] = sorted(fragments) == sorted(sidecar)
+    report["atac_fragment_rows"] = len(fragments)
+    report["atac_sidecar_rows"] = len(sidecar)
+    report["atac_sidecar_matches_fragments"] = sorted(fragments) == sorted(sidecar)
+    if not report["atac_sidecar_matches_fragments"]:
+        raise RuntimeError("SNV sidecar rows do not match FragmentsSink rows")
     ucf_cli(options, "validate", atac_dir / "direct.ucf")
 
     if options.scrna_assay is not None:
-        assert options.scrna_r1 and options.scrna_r2 and options.scrna_i1
+        if not options.scrna_r1 or not options.scrna_r2 or not options.scrna_i1:
+            parser.error("--scrna-assay requires --scrna-r1, --scrna-r2, and --scrna-i1")
         rna_dir = options.output_dir / "scrna"
         rna_dir.mkdir(exist_ok=True)
         report["scrna_ucf"] = run(
@@ -187,9 +191,7 @@ def main() -> int:
             options,
         )
         inspect = ucf_cli(options, "inspect", rna_dir / "direct.ucf")
-        report["scrna_rows"] = (
-            int(re.search(r"row_count=(\d+)", inspect).group(1)) if inspect else None
-        )
+        report["scrna_rows"] = inspected_row_count(inspect, rna_dir / "direct.ucf")
         ucf_cli(options, "validate", rna_dir / "direct.ucf")
         report["scrna_fastq_reads"] = fastq_records(options.scrna_r2)
 
