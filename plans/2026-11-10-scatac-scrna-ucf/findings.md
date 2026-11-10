@@ -24,6 +24,16 @@
 | `precellar` consumes UCF crates by relative path (`../UCF/crates/...`). | This workspace already links `ucf-sc-atac`/`ucf-rna` this way from `tachyon-browser` and `tachyon`; the UCF repo's clean commits are on a local Gitea branch that GitHub does not have. | 2026-11-10 |
 | scRNA UMI comes from the `RX` tag (`Tag::UMI_SEQUENCE`), not `UB`. | `precellar-core::align::aligners` writes the UMI into `Tag::UMI_SEQUENCE`, and `MultiMap::umi()` reads the same tag. | 2026-11-10 |
 | The scRNA row carries `block_count`, computed from CIGAR at conversion time. | The UCF writer validates block/CIGAR totals against metadata, and the sink must know them before streaming. | 2026-11-10 |
+| Real ATAC smoke test passes with BWA-MEM2. | 2,500 real read pairs from `/data3/litian/macrophage/data/ATAC/ATAC_test/` yielded 1,136 unique fragments; direct scATAC UCF validation passed and the SNV sidecar matched the fragment TSV multiset. | 2026-11-10 |
+| The local ATAC FASTQ is not a representative barcode-valid scATAC library under the DNBelab template. | The template reported 0.16%/0.12% exact barcode matches; the successful sink run used a generic no-whitelist assay and one derived 8/22-base index-read file. | 2026-11-10 |
+| MiniBWA is unsafe for this real FASTQ/assembly combination. | The run terminated in `ext/minibwa/format.c:187` with `write_sam_cigar` assertion failure; BWA-MEM2 completed the same reference/data run. | 2026-11-10 |
+| New UCF sinks inherit a temp-directory panic from `IntoFragments`. | Passing a nonexistent `temp_dir` reached `precellar-core/src/fragment/mod.rs:457`, where `ExternalSorterBuilder::build().unwrap()` panicked with `NotFound`; the directory must be created or the sorter must return an error. | 2026-11-10 |
+| Standalone precellar packaging is not yet possible from the pushed branch. | `Cargo.toml` uses sibling path dependencies for all three UCF crates; a clone of `precellar` without `../UCF` cannot resolve them. | 2026-11-10 |
+| scRNA conversion currently drops mapped records without CB silently. | `row_from_record` returns `Ok(None)` for missing barcode and `ScRnaUcfSink` ignores that case; no drop counter or failure policy is exposed. | 2026-11-10 |
+| The scRNA sink iterates all `MultiMapR` alignments while the converter comment and plan promise primary mapped alignments. | `src/ucf.rs:468-483` calls `record.iter()`, while `row_from_record` only filters `is_unmapped`; secondary/supplementary rows can enter the UCF. | 2026-11-10 |
+| Direct output paths are not atomic. | Both sinks pass the final output path directly to UCF writers; iterator errors or sidecar write errors can leave a plausible partial file at the requested path. | 2026-11-10 |
+| Sort memory is not controlled by the public chunk option. | Both new sinks hard-code the external-sort input chunk size to `10_000_000`; `chunk_rows` only controls UCF output chunks. | 2026-11-10 |
+| UCF row IDs are not range-validated at the writer boundary. | `ScRnaWriter` validates offsets/counts and metadata totals but does not check `cell_id < cells.len()` or a non-sentinel `umi_id < umis.len()`. | 2026-11-10 |
 
 ## Rejected options
 

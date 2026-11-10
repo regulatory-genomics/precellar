@@ -8,13 +8,17 @@ updated: 2026-11-10
 
 ## Now
 
-Implementation complete on branches `UCF/feat/sc-rna-alignment` and
-`precellar/feat/scatac-scrna-ucf`. Remaining from `plan.md`: release build and
-the direct-vs-two-step benchmark fixture.
+Implementation is pushed on branches `UCF/feat/sc-rna-alignment` and
+`precellar/feat/scatac-scrna-ucf`. Real scATAC FASTQ validation passed through
+BWA-MEM2 and the direct UCF sink; the real scRNA smoke test is running in the
+background.
 
 ## Blockers
 
-- None for implementation. Both repos build and test on this host.
+- The UCF branch keeps unrelated pre-existing CLI/table-query edits uncommitted.
+- MiniBWA aborts on the real ATAC FASTQ with a C assertion; BWA-MEM2 succeeds.
+- A nonexistent user-supplied `temp_dir` causes an existing fragment sorter
+  `unwrap()` panic instead of a returned error.
 
 ## Log
 
@@ -28,4 +32,15 @@ the direct-vs-two-step benchmark fixture.
 - Did (precellar): added `ScAtacUcfSink` (direct scATAC UCF v2 + optional zstd SNV sidecar) and `ScRnaUcfSink` (cell-aware scRNA UCF), single-assay guard, and sink registration.
 - Verified: `cargo test -p ucf-rna` -> 18 tests pass; `cargo test --workspace` in precellar -> 12 + 111 + 5 + 19 tests pass; `cargo check --workspace` has no new warnings.
 - Verified: built the debug cdylib and imported it with Python 3.12; both sink classes construct and reject invalid options.
-- Next: run the release build and the direct-vs-two-step benchmark, then commit.
+- Verified: real ATAC FASTQ (`2,500` read pairs) with hg38 and BWA-MEM2 produced
+  `1,136` unique fragments through both `FragmentsSink` and `ScAtacUcfSink`.
+  `ucf-cli inspect` and `ucf-cli validate` passed for the direct UCF; the SNV
+  sidecar contained `1,136` data rows and its row multiset matched the fragment
+  TSV exactly.
+- Observed: the DNBelab barcode template gave only `0.08%` valid barcodes on
+  the local ATAC FASTQ, so that run is a real alignment/sink smoke test rather
+  than a representative single-cell barcode benchmark. A generic no-whitelist
+  assay with a derived index-read file was used for the successful UCF run.
+- Next: finish the real scRNA smoke test, record the review findings, and use
+  `plans/2026-11-10-scatac-scrna-ucf-refactor/` for the next implementation
+  phase.

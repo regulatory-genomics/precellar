@@ -48,8 +48,9 @@ Add `precellar.sinks.ScAtacUcfSink` and `precellar.sinks.ScRnaUcfSink` and regis
 
 - [x] `cargo test --workspace` in `precellar/` -> all existing and new Rust tests pass.
 - [x] `cargo test -p ucf-rna` in the local UCF checkout -> existing UCF contracts and the new scRNA round-trip tests pass.
-- [x] New synthetic scATAC sink test -> not yet end-to-end: core sorting/strand/conversion tests pass and the sink compiles into the extension; a Python-level fixture is still needed.
+- [x] Real scATAC sink test -> 2,500 real read pairs through BWA-MEM2 produced 1,136 unique fragments; direct UCF validation passed and the SNV sidecar matched `FragmentsSink` data rows as a multiset.
 - [x] New synthetic scRNA test -> `crates/ucf-rna/tests/sc_rna_alignment.rs` reads back exact cell/UMI/CIGAR/blocks and prunes chunks by region.
+- [ ] Real scRNA sink test -> running against a 2,500-pair subset of the public 10x RNA v3 FASTQ example.
 - [ ] `cargo test --release --workspace` (or the project CI equivalent) -> not run on this host; debug workspace tests pass.
 - [ ] Small benchmark fixture comparing direct UCF sink with `FragmentsSink` plus `ucf-cli build fragment-to-ucf` -> not run.
 
