@@ -17,6 +17,21 @@
 5. Aggregate aligned records into modality-specific output artifacts.
 6. Report quality-control metrics alongside the main output.
 
+## UCF Outputs
+
+`ScAtacUcfSink` and `ScRnaUcfSink` are terminal sinks like the H5AD and fragment
+sinks. They consume the same alignment stream and add one external sort before
+writing UCF; they do not write an intermediate fragment TSV or BAM.
+
+- `ScAtacUcfSink` reuses the fragment deduplication path and writes
+  `sc_atac_fragment_v2`. SNVs, when enabled, go to a separate compressed TSV
+  sidecar so the UCF payload keeps its fixed record contract.
+- `ScRnaUcfSink` writes the cell-aware `sc_rna_alignment` family, which stores
+  coordinates, CIGAR, cell barcode, and exact UMI. Bulk `rna_alignment` UCF is
+  unchanged and remains the format for non-cell-aware RNA alignments.
+- Both sinks accept one assay per output; the assay id is the UCF sample id and
+  the cell dictionary contains observed barcodes only.
+
 ## Design Principles
 
 - Assay-specific structure should live in data, not hard-coded branches.

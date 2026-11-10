@@ -4,6 +4,7 @@ mod examples;
 mod middleware;
 mod pyseqspec;
 mod sinks;
+mod ucf;
 mod utils;
 
 use anyhow::{bail, Result};

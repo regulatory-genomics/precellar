@@ -24,6 +24,7 @@ pub(crate) struct AlignmentContext {
     pub(crate) mito_dna: Vec<String>,
     pub(crate) temp_dir: Option<PathBuf>,
     pub(crate) transcript_annotator: Option<precellar::transcriptome::TxAligner>,
+    pub(crate) sample_id: String,
 }
 
 pub(crate) struct OutputReport {
@@ -51,6 +52,12 @@ pub(crate) trait AlignmentSink {
         _assays: &[seqspec::Assay],
         _modality: Modality,
     ) -> Result<Option<ChemistryStrandedness>> {
+        Ok(None)
+    }
+
+    /// Sample id for outputs that key cells by sample. UCF sinks require one
+    /// assay per output; other sinks keep their existing multi-assay behavior.
+    fn sample_id(&self, _assays: &[seqspec::Assay]) -> Result<Option<String>> {
         Ok(None)
     }
 
@@ -86,7 +93,11 @@ fn parse_strandedness(
     }
 }
 
-fn fragment_file_header(compute_snv: bool, shift_left: i64, shift_right: i64) -> String {
+pub(crate) fn fragment_file_header(
+    compute_snv: bool,
+    shift_left: i64,
+    shift_right: i64,
+) -> String {
     let header = if compute_snv {
         "# chromosome\tstart\tend\tbarcode\tcount\tstrand\talignment1_start\talignment1_snv\talignment2_start\talignment2_snv"
     } else {
@@ -439,6 +450,7 @@ pub(crate) fn register_sinks(parent: &Bound<'_, PyModule>) -> PyResult<()> {
     sinks.add_class::<BamSink>()?;
     sinks.add_class::<FragmentsSink>()?;
     sinks.add_class::<GeneQuantificationSink>()?;
+    crate::ucf::register_ucf_sinks(&sinks)?;
     parent.add_submodule(&sinks)?;
 
     let sys = PyModule::import(parent.py(), "sys")?;

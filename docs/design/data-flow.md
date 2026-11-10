@@ -18,10 +18,23 @@ This page outlines the major data transitions in the preprocessing workflow.
 5. Aligned records are transformed into quantification or fragment outputs.
 6. QC metrics are summarized for the final report.
 
+## UCF Sequence
+
+```text
+aligned records
+  -> fragment dedup (ATAC) or primary alignments (RNA)
+  -> external genome sort
+  -> UCF writer (bounded chunks)
+```
+
+No intermediate fragment TSV is produced. The SNV sidecar, when requested, is
+emitted from the same deduplicated fragment stream in UCF order.
+
 ## Outputs
 
 - Primary modality-specific output file
 - Quality-control summary object or report
+- Optional UCF companion files (ATAC SNV sidecar)
 
 ## Notes For Contributors
 

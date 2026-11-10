@@ -43,6 +43,42 @@ Each example dataset below contains approximately 2.5 million fastq records.
 > STAR genome index for human and mouse can be downloaded from [here](https://www.10xgenomics.com/support/software/cell-ranger/downloads#reference-downloads).
 > BWA-MEM2, MiniBWA, and Minimap2 indexes can be built by their aligner constructors when `fasta` is provided.
 
+### UCF output
+
+`ScAtacUcfSink` and `ScRnaUcfSink` write UCF directly from the alignment stream.
+There is no intermediate fragment TSV or BAM, so the conversion costs one extra
+external sort rather than a full write/read/compress cycle.
+
+```python
+# scATAC: genome-major fragments in scATAC UCF v2
+atac_qc = (
+    precellar.FastqPipeline(atac_assay)
+    .align_with(precellar.aligners.BwaMem2("/data/Public/BWA_MEM2_index/GRCh38"))
+    .run_sink(
+        precellar.sinks.ScAtacUcfSink(
+            "sample.sc-atac.v2.ucf",
+            compute_snv=True,   # optional: writes sample.sc-atac.v2.ucf.snv.tsv.zst
+        )
+    )
+)
+
+# scRNA: cell-aware alignments in scRNA UCF (family sc_rna_alignment)
+rna_qc = (
+    precellar.FastqPipeline(rna_assay, modality="rna")
+    .align_with(precellar.aligners.Star("STAR_reference/refdata-gex-GRCh38-2024-A"))
+    .run_sink(precellar.sinks.ScRnaUcfSink("sample.sc-rna.ucf"))
+)
+```
+
+Both sinks take **exactly one assay per output**; the assay id becomes the UCF
+sample id. Cell dictionaries contain observed barcodes only. Smart-seq and
+other UMI-free libraries keep an explicit "no UMI" sentinel in the scRNA payload.
+
+`ScAtacUcfSink` keeps the standard scATAC UCF contract. Unless
+`compute_snv=True`, no SNV work is done. When enabled, SNVs are written to a
+zstd TSV sidecar with the same columns as `FragmentsSink(compute_snv=True)`, so
+existing UCF readers do not pay for variable-length SNV data.
+
 ### Gene Expression
 
 `GeneQuantificationSink` normally reads transcript annotation from the

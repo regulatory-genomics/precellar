@@ -3,6 +3,7 @@ use crate::pyseqspec::extract_assays;
 use crate::sinks::{
     AlignmentContext, AlignmentSink, BamSink, FragmentsSink, GeneQuantificationSink, NullSink,
 };
+use crate::ucf::{ScAtacUcfSink, ScRnaUcfSink};
 use anyhow::{bail, Result};
 use indicatif::{ProgressBar, ProgressFinish, ProgressStyle};
 use precellar::align::{Aligner, AlignmentResult, AlignmentRunner};
@@ -454,8 +455,14 @@ impl AlignmentJob {
         if let Ok(sink) = sink.extract::<PyRef<'_, GeneQuantificationSink>>() {
             return self.take_state()?.run_sink(py, &*sink);
         }
+        if let Ok(sink) = sink.extract::<PyRef<'_, ScAtacUcfSink>>() {
+            return self.take_state()?.run_sink(py, &*sink);
+        }
+        if let Ok(sink) = sink.extract::<PyRef<'_, ScRnaUcfSink>>() {
+            return self.take_state()?.run_sink(py, &*sink);
+        }
         Err(pyo3::exceptions::PyTypeError::new_err(
-            "sink must be precellar.sinks.NullSink, precellar.sinks.BamSink, precellar.sinks.FragmentsSink, or precellar.sinks.GeneQuantificationSink",
+            "sink must be precellar.sinks.NullSink, precellar.sinks.BamSink, precellar.sinks.FragmentsSink, precellar.sinks.GeneQuantificationSink, precellar.sinks.ScAtacUcfSink, or precellar.sinks.ScRnaUcfSink",
         )
         .into())
     }
@@ -488,6 +495,7 @@ impl AlignmentJobState {
             None
         };
 
+        let sample_id = sink.sample_id(&self.assays)?.unwrap_or_default();
         let mut plan =
             FastqPlan::new(self.assays, self.modality).with_barcode_config(self.barcode_config);
         if let Some(sequencing_type) = self.sequencing_type {
@@ -519,6 +527,7 @@ impl AlignmentJobState {
             mito_dna: self.mito_dna,
             temp_dir: self.temp_dir,
             transcript_annotator,
+            sample_id,
         };
         let output_qc = sink.consume(py, &header, &mut alignments, &mut context)?;
         let report = alignments.finish()?;
