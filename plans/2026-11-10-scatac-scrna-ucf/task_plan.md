@@ -27,4 +27,5 @@ the direct-vs-two-step benchmark fixture.
 - Did (precellar-core): added `ucf` module with a shared external sorter, scATAC row/dictionary helpers, and scRNA conversion from `RecordBuf` (CB/RX tags, CIGAR codes, block count, NH).
 - Did (precellar): added `ScAtacUcfSink` (direct scATAC UCF v2 + optional zstd SNV sidecar) and `ScRnaUcfSink` (cell-aware scRNA UCF), single-assay guard, and sink registration.
 - Verified: `cargo test -p ucf-rna` -> 18 tests pass; `cargo test --workspace` in precellar -> 12 + 111 + 5 + 19 tests pass; `cargo check --workspace` has no new warnings.
+- Verified: built the debug cdylib and imported it with Python 3.12; both sink classes construct and reject invalid options.
 - Next: run the release build and the direct-vs-two-step benchmark, then commit.
