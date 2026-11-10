@@ -14,17 +14,21 @@ use precellar::qc::QcFragment;
 use precellar::ucf::sc_atac::{
     sort_snv_rows, strand_flags, Dictionary, ScAtacRow, ScAtacSnvRow,
 };
-use precellar::ucf::sc_rna::{row_from_record, sort_rows as sort_sc_rna_rows, ScRnaRow};
+use precellar::ucf::sc_rna::{
+    classify_record, sort_rows as sort_sc_rna_rows, AlignmentPolicy, MissingBarcodePolicy,
+    ScRnaDisposition, ScRnaRetention, ScRnaRow,
+};
 use pyo3::prelude::*;
 use seqspec::utils::{create_file, Compression};
 use ucf_core::BuildInfo;
 use ucf_rna::{
-    aligned_blocks_from_cigar, pack_rna_coordinate, RnaCigarOpV1, ScRnaCellV1, ScRnaMetadataV1,
-    ScRnaRowInput, ScRnaWriteOptions, ScRnaWriteRequest, ScRnaWriter, UNMAPPED_MATE_LOCUS_ID,
+    aligned_blocks_from_cigar, pack_rna_coordinate, RnaCigarOpV1, RnaError, ScRnaCellV1,
+    ScRnaMetadataV1, ScRnaRowInput, ScRnaWriteOptions, ScRnaWriteRequest, ScRnaWriter,
+    UNMAPPED_MATE_LOCUS_ID,
 };
 use ucf_sc_atac::{
-    CellInfoV2, ChromInfoV1, ScAtacMetadataV2, ScAtacRecordV2, ScAtacWriteOptions, ScAtacWriter,
-    DEFAULT_SC_ATAC_SCHEMA_V2,
+    CellInfoV2, ChromInfoV1, ScAtacError, ScAtacMetadataV2, ScAtacRecordV2, ScAtacWriteOptions,
+    ScAtacWriter, DEFAULT_SC_ATAC_SCHEMA_V2,
 };
 
 use crate::align::AlignProgressBar;
@@ -70,12 +74,28 @@ fn chromosome_table(header: &sam::Header) -> Result<(HashMap<String, u32>, Vec<C
     Ok((ids, chroms))
 }
 
-fn build_info() -> BuildInfo {
+fn build_info(context: &AlignmentContext) -> BuildInfo {
     BuildInfo {
         created_by: format!("precellar {}", env!("CARGO_PKG_VERSION")),
-        created_at_utc: "0".to_owned(),
-        source_paths: Vec::new(),
+        created_at_utc: epoch_seconds(),
+        source_paths: context.source_paths.clone(),
     }
+}
+
+fn epoch_nanos() -> u128 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or_default()
+}
+
+fn epoch_seconds() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs().to_string())
+        .unwrap_or_default()
 }
 
 fn default_snv_path(output: &Path) -> PathBuf {
@@ -99,6 +119,95 @@ fn single_assay_id(assays: &[seqspec::Assay]) -> Result<Option<String>> {
     }
 }
 
+/// Sidecar output that only replaces the requested path after a successful
+/// write. The staging file is removed on drop unless it was committed, and it
+/// is created with normal file permissions so the sidecar stays readable.
+struct AtomicSidecar {
+    output: PathBuf,
+    staging: PathBuf,
+    committed: bool,
+}
+
+impl AtomicSidecar {
+    fn new(output: &Path) -> Result<Self> {
+        let parent = output
+            .parent()
+            .filter(|path| !path.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        let name = output
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("sidecar");
+        let staging = parent.join(format!(
+            ".{name}.{}-{}.tmp",
+            std::process::id(),
+            epoch_nanos()
+        ));
+        std::fs::File::create(&staging)
+            .map_err(|error| anyhow!("cannot stage {}: {error}", output.display()))?;
+        Ok(Self {
+            output: output.to_path_buf(),
+            staging,
+            committed: false,
+        })
+    }
+
+    fn path(&self) -> &Path {
+        &self.staging
+    }
+
+    fn commit(mut self) -> Result<()> {
+        std::fs::rename(&self.staging, &self.output).map_err(|error| {
+            anyhow!("cannot publish {}: {error}", self.output.display())
+        })?;
+        self.committed = true;
+        Ok(())
+    }
+}
+
+impl Drop for AtomicSidecar {
+    fn drop(&mut self) {
+        if !self.committed {
+            let _ = std::fs::remove_file(&self.staging);
+        }
+    }
+}
+
+fn parse_alignment_policy(value: &str) -> Result<AlignmentPolicy> {
+    match value {
+        "primary" => Ok(AlignmentPolicy::Primary),
+        "all" => Ok(AlignmentPolicy::All),
+        _ => bail!("alignments must be 'primary' or 'all'"),
+    }
+}
+
+fn parse_missing_barcode_policy(value: &str) -> Result<MissingBarcodePolicy> {
+    match value {
+        "drop" => Ok(MissingBarcodePolicy::Drop),
+        "error" => Ok(MissingBarcodePolicy::Error),
+        _ => bail!("on_missing_barcode must be 'drop' or 'error'"),
+    }
+}
+
+fn add_retention(metrics: &mut serde_json::Map<String, serde_json::Value>, retention: &ScRnaRetention) {
+    metrics.insert("records_stored".to_owned(), retention.stored.into());
+    metrics.insert("records_unmapped".to_owned(), retention.unmapped.into());
+    metrics.insert("records_secondary".to_owned(), retention.secondary.into());
+    metrics.insert(
+        "records_supplementary".to_owned(),
+        retention.supplementary.into(),
+    );
+    metrics.insert(
+        "records_missing_barcode".to_owned(),
+        retention.missing_barcode.into(),
+    );
+    metrics.insert(
+        "records_missing_reference".to_owned(),
+        retention.missing_reference.into(),
+    );
+    metrics.insert("records_empty_cigar".to_owned(), retention.empty_cigar.into());
+}
+
 #[pyclass(module = "precellar.sinks", name = "ScAtacUcfSink")]
 pub(crate) struct ScAtacUcfSink {
     output: PathBuf,
@@ -108,6 +217,7 @@ pub(crate) struct ScAtacUcfSink {
     snv_output: Option<PathBuf>,
     block_size: u32,
     chunk_rows: usize,
+    sort_chunk_size: usize,
     zstd_level: i32,
 }
 
@@ -118,7 +228,7 @@ impl ScAtacUcfSink {
     /// Parameters
     /// ----------
     /// output : pathlib.Path | str
-    ///     Destination UCF path.
+    ///     Destination UCF path. The file appears only after a successful write.
     /// shift_left : int, keyword-only, default=4
     ///     Shift applied to the left end of paired-end fragments.
     /// shift_right : int, keyword-only, default=-5
@@ -131,6 +241,8 @@ impl ScAtacUcfSink {
     ///     Genomic block size stored in UCF chunk summaries.
     /// chunk_rows : int, keyword-only, default=65536
     ///     Target rows per independently decodable UCF chunk.
+    /// sort_chunk_size : int, keyword-only, default=1000000
+    ///     Records buffered in memory before an external-sort run is spilled.
     /// zstd_level : int, keyword-only, default=2
     ///     UCF payload compression level.
     ///
@@ -142,8 +254,10 @@ impl ScAtacUcfSink {
     #[new]
     #[pyo3(signature = (
         output, *, shift_left=4, shift_right=-5, compute_snv=false,
-        snv_output=None, block_size=65536, chunk_rows=65536, zstd_level=2
+        snv_output=None, block_size=65536, chunk_rows=65536,
+        sort_chunk_size=1_000_000, zstd_level=2
     ))]
+    #[allow(clippy::too_many_arguments)]
     fn new(
         output: PathBuf,
         shift_left: i64,
@@ -152,6 +266,7 @@ impl ScAtacUcfSink {
         snv_output: Option<PathBuf>,
         block_size: u32,
         chunk_rows: usize,
+        sort_chunk_size: usize,
         zstd_level: i32,
     ) -> Result<Self> {
         if block_size == 0 {
@@ -159,6 +274,9 @@ impl ScAtacUcfSink {
         }
         if chunk_rows == 0 {
             bail!("chunk_rows must be greater than zero");
+        }
+        if sort_chunk_size == 0 {
+            bail!("sort_chunk_size must be greater than zero");
         }
         if !(1..=22).contains(&zstd_level) {
             bail!("zstd_level must be in 1..=22");
@@ -174,6 +292,7 @@ impl ScAtacUcfSink {
             snv_output,
             block_size,
             chunk_rows,
+            sort_chunk_size,
             zstd_level,
         })
     }
@@ -230,7 +349,8 @@ impl AlignmentSink for ScAtacUcfSink {
                         return None;
                     }
                     let Some(&chrom_id) = chrom_ids.get(&fragment.chrom) else {
-                        record_error(&error_slot,
+                        record_error(
+                            &error_slot,
                             anyhow!("fragment references unknown chromosome {}", fragment.chrom),
                         );
                         return None;
@@ -238,7 +358,8 @@ impl AlignmentSink for ScAtacUcfSink {
                     let (Ok(start), Ok(end)) =
                         (u32::try_from(fragment.start), u32::try_from(fragment.end))
                     else {
-                        record_error(&error_slot,
+                        record_error(
+                            &error_slot,
                             anyhow!("fragment coordinate exceeds u32: {fragment}"),
                         );
                         return None;
@@ -263,7 +384,7 @@ impl AlignmentSink for ScAtacUcfSink {
                 }
                 buffer = out.into_iter();
             });
-            sort_snv_rows(rows, context.temp_dir.clone(), 10_000_000)
+            sort_snv_rows(rows, context.temp_dir.clone(), self.sort_chunk_size)?
         };
         if let Some(error) = error.borrow_mut().take() {
             return Err(error);
@@ -295,23 +416,26 @@ impl AlignmentSink for ScAtacUcfSink {
         } else {
             None
         };
-        let mut snv_writer = match &sidecar_path {
-            Some(path) => {
-                let mut writer = create_file(
-                    path.clone(),
-                    Some(Compression::Zstd),
-                    None,
-                    context.num_threads as u32,
-                )?;
-                writeln!(
-                    writer,
-                    "{}",
-                    fragment_file_header(self.compute_snv, self.shift_left, self.shift_right)
-                )?;
-                Some(writer)
-            }
+        let sidecar = match &sidecar_path {
+            Some(path) => Some(AtomicSidecar::new(path)?),
             None => None,
         };
+        let mut snv_writer = match &sidecar {
+            Some(sidecar) => Some(create_file(
+                sidecar.path().to_path_buf(),
+                Some(Compression::Zstd),
+                None,
+                context.num_threads as u32,
+            )?),
+            None => None,
+        };
+        if let Some(writer) = snv_writer.as_mut() {
+            writeln!(
+                writer,
+                "{}",
+                fragment_file_header(self.compute_snv, self.shift_left, self.shift_right)
+            )?;
+        }
 
         let metadata = ScAtacMetadataV2::new(
             DEFAULT_SC_ATAC_SCHEMA_V2,
@@ -324,9 +448,12 @@ impl AlignmentSink for ScAtacUcfSink {
         let mut records = records;
         let error_slot = Rc::clone(&error);
         let stream = std::iter::from_fn(|| {
-            let next = records.next()?;
-            if let Some(writer) = snv_writer.as_mut() {
-                if let Err(error) = writeln!(writer, "{}", next.line) {
+            let next = match records.next()? {
+                Ok(next) => next,
+                Err(error) => return Some(Err(ScAtacError::Invalid(error.to_string()))),
+            };
+            if let Some(sidecar) = snv_writer.as_mut() {
+                if let Err(error) = writeln!(sidecar, "{}", next.line) {
                     record_error(&error_slot, error);
                     return None;
                 }
@@ -345,7 +472,7 @@ impl AlignmentSink for ScAtacUcfSink {
             &metadata,
             &cell_entries,
             stream,
-            build_info(),
+            build_info(context),
             ScAtacWriteOptions {
                 chunk_target_rows: self.chunk_rows,
                 span_blocks: false,
@@ -357,17 +484,31 @@ impl AlignmentSink for ScAtacUcfSink {
         }
         if let Some(mut writer) = snv_writer {
             writer.flush()?;
+            drop(writer);
+            let sidecar = sidecar.expect("sidecar writer implies staged sidecar");
+            std::fs::File::open(sidecar.path())?.sync_all()?;
+            sidecar.commit()?;
         }
 
-        let mut metrics: serde_json::Value =
-            std::mem::take(&mut *qc.borrow_mut()).into();
-        metrics["cells"] = serde_json::Value::from(cell_entries.len());
+        let serde_json::Value::Object(mut metrics) =
+            std::mem::take(&mut *qc.borrow_mut()).into()
+        else {
+            bail!("fragment QC metrics are not a JSON object");
+        };
+        metrics.insert("cells".to_owned(), serde_json::Value::from(cell_entries.len()));
+        metrics.insert(
+            "sort_chunk_size".to_owned(),
+            serde_json::Value::from(self.sort_chunk_size),
+        );
         if let Some(path) = &sidecar_path {
-            metrics["snv_sidecar"] = serde_json::Value::String(path.display().to_string());
+            metrics.insert(
+                "snv_sidecar".to_owned(),
+                serde_json::Value::String(path.display().to_string()),
+            );
         }
         Ok(Some(OutputReport {
             name: "sc_atac_ucf".to_owned(),
-            metrics,
+            metrics: serde_json::Value::Object(metrics),
         }))
     }
 }
@@ -375,7 +516,10 @@ impl AlignmentSink for ScAtacUcfSink {
 #[pyclass(module = "precellar.sinks", name = "ScRnaUcfSink")]
 pub(crate) struct ScRnaUcfSink {
     output: PathBuf,
+    alignments: AlignmentPolicy,
+    on_missing_barcode: MissingBarcodePolicy,
     chunk_rows: usize,
+    sort_chunk_size: usize,
     zstd_level: i32,
 }
 
@@ -386,9 +530,16 @@ impl ScRnaUcfSink {
     /// Parameters
     /// ----------
     /// output : pathlib.Path | str
-    ///     Destination UCF path.
+    ///     Destination UCF path. The file appears only after a successful write.
+    /// alignments : {"primary", "all"}, keyword-only, default="primary"
+    ///     Store primary alignments only, or every mapped alignment. Excluded
+    ///     secondary/supplementary alignments are counted in the report.
+    /// on_missing_barcode : {"drop", "error"}, keyword-only, default="drop"
+    ///     Skip mapped records without a CB tag and count them, or fail.
     /// chunk_rows : int, keyword-only, default=65536
     ///     Target rows per independently decodable UCF chunk.
+    /// sort_chunk_size : int, keyword-only, default=1000000
+    ///     Records buffered in memory before an external-sort run is spilled.
     /// zstd_level : int, keyword-only, default=2
     ///     UCF payload compression level.
     ///
@@ -399,17 +550,33 @@ impl ScRnaUcfSink {
     /// arbitrary SAM tags stay in the source BAM. The family is
     /// `sc_rna_alignment`, which is distinct from bulk `rna_alignment`.
     #[new]
-    #[pyo3(signature = (output, *, chunk_rows=65536, zstd_level=2))]
-    fn new(output: PathBuf, chunk_rows: usize, zstd_level: i32) -> Result<Self> {
+    #[pyo3(signature = (
+        output, *, alignments="primary", on_missing_barcode="drop",
+        chunk_rows=65536, sort_chunk_size=1_000_000, zstd_level=2
+    ))]
+    fn new(
+        output: PathBuf,
+        alignments: &str,
+        on_missing_barcode: &str,
+        chunk_rows: usize,
+        sort_chunk_size: usize,
+        zstd_level: i32,
+    ) -> Result<Self> {
         if chunk_rows == 0 {
             bail!("chunk_rows must be greater than zero");
+        }
+        if sort_chunk_size == 0 {
+            bail!("sort_chunk_size must be greater than zero");
         }
         if !(1..=22).contains(&zstd_level) {
             bail!("zstd_level must be in 1..=22");
         }
         Ok(Self {
             output,
+            alignments: parse_alignment_policy(alignments)?,
+            on_missing_barcode: parse_missing_barcode_policy(on_missing_barcode)?,
             chunk_rows,
+            sort_chunk_size,
             zstd_level,
         })
     }
@@ -417,7 +584,6 @@ impl ScRnaUcfSink {
 
 #[derive(Default)]
 struct ScRnaTotals {
-    rows: u64,
     blocks: u64,
     cigars: u64,
     max_span: u32,
@@ -445,12 +611,14 @@ impl AlignmentSink for ScRnaUcfSink {
         let cells: Shared<Dictionary> = shared(Dictionary::default());
         let umis: Shared<Dictionary> = shared(Dictionary::default());
         let totals: Shared<ScRnaTotals> = shared(ScRnaTotals::default());
+        let retention: Shared<ScRnaRetention> = shared(ScRnaRetention::default());
         let error: Shared<Option<anyhow::Error>> = shared(None);
 
         let rows = {
             let cells = Rc::clone(&cells);
             let umis = Rc::clone(&umis);
             let totals = Rc::clone(&totals);
+            let retention = Rc::clone(&retention);
             let error_slot = Rc::clone(&error);
             let mut records: std::vec::IntoIter<ScRnaRow> = Vec::new().into_iter();
             let rows = std::iter::from_fn(move || loop {
@@ -468,13 +636,19 @@ impl AlignmentSink for ScRnaUcfSink {
                 for (read1, read2) in chunk {
                     for record in read1.into_iter().chain(read2) {
                         for alignment in record.iter() {
-                            match row_from_record(
+                            match classify_record(
                                 alignment,
                                 |barcode| cells.borrow_mut().id(barcode),
                                 |umi| umis.borrow_mut().id(umi),
+                                self.alignments,
+                                self.on_missing_barcode,
                             ) {
-                                Ok(Some(row)) => out.push(row),
-                                Ok(None) => {}
+                                Ok(disposition) => {
+                                    retention.borrow_mut().record(&disposition);
+                                    if let ScRnaDisposition::Stored(row) = disposition {
+                                        out.push(row);
+                                    }
+                                }
                                 Err(err) => {
                                     record_error(&error_slot, err);
                                     return None;
@@ -486,7 +660,6 @@ impl AlignmentSink for ScRnaUcfSink {
                 {
                     let mut totals = totals.borrow_mut();
                     for row in &out {
-                        totals.rows = totals.rows.saturating_add(1);
                         totals.blocks = totals.blocks.saturating_add(u64::from(row.block_count));
                         totals.cigars = totals.cigars.saturating_add(row.cigar.len() as u64);
                         totals.max_span = totals.max_span.max(row.reference_span);
@@ -494,7 +667,7 @@ impl AlignmentSink for ScRnaUcfSink {
                 }
                 records = out.into_iter();
             });
-            sort_sc_rna_rows(rows, context.temp_dir.clone(), 10_000_000)
+            sort_sc_rna_rows(rows, context.temp_dir.clone(), self.sort_chunk_size)?
         };
         if let Some(error) = error.borrow_mut().take() {
             return Err(error);
@@ -515,13 +688,14 @@ impl AlignmentSink for ScRnaUcfSink {
             .collect::<Result<Vec<_>>>()?;
         let umi_entries: Vec<String> = umis.borrow().entries().to_vec();
         let totals = totals.borrow();
+        let retention = retention.borrow();
         let metadata = ScRnaMetadataV1 {
             schema: "sc_rna_alignment_v1".to_owned(),
             schema_version: 1,
             source_format: "precellar".to_owned(),
-            total_record_count: totals.rows,
-            stored_alignment_count: totals.rows,
-            unmapped_record_count: 0,
+            total_record_count: retention.stored + retention.excluded(),
+            stored_alignment_count: retention.stored,
+            unmapped_record_count: retention.unmapped,
             total_block_count: totals.blocks,
             total_cigar_op_count: totals.cigars,
             max_alignment_span_bp: totals.max_span,
@@ -531,22 +705,20 @@ impl AlignmentSink for ScRnaUcfSink {
         };
 
         let mut records = rows;
-        let error_slot = Rc::clone(&error);
         let stream = std::iter::from_fn(|| {
-            let row = records.next()?;
+            let row = match records.next()? {
+                Ok(row) => row,
+                Err(err) => return Some(Err(RnaError::Invalid(err.to_string()))),
+            };
             let mut cigar_ops = Vec::with_capacity(row.cigar.len());
             for &(len, code) in &row.cigar {
                 match RnaCigarOpV1::new(len, code) {
                     Ok(op) => cigar_ops.push(op),
-                    Err(err) => {
-                        record_error(&error_slot, err);
-                        return None;
-                    }
+                    Err(err) => return Some(Err(err)),
                 }
             }
             if let Err(err) = aligned_blocks_from_cigar(&cigar_ops) {
-                record_error(&error_slot, err);
-                return None;
+                return Some(Err(err));
             }
             Some(Ok(ScRnaRowInput {
                 locus_id: pack_rna_coordinate(u64::from(row.chrom_id), u64::from(row.start)),
@@ -571,7 +743,7 @@ impl AlignmentSink for ScRnaUcfSink {
                 metadata: &metadata,
                 cells: &cell_entries,
                 umis: &umi_entries,
-                build: build_info(),
+                build: build_info(context),
                 options: ScRnaWriteOptions {
                     chunk_rows: self.chunk_rows,
                     zstd_level: self.zstd_level,
@@ -579,13 +751,31 @@ impl AlignmentSink for ScRnaUcfSink {
             },
             stream,
         )?;
-        if let Some(error) = error.borrow_mut().take() {
-            return Err(error);
-        }
+
         let mut metrics = serde_json::Map::new();
-        metrics.insert("rows".to_owned(), totals.rows.into());
         metrics.insert("cells".to_owned(), cell_entries.len().into());
         metrics.insert("umis".to_owned(), umi_entries.len().into());
+        metrics.insert(
+            "alignments".to_owned(),
+            serde_json::Value::String(match self.alignments {
+                AlignmentPolicy::Primary => "primary",
+                AlignmentPolicy::All => "all",
+            }
+            .to_owned()),
+        );
+        metrics.insert(
+            "on_missing_barcode".to_owned(),
+            serde_json::Value::String(match self.on_missing_barcode {
+                MissingBarcodePolicy::Drop => "drop",
+                MissingBarcodePolicy::Error => "error",
+            }
+            .to_owned()),
+        );
+        metrics.insert(
+            "sort_chunk_size".to_owned(),
+            serde_json::Value::from(self.sort_chunk_size),
+        );
+        add_retention(&mut metrics, &retention);
         Ok(Some(OutputReport {
             name: "sc_rna_ucf".to_owned(),
             metrics: serde_json::Value::Object(metrics),

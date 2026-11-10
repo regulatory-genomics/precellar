@@ -79,4 +79,5 @@ CLAUDE.*
 # Pyenv
 .python-version
 
-Cargo.lock
+# Pinned UCF git revision must stay reproducible in standalone builds.
+!Cargo.lock

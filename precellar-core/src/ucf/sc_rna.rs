@@ -10,6 +10,24 @@ use noodles_sam::alignment::RecordBuf;
 
 use crate::barcode::get_barcode;
 
+/// Which alignments of a record enter the UCF payload.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AlignmentPolicy {
+    /// Store the primary alignment only; count the rest as excluded.
+    Primary,
+    /// Store every mapped alignment, including secondary and supplementary.
+    All,
+}
+
+/// What to do with a mapped record that has no cell barcode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MissingBarcodePolicy {
+    /// Skip the record and count it.
+    Drop,
+    /// Fail the conversion.
+    Error,
+}
+
 /// One cell-aware RNA alignment, already reduced to what UCF stores.
 #[derive(Encode, Decode, Debug, Clone, PartialEq, Eq)]
 pub struct ScRnaRow {
@@ -30,25 +48,88 @@ pub struct ScRnaRow {
     pub cigar: Vec<(u32, u8)>,
 }
 
-/// Reduce a primary alignment to a UCF row. Returns `None` for unmapped or
-/// secondary/supplementary records and for records without a cell barcode.
-pub fn row_from_record(
+/// What the converter did with one alignment record.
+#[derive(Debug)]
+pub enum ScRnaDisposition {
+    Stored(ScRnaRow),
+    Unmapped,
+    Secondary,
+    Supplementary,
+    MissingBarcode,
+    MissingReference,
+    EmptyCigar,
+}
+
+/// Counts of stored and excluded alignment records.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct ScRnaRetention {
+    pub stored: u64,
+    pub unmapped: u64,
+    pub secondary: u64,
+    pub supplementary: u64,
+    pub missing_barcode: u64,
+    pub missing_reference: u64,
+    pub empty_cigar: u64,
+}
+
+impl ScRnaRetention {
+    pub fn record(&mut self, disposition: &ScRnaDisposition) {
+        match disposition {
+            ScRnaDisposition::Stored(_) => self.stored += 1,
+            ScRnaDisposition::Unmapped => self.unmapped += 1,
+            ScRnaDisposition::Secondary => self.secondary += 1,
+            ScRnaDisposition::Supplementary => self.supplementary += 1,
+            ScRnaDisposition::MissingBarcode => self.missing_barcode += 1,
+            ScRnaDisposition::MissingReference => self.missing_reference += 1,
+            ScRnaDisposition::EmptyCigar => self.empty_cigar += 1,
+        }
+    }
+
+    pub fn excluded(&self) -> u64 {
+        self.unmapped
+            + self.secondary
+            + self.supplementary
+            + self.missing_barcode
+            + self.missing_reference
+            + self.empty_cigar
+    }
+}
+
+/// Reduce one alignment record to a UCF row, or classify why it is excluded.
+pub fn classify_record(
     record: &RecordBuf,
     mut cell_id: impl FnMut(&str) -> u32,
     mut umi_id: impl FnMut(&str) -> u32,
-) -> Result<Option<ScRnaRow>> {
+    alignments: AlignmentPolicy,
+    missing_barcode: MissingBarcodePolicy,
+) -> Result<ScRnaDisposition> {
     let flags = record.flags();
     if flags.is_unmapped() {
-        return Ok(None);
+        return Ok(ScRnaDisposition::Unmapped);
+    }
+    if alignments == AlignmentPolicy::Primary {
+        if flags.is_secondary() {
+            return Ok(ScRnaDisposition::Secondary);
+        }
+        if flags.is_supplementary() {
+            return Ok(ScRnaDisposition::Supplementary);
+        }
     }
     let Some(barcode) = get_barcode(record)? else {
-        return Ok(None);
+        if missing_barcode == MissingBarcodePolicy::Error {
+            let name = record
+                .name()
+                .map(|name| name.to_string())
+                .unwrap_or_else(|| "<unnamed>".to_owned());
+            anyhow::bail!("mapped read {name} has no cell barcode tag");
+        }
+        return Ok(ScRnaDisposition::MissingBarcode);
     };
     let Some(reference_id) = record.reference_sequence_id() else {
-        return Ok(None);
+        return Ok(ScRnaDisposition::MissingReference);
     };
     let Some(start) = record.alignment_start() else {
-        return Ok(None);
+        return Ok(ScRnaDisposition::MissingReference);
     };
     let mut cigar = Vec::new();
     let mut reference_span = 0u32;
@@ -64,7 +145,7 @@ pub fn row_from_record(
         }
     }
     if cigar.is_empty() {
-        return Ok(None);
+        return Ok(ScRnaDisposition::EmptyCigar);
     }
     let mate = match (
         record.mate_reference_sequence_id(),
@@ -81,13 +162,10 @@ pub fn row_from_record(
             _ => None,
         });
     let umi_id = match umi {
-        Some(umi) => {
-            let umi = umi.to_string();
-            umi_id(&umi)
-        }
+        Some(umi) => umi_id(&umi),
         None => u32::MAX,
     };
-    Ok(Some(ScRnaRow {
+    Ok(ScRnaDisposition::Stored(ScRnaRow {
         chrom_id: u32::try_from(reference_id)?,
         start: u32::try_from(start.get() - 1)?,
         mate_chrom_id: mate.0.map(u32::try_from).transpose()?,
@@ -131,7 +209,7 @@ pub fn sort_rows(
     rows: impl Iterator<Item = ScRnaRow>,
     temp_dir: Option<PathBuf>,
     chunk_size: usize,
-) -> impl ExactSizeIterator<Item = ScRnaRow> {
+) -> anyhow::Result<impl ExactSizeIterator<Item = anyhow::Result<ScRnaRow>>> {
     super::external_sort(rows, temp_dir, chunk_size, |a, b| {
         a.chrom_id
             .cmp(&b.chrom_id)

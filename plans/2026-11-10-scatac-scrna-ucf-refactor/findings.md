@@ -30,3 +30,21 @@
   diversity.
 - MiniBWA on the same real input terminated with a native C assertion in
   `ext/minibwa/format.c:187`; BWA-MEM2 completed successfully.
+
+## Refactor results
+
+- The upstream UCF repository is private, so the dependency is a pinned SSH git
+  revision rather than HTTPS. Standalone resolution needs an SSH key in CI.
+- A copied tree with no sibling `UCF` checkout resolves with
+  `cargo metadata --locked` and type-checks with `cargo check --locked`.
+- Deleting `temp_dir` before a run now succeeds: the directory is created at the
+  job boundary and the sorter returns errors instead of panicking.
+- Real ATAC after hardening: 1,136 rows, `ucf-cli validate` passed, SNV sidecar
+  multiset equal to `FragmentsSink`.
+- Real 10x RNA v3 after hardening: 364 stored rows, 297 cells, 330 UMIs,
+  2,131 unmapped, 5 missing-CB, 0 secondary/supplementary, `ucf-cli validate`
+  passed, and `ScRnaReader` decoded exactly 364 rows with valid dictionary
+  references.
+- Default `sort_chunk_size` is 1,000,000 records; measured peak RSS on these
+  smoke fixtures is dominated by the index/aligner, not the sorter, so a larger
+  fixture is still needed to calibrate a production default.

@@ -390,6 +390,20 @@ pub struct AlignmentJob {
     state: Option<AlignmentJobState>,
 }
 
+fn source_paths(assays: &[seqspec::Assay]) -> Vec<String> {
+    let mut paths = Vec::new();
+    for assay in assays {
+        for read in assay.sequence_spec.values() {
+            for file in read.files.iter().flatten() {
+                if !paths.contains(&file.url) {
+                    paths.push(file.url.clone());
+                }
+            }
+        }
+    }
+    paths
+}
+
 struct AlignmentJobState {
     assays: Vec<seqspec::Assay>,
     modality: Modality,
@@ -495,7 +509,9 @@ impl AlignmentJobState {
             None
         };
 
+        precellar::ucf::prepare_temp_dir(self.temp_dir.as_deref())?;
         let sample_id = sink.sample_id(&self.assays)?.unwrap_or_default();
+        let source_paths = source_paths(&self.assays);
         let mut plan =
             FastqPlan::new(self.assays, self.modality).with_barcode_config(self.barcode_config);
         if let Some(sequencing_type) = self.sequencing_type {
@@ -528,6 +544,7 @@ impl AlignmentJobState {
             temp_dir: self.temp_dir,
             transcript_annotator,
             sample_id,
+            source_paths,
         };
         let output_qc = sink.consume(py, &header, &mut alignments, &mut context)?;
         let report = alignments.finish()?;

@@ -63,7 +63,7 @@ pub fn sort_rows(
     rows: impl Iterator<Item = ScAtacRow>,
     temp_dir: Option<PathBuf>,
     chunk_size: usize,
-) -> impl ExactSizeIterator<Item = ScAtacRow> {
+) -> anyhow::Result<impl ExactSizeIterator<Item = anyhow::Result<ScAtacRow>>> {
     super::external_sort(rows, temp_dir, chunk_size, compare_rows)
 }
 
@@ -79,7 +79,7 @@ pub fn sort_snv_rows(
     rows: impl Iterator<Item = ScAtacSnvRow>,
     temp_dir: Option<PathBuf>,
     chunk_size: usize,
-) -> impl ExactSizeIterator<Item = ScAtacSnvRow> {
+) -> anyhow::Result<impl ExactSizeIterator<Item = anyhow::Result<ScAtacSnvRow>>> {
     super::external_sort(rows, temp_dir, chunk_size, |a, b| compare_rows(&a.row, &b.row))
 }
 

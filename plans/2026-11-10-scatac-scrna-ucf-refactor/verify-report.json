@@ -1,0 +1,117 @@
+{
+  "command": [
+    "scripts/verify_ucf_sinks.py",
+    "--ucf-cli",
+    "/data3/litian/projects/tachyon_project/UCF/target/debug/ucf-cli",
+    "--index",
+    "/data3/litian/tmp/precellar-real-fastq/hg38.bwa",
+    "--aligner",
+    "bwa-mem2",
+    "--atac-assay",
+    "seqspec_templates/generic_atac.yaml",
+    "--atac-r1",
+    "/data3/litian/macrophage/data/ATAC/ATAC_test/test1_R1.fastq.gz",
+    "--atac-r2",
+    "/data3/litian/macrophage/data/ATAC/ATAC_test/test1_R2.fastq.gz",
+    "--atac-i1",
+    "/data3/litian/tmp/precellar-real-fastq/test1_I1.fastq.gz",
+    "--scrna-assay",
+    "seqspec_templates/10x_rna_v3.yaml",
+    "--scrna-r1",
+    "/data3/litian/tmp/precellar-real-fastq/scrna/R1.fq.gz",
+    "--scrna-r2",
+    "/data3/litian/tmp/precellar-real-fastq/scrna/R2.fq.gz",
+    "--scrna-i1",
+    "/data3/litian/tmp/precellar-real-fastq/scrna/I1.fq.gz",
+    "--output-dir",
+    "/data3/litian/tmp/precellar-real-fastq/verify"
+  ],
+  "atac": {
+    "alignment": {
+      "frac_confidently_mapped": 0.5642,
+      "frac_mitochondrial": 0.10030395136778116,
+      "frac_properly_paired": 0.5264,
+      "frac_unmapped": 0.07879999999999998,
+      "frac_valid_barcode": 1.0,
+      "sequenced_read_pairs": 2500,
+      "sequenced_reads": 5000
+    },
+    "fastq": {
+      "frac_q30_bases": {
+        "barcode": 1.0,
+        "read1": 0.74312,
+        "read2": 0.9248586666666667
+      }
+    },
+    "fragment": {
+      "frac_duplicates": 0.006993006993006993,
+      "frac_fragment_flanking_single_nucleosome": 0.22799295774647887,
+      "frac_fragment_in_nucleosome_free_region": 0.6038732394366197,
+      "num_unique_fragments": 1136
+    }
+  },
+  "atac_ucf": {
+    "alignment": {
+      "frac_confidently_mapped": 0.5642,
+      "frac_mitochondrial": 0.10030395136778116,
+      "frac_properly_paired": 0.5264,
+      "frac_unmapped": 0.07879999999999998,
+      "frac_valid_barcode": 1.0,
+      "sequenced_read_pairs": 2500,
+      "sequenced_reads": 5000
+    },
+    "fastq": {
+      "frac_q30_bases": {
+        "barcode": 1.0,
+        "read1": 0.74312,
+        "read2": 0.9248586666666667
+      }
+    },
+    "sc_atac_ucf": {
+      "cells": 1,
+      "frac_duplicates": 0.006993006993006993,
+      "frac_fragment_flanking_single_nucleosome": 0.22799295774647887,
+      "frac_fragment_in_nucleosome_free_region": 0.6038732394366197,
+      "num_unique_fragments": 1136,
+      "snv_sidecar": "/data3/litian/tmp/precellar-real-fastq/verify/atac/direct.ucf.snv.tsv.zst",
+      "sort_chunk_size": 1000000
+    }
+  },
+  "atac_rows": 1136,
+  "atac_sidecar_matches_fragments": null,
+  "atac_sidecar_note": "install zstandard to compare sidecar rows",
+  "scrna_ucf": {
+    "alignment": {
+      "frac_confidently_mapped": 0.05626283367556468,
+      "frac_mitochondrial": 0.005494505494505495,
+      "frac_properly_paired": 0.0,
+      "frac_unmapped": 0.8505133470225873,
+      "frac_valid_barcode": 0.974,
+      "sequenced_read_pairs": 0,
+      "sequenced_reads": 2500
+    },
+    "fastq": {
+      "frac_q30_bases": {
+        "barcode": 0.92255,
+        "read2": 0.8888844444444445,
+        "umi": 0.9191666666666667
+      }
+    },
+    "sc_rna_ucf": {
+      "alignments": "primary",
+      "cells": 297,
+      "on_missing_barcode": "drop",
+      "records_empty_cigar": 0,
+      "records_missing_barcode": 5,
+      "records_missing_reference": 0,
+      "records_secondary": 0,
+      "records_stored": 364,
+      "records_supplementary": 0,
+      "records_unmapped": 2131,
+      "sort_chunk_size": 1000000,
+      "umis": 330
+    }
+  },
+  "scrna_rows": 364,
+  "scrna_fastq_reads": 2500
+}

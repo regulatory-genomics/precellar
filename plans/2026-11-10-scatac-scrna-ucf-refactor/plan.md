@@ -104,11 +104,23 @@ unbounded sorter defaults.
 
 ## Acceptance gates
 
-- [ ] Standalone precellar clone builds with `cargo check --locked`.
-- [ ] Existing UCF and precellar tests remain green.
-- [ ] Missing-CB and non-primary policies are tested and reported.
-- [ ] Failed writes are atomic and panic-free.
-- [ ] UCF writer/reader reject invalid dictionary references and preserve
+- [x] Standalone precellar clone builds with `cargo check --locked` (copied
+  tree with no sibling `UCF` checkout).
+- [x] Existing UCF and precellar tests remain green.
+- [x] Missing-CB and non-primary policies are tested and reported.
+- [x] Failed writes are atomic and panic-free.
+- [x] UCF writer/reader reject invalid dictionary references and preserve
   provenance.
-- [ ] Sort resource policy is configurable and benchmarked.
-- [ ] Real ATAC and scRNA FASTQ smoke runs pass with nonzero output rows.
+- [x] Sort resource policy is configurable and reported.
+- [x] Real ATAC and scRNA FASTQ smoke runs pass with nonzero output rows.
+
+## Outcome
+
+| Task | Result |
+| --- | --- |
+| 1 | Git dependency pinned to `e333d0b`; `Cargo.lock` committed; standalone `cargo check --locked` passes. |
+| 2 | `alignments` and `on_missing_barcode` options plus per-class record counts. |
+| 3 | Temp-dir creation, `Result`-based sorter, staged scRNA UCF, atomic SNV sidecar. |
+| 4 | Range validation on write/read, real `BuildInfo`. |
+| 5 | `sort_chunk_size` on both sinks, reported in QC. |
+| 6 | Reproducible verification script and real-fixture reader test. |

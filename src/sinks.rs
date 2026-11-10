@@ -25,6 +25,7 @@ pub(crate) struct AlignmentContext {
     pub(crate) temp_dir: Option<PathBuf>,
     pub(crate) transcript_annotator: Option<precellar::transcriptome::TxAligner>,
     pub(crate) sample_id: String,
+    pub(crate) source_paths: Vec<String>,
 }
 
 pub(crate) struct OutputReport {

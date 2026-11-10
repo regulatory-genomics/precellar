@@ -3,7 +3,10 @@ use noodles_sam::{
     header::record::value::{map::ReferenceSequence, Map},
 };
 use precellar_core::ucf::sc_atac::{sort_rows as sort_sc_atac_rows, Dictionary, ScAtacRow};
-use precellar_core::ucf::sc_rna::{row_from_record, sort_rows as sort_sc_rna_rows};
+use precellar_core::ucf::sc_rna::{
+    classify_record, sort_rows as sort_sc_rna_rows, AlignmentPolicy, MissingBarcodePolicy,
+    ScRnaDisposition, ScRnaRow,
+};
 use std::num::NonZeroUsize;
 
 fn header() -> sam::Header {
@@ -24,19 +27,40 @@ fn record(sam_line: &str) -> noodles_sam::alignment::RecordBuf {
     noodles_sam::alignment::RecordBuf::try_from_alignment_record(&header, &record).unwrap()
 }
 
+fn stored(disposition: ScRnaDisposition) -> ScRnaRow {
+    match disposition {
+        ScRnaDisposition::Stored(row) => row,
+        other => panic!("expected a stored row, got {other:?}"),
+    }
+}
+
+fn classify(sam_line: &str) -> ScRnaDisposition {
+    classify_record(
+        &record(sam_line),
+        |_| 0,
+        |_| 0,
+        AlignmentPolicy::Primary,
+        MissingBarcodePolicy::Drop,
+    )
+    .unwrap()
+}
+
 const PAIRED: &str = "1\t99\tchr1\t10003\t60\t4H50M2H\t=\t10083\t129\tCCCCTAACCCTAACCCTAACCCTAACCCTAACCCTAACCCTAACCCTAAC\tFFFF:FFFFF:FF:FF:FFFFFFFFFFFFFFFFF,FF:FF,FFFFFFFF\tCB:Z:ACGTACGT\tRX:Z:TTTTGGGG\tNH:i:1\tMD:Z:50";
 
 #[test]
 fn sc_rna_row_keeps_cell_umi_and_cigar_semantics() {
     let mut cells = Dictionary::default();
     let mut umis = Dictionary::default();
-    let row = row_from_record(
-        &record(PAIRED),
-        |barcode| cells.id(barcode),
-        |umi| umis.id(umi),
-    )
-    .unwrap()
-    .expect("mapped record with barcode");
+    let row = stored(
+        classify_record(
+            &record(PAIRED),
+            |barcode| cells.id(barcode),
+            |umi| umis.id(umi),
+            AlignmentPolicy::Primary,
+            MissingBarcodePolicy::Drop,
+        )
+        .unwrap(),
+    );
 
     assert_eq!(row.chrom_id, 0);
     assert_eq!(row.start, 10_002);
@@ -58,9 +82,7 @@ fn sc_rna_row_keeps_cell_umi_and_cigar_semantics() {
 #[test]
 fn sc_rna_keeps_spliced_blocks_and_sentinel_without_umi() {
     let line = "1\t0\tchr1\t100\t60\t10M1000N10M\t*\t0\t0\tAAAAAAAAAAAAAAAAAAAA\tFFFFFFFFFFFFFFFFFFFF\tCB:Z:AAACCG";
-    let row = row_from_record(&record(line), |_| 0, |_| 0)
-        .unwrap()
-        .expect("mapped record");
+    let row = stored(classify(line));
     assert_eq!(row.reference_span, 1_020);
     assert_eq!(row.block_count, 2);
     assert_eq!(row.umi_id, u32::MAX);
@@ -68,11 +90,65 @@ fn sc_rna_keeps_spliced_blocks_and_sentinel_without_umi() {
 }
 
 #[test]
-fn unmapped_records_are_skipped() {
+fn unmapped_records_are_classified_not_stored() {
     let line = "1\t4\t*\t0\t0\t*\t*\t0\t0\tACGT\tFFFF";
-    assert!(row_from_record(&record(line), |_| 0, |_| 0)
-        .unwrap()
-        .is_none());
+    assert!(matches!(classify(line), ScRnaDisposition::Unmapped));
+}
+
+#[test]
+fn primary_policy_excludes_secondary_and_supplementary() {
+    let secondary = "1\t256\tchr1\t100\t60\t50M\t*\t0\t0\tAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\tFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF\tCB:Z:AAACCG";
+    let supplementary = "1\t2048\tchr1\t100\t60\t50M\t*\t0\t0\tAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\tFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF\tCB:Z:AAACCG";
+    assert!(matches!(
+        classify(secondary),
+        ScRnaDisposition::Secondary
+    ));
+    assert!(matches!(
+        classify(supplementary),
+        ScRnaDisposition::Supplementary
+    ));
+
+    for line in [secondary, supplementary] {
+        let disposition = classify_record(
+            &record(line),
+            |_| 0,
+            |_| 0,
+            AlignmentPolicy::All,
+            MissingBarcodePolicy::Drop,
+        )
+        .unwrap();
+        assert!(matches!(disposition, ScRnaDisposition::Stored(_)));
+    }
+}
+
+#[test]
+fn missing_barcode_is_dropped_or_reported() {
+    let line = "1\t0\tchr1\t100\t60\t50M\t*\t0\t0\tAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\tFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF";
+    assert!(matches!(
+        classify(line),
+        ScRnaDisposition::MissingBarcode
+    ));
+    let error = classify_record(
+        &record(line),
+        |_| 0,
+        |_| 0,
+        AlignmentPolicy::Primary,
+        MissingBarcodePolicy::Error,
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("cell barcode"), "{error}");
+}
+
+#[test]
+fn retention_counts_every_class() {
+    use precellar_core::ucf::sc_rna::ScRnaRetention;
+
+    let mut retention = ScRnaRetention::default();
+    retention.record(&classify(PAIRED));
+    retention.record(&classify("1\t4\t*\t0\t0\t*\t*\t0\t0\tACGT\tFFFF"));
+    assert_eq!(retention.stored, 1);
+    assert_eq!(retention.unmapped, 1);
+    assert_eq!(retention.excluded(), 1);
 }
 
 #[test]
@@ -111,7 +187,10 @@ fn sc_atac_rows_sort_in_ucf_order() {
             flags: 0,
         },
     ];
-    let sorted = sort_sc_atac_rows(rows.into_iter(), None, 2).collect::<Vec<_>>();
+    let sorted = sort_sc_atac_rows(rows.into_iter(), None, 2)
+        .unwrap()
+        .collect::<anyhow::Result<Vec<_>>>()
+        .unwrap();
     let keys = sorted
         .iter()
         .map(|row| (row.chrom_id, row.start, row.cell_id))
@@ -123,7 +202,7 @@ fn sc_atac_rows_sort_in_ucf_order() {
 fn sc_rna_rows_sort_by_locus_then_cell() {
     let mut rows = Vec::new();
     for (start, cell) in [(50u32, 1u32), (10, 2), (10, 0), (90, 0)] {
-        rows.push(precellar_core::ucf::sc_rna::ScRnaRow {
+        rows.push(ScRnaRow {
             chrom_id: 0,
             start,
             mate_chrom_id: None,
@@ -139,7 +218,27 @@ fn sc_rna_rows_sort_by_locus_then_cell() {
             cigar: vec![(10, 0)],
         });
     }
-    let sorted = sort_sc_rna_rows(rows.into_iter(), None, 2).collect::<Vec<_>>();
-    let keys = sorted.iter().map(|row| (row.start, row.cell_id)).collect::<Vec<_>>();
+    let sorted = sort_sc_rna_rows(rows.into_iter(), None, 2)
+        .unwrap()
+        .collect::<anyhow::Result<Vec<_>>>()
+        .unwrap();
+    let keys = sorted
+        .iter()
+        .map(|row| (row.start, row.cell_id))
+        .collect::<Vec<_>>();
     assert_eq!(keys, vec![(10, 0), (10, 2), (50, 1), (90, 0)]);
+}
+
+#[test]
+fn prepare_temp_dir_creates_the_directory_and_rejects_files() {
+    use precellar_core::ucf::prepare_temp_dir;
+
+    let directory = tempfile::tempdir().unwrap();
+    let missing = directory.path().join("nested/tmp");
+    prepare_temp_dir(Some(&missing)).unwrap();
+    assert!(missing.is_dir());
+
+    let file = directory.path().join("not-a-dir");
+    std::fs::write(&file, b"x").unwrap();
+    assert!(prepare_temp_dir(Some(&file)).is_err());
 }

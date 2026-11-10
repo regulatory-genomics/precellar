@@ -74,6 +74,26 @@ Both sinks take **exactly one assay per output**; the assay id becomes the UCF
 sample id. Cell dictionaries contain observed barcodes only. Smart-seq and
 other UMI-free libraries keep an explicit "no UMI" sentinel in the scRNA payload.
 
+Outputs are staged in the destination directory and moved into place only after
+every section and sidecar is written, so a failed run leaves no file at the
+requested path. A missing `temp_dir` is created instead of failing.
+
+`ScRnaUcfSink` makes record retention explicit:
+
+| Option | Default | Meaning |
+|---|---|---|
+| `alignments` | `"primary"` | Store primary alignments only, or `"all"` mapped alignments. |
+| `on_missing_barcode` | `"drop"` | Skip and count mapped records without `CB`, or `"error"`. |
+| `chunk_rows` | `65536` | Rows per independently decodable UCF chunk. |
+| `sort_chunk_size` | `1000000` | Records buffered in memory before an external-sort run spills to disk. |
+
+The QC report counts `records_stored`, `records_unmapped`,
+`records_secondary`, `records_supplementary`, `records_missing_barcode`,
+`records_missing_reference`, and `records_empty_cigar`, so no record disappears
+without a number.
+
+`ScAtacUcfSink` takes the same `chunk_rows`/`sort_chunk_size` pair.
+
 `ScAtacUcfSink` keeps the standard scATAC UCF contract. Unless
 `compute_snv=True`, no SNV work is done. When enabled, SNVs are written to a
 zstd TSV sidecar with the same columns as `FragmentsSink(compute_snv=True)`, so
