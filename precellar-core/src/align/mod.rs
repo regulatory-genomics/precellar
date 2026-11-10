@@ -9,7 +9,8 @@ pub use aligners::{
     Minimap2Opts, MultiMap, MultiMapR, StarAligner,
 };
 pub use fastq::{
-    extend_fastq_record, AlignmentBatch, AlignmentInput, AlignmentResult, AlignmentRunner,
+    extend_fastq_record, AlignmentBatch, AlignmentInput, AlignmentReceiver, AlignmentResult,
+    AlignmentRunner,
     AnnotatedFastq, Barcode, BarcodeCorrectionConfig, FastqExecution, FastqPlan, FastqReport,
     ReadMetadata, RunReport,
 };

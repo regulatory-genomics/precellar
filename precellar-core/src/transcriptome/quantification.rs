@@ -83,8 +83,7 @@ impl Quantifier {
 
         {
             // Align reads to transcripts
-            let tx_alignments = self.annotator.align(records).flat_map(|aln| {
-                qc.update(aln.as_ref());
+            let tx_alignments = self.annotator.align(records, &mut qc).flat_map(|aln| {
                 if aln
                     .as_ref()
                     .and_then(|x| x.uniquely_mapped_gene())

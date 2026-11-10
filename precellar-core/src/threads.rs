@@ -6,8 +6,10 @@
 //! sorting, counting) is capped at the thread count the user asked for instead
 //! of using rayon's global pool, which spans all cores of the machine.
 //!
-//! Stages that run on a helper thread, such as the background sort jobs of an
-//! external sorter, capture the pool with [`current`] on the calling thread.
+//! A helper thread, such as the alignment producer thread, takes the pool with
+//! [`current`] on the spawning thread and installs it with [`with_pool`].
+//! Stages that build their own pool, such as the external sorter, size it with
+//! [`current_num_threads`].
 
 use std::cell::RefCell;
 use std::sync::Arc;
@@ -42,9 +44,16 @@ pub fn build_pool(num_threads: usize) -> Result<rayon::ThreadPool> {
 /// thread. The previous pool, if any, is restored afterwards.
 pub fn with_threads<R>(num_threads: usize, f: impl FnOnce() -> R) -> Result<R> {
     let pool = Arc::new(build_pool(num_threads)?);
-    let previous = POOL.with(|slot| slot.borrow_mut().replace(pool));
+    Ok(with_pool(Some(pool), f))
+}
+
+/// Runs `f` with `pool` installed for the calling thread. The previous pool,
+/// if any, is restored afterwards. A helper thread passes the [`current`] pool
+/// of the thread that spawned it, so both threads share one pool.
+pub fn with_pool<R>(pool: Option<Arc<rayon::ThreadPool>>, f: impl FnOnce() -> R) -> R {
+    let previous = POOL.with(|slot| std::mem::replace(&mut *slot.borrow_mut(), pool));
     let _restore = Restore(previous);
-    Ok(f())
+    f()
 }
 
 /// Returns the pool installed by the innermost [`with_threads`] on the calling

@@ -255,6 +255,15 @@ impl Metric for QcAlign {
 }
 
 impl QcAlign {
+    /// Returns an empty accumulator with the same mitochondrial references.
+    /// Partial counts built from it can be merged back with [`Extend`].
+    pub(crate) fn empty_like(&self) -> Self {
+        Self {
+            mito_dna: self.mito_dna.clone(),
+            ..Self::default()
+        }
+    }
+
     pub fn add_pair<R: Record>(
         &mut self,
         header: &sam::Header,
@@ -416,6 +425,26 @@ pub struct QcGeneQuant {
     pub(crate) num_spliced: u64,
     pub(crate) num_unspliced: u64,
     pub(crate) num_ambiguous: u64,
+}
+
+impl Extend<Self> for QcGeneQuant {
+    fn extend<T: IntoIterator<Item = Self>>(&mut self, iter: T) {
+        for qc in iter {
+            self.total_raw_count += qc.total_raw_count;
+            self.num_antisense += qc.num_antisense;
+            self.num_intergenic += qc.num_intergenic;
+            self.num_multimapped += qc.num_multimapped;
+            self.num_discordant += qc.num_discordant;
+            self.num_exonic += qc.num_exonic;
+            self.num_spanning += qc.num_spanning;
+            self.num_intronic += qc.num_intronic;
+            self.num_mix += qc.num_mix;
+            self.num_unique_umi += qc.num_unique_umi;
+            self.num_spliced += qc.num_spliced;
+            self.num_unspliced += qc.num_unspliced;
+            self.num_ambiguous += qc.num_ambiguous;
+        }
+    }
 }
 
 impl QcGeneQuant {
@@ -678,5 +707,61 @@ mod tests {
         assert_eq!(report["sequenced_reads"], json!(2));
         assert_eq!(report["sequenced_read_pairs"], json!(1));
         assert_eq!(report["frac_properly_paired"], json!(1.0));
+    }
+
+    /// Counting in two halves and merging must equal counting in one pass.
+    #[test]
+    fn gene_quant_qc_merge_equals_single_pass() {
+        let alignments = [
+            None,
+            Some(TxAlignment::Antisense),
+            Some(TxAlignment::Discordant),
+            Some(TxAlignment::Intergenic),
+            Some(TxAlignment::Multimapped),
+            Some(TxAlignment::Intergenic),
+        ];
+        let mut single = QcGeneQuant::default();
+        alignments
+            .iter()
+            .for_each(|aln| single.update(aln.as_ref()));
+
+        let (left, right) = alignments.split_at(2);
+        let mut merged = QcGeneQuant::default();
+        let mut part = QcGeneQuant::default();
+        left.iter().for_each(|aln| merged.update(aln.as_ref()));
+        right.iter().for_each(|aln| part.update(aln.as_ref()));
+        merged.extend(std::iter::once(part));
+
+        assert_eq!(Value::from(merged), Value::from(single));
+    }
+
+    /// Partial alignment QC merged with `Extend` must equal one pass, and the
+    /// empty accumulator must keep the mitochondrial references.
+    #[test]
+    fn align_qc_merge_equals_single_pass() {
+        let header = sam::Header::default();
+        let mut base = QcAlign::default();
+        base.mito_dna.insert(0);
+        let records = [
+            alignment(Flags::SEGMENTED | Flags::PROPERLY_SEGMENTED),
+            alignment(Flags::UNMAPPED),
+            alignment(Flags::empty()),
+        ];
+
+        let mut single = base.empty_like();
+        records
+            .iter()
+            .for_each(|r| single.add_read1(&header, r).unwrap());
+
+        let mut merged = base.empty_like();
+        let mut part = base.empty_like();
+        assert_eq!(part.mito_dna, base.mito_dna);
+        merged.add_read1(&header, &records[0]).unwrap();
+        records[1..]
+            .iter()
+            .for_each(|r| part.add_read1(&header, r).unwrap());
+        merged.extend(std::iter::once(part));
+
+        assert_eq!(merged.to_json(), single.to_json());
     }
 }
