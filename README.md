@@ -103,6 +103,21 @@ without a number.
 zstd TSV sidecar with the same columns as `FragmentsSink(compute_snv=True)`, so
 existing UCF readers do not pay for variable-length SNV data.
 
+`ScRnaUcfSink(compute_snv=True)` writes a row-aligned `sc_rna_evidence_v1`
+sidecar (`<output>.evidence.tsv.zst`) in the same pass. Each line is one
+substitution, insertion, or deletion:
+
+```
+row_index  read_pos  ref_offset  op  ref_base  read_base  base_qual
+```
+
+`row_index` is the 0-based ordinal of the stored alignment in UCF order, so the
+sidecar links to the UCF without widening its 48-byte row. `read_pos` is the
+position in the original read, `ref_offset` is relative to the alignment start,
+and `op` is `X`, `I`, or `D`. Rows with no events are omitted. Evidence comes
+from `MD:Z` plus CIGAR, sequence, and base qualities; `min_base_qual` can drop
+low-quality events at write time. This is raw evidence, not a genotype call.
+
 ### Gene Expression
 
 `GeneQuantificationSink` normally reads transcript annotation from the

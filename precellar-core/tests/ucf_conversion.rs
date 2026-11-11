@@ -41,6 +41,7 @@ fn classify(sam_line: &str) -> ScRnaDisposition {
         |_| 0,
         AlignmentPolicy::Primary,
         MissingBarcodePolicy::Drop,
+        false,
     )
     .unwrap()
 }
@@ -58,6 +59,7 @@ fn sc_rna_row_keeps_cell_umi_and_cigar_semantics() {
             |umi| umis.id(umi),
             AlignmentPolicy::Primary,
             MissingBarcodePolicy::Drop,
+            false,
         )
         .unwrap(),
     );
@@ -99,10 +101,7 @@ fn unmapped_records_are_classified_not_stored() {
 fn primary_policy_excludes_secondary_and_supplementary() {
     let secondary = "1\t256\tchr1\t100\t60\t50M\t*\t0\t0\tAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\tFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF\tCB:Z:AAACCG";
     let supplementary = "1\t2048\tchr1\t100\t60\t50M\t*\t0\t0\tAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\tFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF\tCB:Z:AAACCG";
-    assert!(matches!(
-        classify(secondary),
-        ScRnaDisposition::Secondary
-    ));
+    assert!(matches!(classify(secondary), ScRnaDisposition::Secondary));
     assert!(matches!(
         classify(supplementary),
         ScRnaDisposition::Supplementary
@@ -115,6 +114,7 @@ fn primary_policy_excludes_secondary_and_supplementary() {
             |_| 0,
             AlignmentPolicy::All,
             MissingBarcodePolicy::Drop,
+            false,
         )
         .unwrap();
         assert!(matches!(disposition, ScRnaDisposition::Stored(_)));
@@ -124,16 +124,14 @@ fn primary_policy_excludes_secondary_and_supplementary() {
 #[test]
 fn missing_barcode_is_dropped_or_reported() {
     let line = "1\t0\tchr1\t100\t60\t50M\t*\t0\t0\tAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\tFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF";
-    assert!(matches!(
-        classify(line),
-        ScRnaDisposition::MissingBarcode
-    ));
+    assert!(matches!(classify(line), ScRnaDisposition::MissingBarcode));
     let error = classify_record(
         &record(line),
         |_| 0,
         |_| 0,
         AlignmentPolicy::Primary,
         MissingBarcodePolicy::Error,
+        false,
     )
     .unwrap_err();
     assert!(error.to_string().contains("cell barcode"), "{error}");
@@ -216,6 +214,8 @@ fn sc_rna_rows_sort_by_locus_then_cell() {
             reference_span: 10,
             block_count: 1,
             cigar: vec![(10, 0)],
+            events: Vec::new(),
+            missing_md: false,
         });
     }
     let sorted = sort_sc_rna_rows(rows.into_iter(), None, 2)

@@ -311,7 +311,7 @@ impl STAR {
         text_signature = "(index_path)",
     )]
     pub fn new(index_path: PathBuf) -> Result<Self> {
-        let opts = StarOpts::new(index_path).with_sam_attributes("NH HI AS nM");
+        let opts = StarOpts::new(index_path).with_sam_attributes("NH HI AS nM MD");
         Ok(STAR(StarAligner::new(opts)?))
     }
 }

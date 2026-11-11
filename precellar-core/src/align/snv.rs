@@ -308,7 +308,7 @@ fn err_msg(msg: &str, rec: &RecordBuf) -> String {
 }
 
 #[derive(Debug, PartialEq, Eq)]
-enum MDKind {
+pub(crate) enum MDKind {
     Match(u16),
     Substitution(u8),
     Deletion(Vec<u8>),
@@ -344,7 +344,7 @@ impl MDKind {
     }
 }
 
-fn parse_md_tag_str(s: &[u8]) -> impl Iterator<Item = Result<MDKind>> + '_ {
+pub(crate) fn parse_md_tag_str(s: &[u8]) -> impl Iterator<Item = Result<MDKind>> + '_ {
     let mut s = s;
     std::iter::from_fn(move || {
         if s.is_empty() {

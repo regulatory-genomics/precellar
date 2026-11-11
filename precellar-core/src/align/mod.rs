@@ -2,7 +2,7 @@
 
 mod aligners;
 mod fastq;
-mod snv;
+pub(crate) mod snv;
 
 pub use aligners::{
     Aligner, BurrowsWheelerAligner, MiniBwaIndex, MiniBwaOptions, MiniBwaSR, Minimap2Aligner,
