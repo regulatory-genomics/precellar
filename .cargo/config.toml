@@ -1,0 +1,5 @@
+# The UCF dependencies are pinned to a self-hosted Gitea revision over SSH.
+# Cargo's built-in libgit2 client cannot use the ssh-agent key setup on this
+# host, so let the git CLI handle fetches.
+[net]
+git-fetch-with-cli = true

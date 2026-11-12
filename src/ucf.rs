@@ -744,7 +744,7 @@ impl ScRnaUcfSink {
     #[pyo3(signature = (
         output, *, alignments="primary", on_missing_barcode="drop",
         compute_snv=false, snv_output=None, min_base_qual=0,
-        chunk_rows=65536, sort_chunk_size=1_000_000, zstd_level=2,
+        chunk_rows=65536, sort_chunk_size=1_000_000, zstd_level=19,
         storage="v1", block_size_bp=DEFAULT_BLOCK_SIZE_BP,
         cell_tile_size=DEFAULT_CELL_TILE_SIZE,
         has_mate_columns=None, has_template_length_column=None
