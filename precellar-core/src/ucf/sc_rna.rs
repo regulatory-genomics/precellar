@@ -433,6 +433,31 @@ pub fn sort_rows(
     })
 }
 
+/// Sort rows into the `sc_rna_alignment_v2` layout:
+/// `(chromosome, genomic block, cell tile, start, cell rank, UMI)`.
+pub fn sort_rows_v2(
+    rows: impl Iterator<Item = ScRnaRow>,
+    temp_dir: Option<PathBuf>,
+    chunk_size: usize,
+    block_size_bp: u32,
+    cell_tile_size: u32,
+) -> anyhow::Result<impl ExactSizeIterator<Item = anyhow::Result<ScRnaRow>>> {
+    if block_size_bp == 0 || cell_tile_size == 0 {
+        anyhow::bail!("scRNA v2 block and cell tile sizes must be greater than zero");
+    }
+    let block = u64::from(block_size_bp);
+    let tile = cell_tile_size;
+    super::external_sort(rows, temp_dir, chunk_size, move |a, b| {
+        a.chrom_id
+            .cmp(&b.chrom_id)
+            .then_with(|| (a.start as u64 / block).cmp(&(b.start as u64 / block)))
+            .then_with(|| (a.cell_id / tile).cmp(&(b.cell_id / tile)))
+            .then_with(|| a.start.cmp(&b.start))
+            .then_with(|| (a.cell_id % tile).cmp(&(b.cell_id % tile)))
+            .then_with(|| a.umi_id.cmp(&b.umi_id))
+    })
+}
+
 fn read_nh(record: &RecordBuf) -> Result<u16> {
     let Some(value) = record.data().get(&Tag::ALIGNMENT_HIT_COUNT) else {
         return Ok(0);

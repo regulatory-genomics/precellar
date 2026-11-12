@@ -90,6 +90,24 @@ requested path. A missing `temp_dir` is created instead of failing.
 | `on_missing_barcode` | `"drop"` | Skip and count mapped records without `CB`, or `"error"`. |
 | `chunk_rows` | `65536` | Rows per independently decodable UCF chunk. |
 | `sort_chunk_size` | `1000000` | Records buffered in memory before an external-sort run spills to disk. |
+| `storage` | `"v1"` | `"v1"` writes `sc_rna_alignment_v1` (fixed 48-byte rows). `"v2"` writes chunked columns with packed UMIs. |
+| `block_size_bp` | `8388608` | v2 genomic block used by the layout and the start-offset column. |
+| `cell_tile_size` | `4096` | v2 cell tile; rows store a `u16` rank inside the tile. Must not exceed 65536. |
+| `has_mate_columns` | `True` | v2 emits mate columns. Set `False` for single-end data; a paired row then fails instead of dropping its mate. |
+| `has_template_length_column` | `True` | v2 emits a template-length column; same rule as `has_mate_columns`. |
+
+`storage="v2"` writes the same logical information (exact CIGAR, aligned blocks,
+flags, NH, MAPQ, cell barcode, exact UMI, optional mate/template). It changes only
+the physical layout:
+
+- rows are sorted by `(chromosome, genomic block, cell tile, start, cell rank, UMI)`;
+- block and CIGAR offsets are derived from per-row counts instead of stored;
+- canonical 12 bp A/C/G/T UMIs are stored as 24-bit codes, with a small exception
+  table for other sequences; the reader returns the exact original string;
+- aligned blocks keep a one-bit gap type (`D` versus `N`) in the block encoding.
+
+The SNV evidence sidecar is written in the same order as the alignment file for
+both storage versions, so `row_index` stays a valid link.
 
 The QC report counts `records_stored`, `records_unmapped`,
 `records_secondary`, `records_supplementary`, `records_missing_barcode`,

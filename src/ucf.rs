@@ -13,16 +13,17 @@ use precellar::fragment::{IntoFragOpts, IntoFragments};
 use precellar::qc::QcFragment;
 use precellar::ucf::sc_atac::{sort_snv_rows, strand_flags, Dictionary, ScAtacRow, ScAtacSnvRow};
 use precellar::ucf::sc_rna::{
-    classify_record, sort_rows as sort_sc_rna_rows, AlignmentPolicy, MissingBarcodePolicy,
-    RnaEvent, ScRnaDisposition, ScRnaRetention, ScRnaRow,
+    classify_record, sort_rows as sort_sc_rna_rows, sort_rows_v2 as sort_sc_rna_rows_v2,
+    AlignmentPolicy, MissingBarcodePolicy, RnaEvent, ScRnaDisposition, ScRnaRetention, ScRnaRow,
 };
 use pyo3::prelude::*;
 use seqspec::utils::{create_file, Compression};
 use ucf_core::BuildInfo;
 use ucf_rna::{
     aligned_blocks_from_cigar, pack_rna_coordinate, RnaCigarOpV1, RnaError, ScRnaCellV1,
-    ScRnaMetadataV1, ScRnaRowInput, ScRnaWriteOptions, ScRnaWriteRequest, ScRnaWriter,
-    UNMAPPED_MATE_LOCUS_ID,
+    ScRnaMetadataV1, ScRnaRowInput, ScRnaV2Cell, ScRnaV2Metadata, ScRnaV2WriteOptions,
+    ScRnaV2WriteRequest, ScRnaV2Writer, ScRnaWriteOptions, ScRnaWriteRequest, ScRnaWriter,
+    DEFAULT_BLOCK_SIZE_BP, DEFAULT_CELL_TILE_SIZE, UNMAPPED_MATE_LOCUS_ID,
 };
 use ucf_sc_atac::{
     CellInfoV2, ChromInfoV1, ScAtacError, ScAtacMetadataV2, ScAtacRecordV2, ScAtacWriteOptions,
@@ -327,6 +328,14 @@ fn parse_missing_barcode_policy(value: &str) -> Result<MissingBarcodePolicy> {
         "drop" => Ok(MissingBarcodePolicy::Drop),
         "error" => Ok(MissingBarcodePolicy::Error),
         _ => bail!("on_missing_barcode must be 'drop' or 'error'"),
+    }
+}
+
+fn parse_rna_storage(value: &str) -> Result<RnaStorage> {
+    match value {
+        "v1" => Ok(RnaStorage::V1),
+        "v2" => Ok(RnaStorage::V2),
+        _ => bail!("storage must be 'v1' or 'v2'"),
     }
 }
 
@@ -680,6 +689,13 @@ impl AlignmentSink for ScAtacUcfSink {
     }
 }
 
+/// On-disk scRNA alignment storage version.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RnaStorage {
+    V1,
+    V2,
+}
+
 #[pyclass(module = "precellar.sinks", name = "ScRnaUcfSink")]
 pub(crate) struct ScRnaUcfSink {
     output: PathBuf,
@@ -691,6 +707,11 @@ pub(crate) struct ScRnaUcfSink {
     chunk_rows: usize,
     sort_chunk_size: usize,
     zstd_level: i32,
+    storage: RnaStorage,
+    block_size_bp: u32,
+    cell_tile_size: u32,
+    has_mate_columns: Option<bool>,
+    has_template_length_column: Option<bool>,
 }
 
 #[pymethods]
@@ -723,7 +744,10 @@ impl ScRnaUcfSink {
     #[pyo3(signature = (
         output, *, alignments="primary", on_missing_barcode="drop",
         compute_snv=false, snv_output=None, min_base_qual=0,
-        chunk_rows=65536, sort_chunk_size=1_000_000, zstd_level=2
+        chunk_rows=65536, sort_chunk_size=1_000_000, zstd_level=2,
+        storage="v1", block_size_bp=DEFAULT_BLOCK_SIZE_BP,
+        cell_tile_size=DEFAULT_CELL_TILE_SIZE,
+        has_mate_columns=None, has_template_length_column=None
     ))]
     #[allow(clippy::too_many_arguments)]
     fn new(
@@ -736,6 +760,11 @@ impl ScRnaUcfSink {
         chunk_rows: usize,
         sort_chunk_size: usize,
         zstd_level: i32,
+        storage: &str,
+        block_size_bp: u32,
+        cell_tile_size: u32,
+        has_mate_columns: Option<bool>,
+        has_template_length_column: Option<bool>,
     ) -> Result<Self> {
         if chunk_rows == 0 {
             bail!("chunk_rows must be greater than zero");
@@ -755,6 +784,15 @@ impl ScRnaUcfSink {
                 .unwrap_or_else(|| default_rna_evidence_path(&output));
             validate_output_paths(&output, &sidecar)?;
         }
+        if block_size_bp == 0 {
+            bail!("block_size_bp must be greater than zero");
+        }
+        if cell_tile_size == 0 {
+            bail!("cell_tile_size must be greater than zero");
+        }
+        if cell_tile_size > u32::from(u16::MAX) + 1 {
+            bail!("cell_tile_size must not exceed 65536");
+        }
         Ok(Self {
             output,
             alignments: parse_alignment_policy(alignments)?,
@@ -765,6 +803,11 @@ impl ScRnaUcfSink {
             chunk_rows,
             sort_chunk_size,
             zstd_level,
+            storage: parse_rna_storage(storage)?,
+            block_size_bp,
+            cell_tile_size,
+            has_mate_columns,
+            has_template_length_column,
         })
     }
 }
@@ -867,7 +910,21 @@ impl AlignmentSink for ScRnaUcfSink {
                 }
                 records = out.into_iter();
             });
-            sort_sc_rna_rows(rows, context.temp_dir.clone(), self.sort_chunk_size)?
+            match self.storage {
+                RnaStorage::V1 => Box::new(sort_sc_rna_rows(
+                    rows,
+                    context.temp_dir.clone(),
+                    self.sort_chunk_size,
+                )?)
+                    as Box<dyn ExactSizeIterator<Item = anyhow::Result<ScRnaRow>>>,
+                RnaStorage::V2 => Box::new(sort_sc_rna_rows_v2(
+                    rows,
+                    context.temp_dir.clone(),
+                    self.sort_chunk_size,
+                    self.block_size_bp,
+                    self.cell_tile_size,
+                )?),
+            }
         };
         if let Some(error) = error.borrow_mut().take() {
             return Err(error);
@@ -901,7 +958,7 @@ impl AlignmentSink for ScRnaUcfSink {
             max_alignment_span_bp: totals.max_span,
             cell_count: cell_entries.len() as u64,
             umi_count: umi_entries.len() as u64,
-            chromosomes,
+            chromosomes: chromosomes.clone(),
         };
 
         let sidecar_path = if self.compute_snv {
@@ -990,20 +1047,72 @@ impl AlignmentSink for ScRnaUcfSink {
             .map(|output| output.path())
             .unwrap_or(self.output.as_path())
             .to_path_buf();
-        ScRnaWriter::write_file(
-            &main_path,
-            ScRnaWriteRequest {
-                metadata: &metadata,
-                cells: &cell_entries,
-                umis: &umi_entries,
-                build: build_info(context),
-                options: ScRnaWriteOptions {
-                    chunk_rows: self.chunk_rows,
-                    zstd_level: self.zstd_level,
+        let build = build_info(context);
+        match self.storage {
+            RnaStorage::V1 => ScRnaWriter::write_file(
+                &main_path,
+                ScRnaWriteRequest {
+                    metadata: &metadata,
+                    cells: &cell_entries,
+                    umis: &umi_entries,
+                    build,
+                    options: ScRnaWriteOptions {
+                        chunk_rows: self.chunk_rows,
+                        zstd_level: self.zstd_level,
+                    },
                 },
-            },
-            stream,
-        )?;
+                stream,
+            )?,
+            RnaStorage::V2 => {
+                let cells_v2 = cell_entries
+                    .iter()
+                    .map(|cell| {
+                        ScRnaV2Cell::new(
+                            cell.cell_id,
+                            cell.sample_id.clone(),
+                            cell.barcode.clone(),
+                        )
+                        .with_tile(
+                            cell.cell_id / self.cell_tile_size,
+                            cell.cell_id % self.cell_tile_size,
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                let mut metadata_v2 = ScRnaV2Metadata::new("precellar", chromosomes);
+                metadata_v2.block_size_bp = self.block_size_bp;
+                metadata_v2.cell_tile_size = self.cell_tile_size;
+                metadata_v2.total_record_count = metadata.total_record_count;
+                metadata_v2.stored_alignment_count = metadata.stored_alignment_count;
+                metadata_v2.unmapped_record_count = metadata.unmapped_record_count;
+                metadata_v2.total_block_count = metadata.total_block_count;
+                metadata_v2.total_cigar_op_count = metadata.total_cigar_op_count;
+                metadata_v2.max_alignment_span_bp = metadata.max_alignment_span_bp;
+                metadata_v2.cell_count = metadata.cell_count;
+                metadata_v2.umi_count = metadata.umi_count;
+                // Default to the lossless profile: all-zero mate/template
+                // columns cost almost nothing after compression.
+                metadata_v2.has_mate_columns = self.has_mate_columns.unwrap_or(true);
+                metadata_v2.has_template_length_column =
+                    self.has_template_length_column.unwrap_or(true);
+                ScRnaV2Writer::write_file(
+                    &main_path,
+                    ScRnaV2WriteRequest {
+                        metadata: &metadata_v2,
+                        cells: &cells_v2,
+                        umis: &umi_entries,
+                        build,
+                        options: ScRnaV2WriteOptions {
+                            chunk_rows: self.chunk_rows,
+                            zstd_level: self.zstd_level,
+                            has_mate_columns: metadata_v2.has_mate_columns,
+                            has_template_length_column: metadata_v2
+                                .has_template_length_column,
+                        },
+                    },
+                    stream,
+                )?
+            }
+        }
         if let Some(err) = write_error.borrow_mut().take() {
             return Err(err);
         }
@@ -1022,6 +1131,16 @@ impl AlignmentSink for ScRnaUcfSink {
         let mut metrics = serde_json::Map::new();
         metrics.insert("cells".to_owned(), cell_entries.len().into());
         metrics.insert("umis".to_owned(), umi_entries.len().into());
+        metrics.insert(
+            "storage".to_owned(),
+            serde_json::Value::String(
+                match self.storage {
+                    RnaStorage::V1 => "v1",
+                    RnaStorage::V2 => "v2",
+                }
+                .to_owned(),
+            ),
+        );
         metrics.insert(
             "alignments".to_owned(),
             serde_json::Value::String(
