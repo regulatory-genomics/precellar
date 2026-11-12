@@ -7311,7 +7311,7 @@ checksum = "b6f5e870be6c3b371b77fe0ee0bafb859fa4964b4404c27de1d380043c4dda20"
 [[package]]
 name = "ucf-core"
 version = "0.1.0"
-source = "git+ssh://git@172.16.211.53:2222/gilbert/UCF.git?rev=4df0b4ebc5fd782478dbb3656ee50235aedbf744#4df0b4ebc5fd782478dbb3656ee50235aedbf744"
+source = "git+ssh://git@172.16.211.53:2222/gilbert/UCF.git?rev=998f03455e37618c313e5d2e6c731eb72ea910c0#998f03455e37618c313e5d2e6c731eb72ea910c0"
 dependencies = [
  "crc32fast",
  "memmap2",
@@ -7326,7 +7326,7 @@ dependencies = [
 [[package]]
 name = "ucf-rna"
 version = "0.1.0"
-source = "git+ssh://git@172.16.211.53:2222/gilbert/UCF.git?rev=4df0b4ebc5fd782478dbb3656ee50235aedbf744#4df0b4ebc5fd782478dbb3656ee50235aedbf744"
+source = "git+ssh://git@172.16.211.53:2222/gilbert/UCF.git?rev=998f03455e37618c313e5d2e6c731eb72ea910c0#998f03455e37618c313e5d2e6c731eb72ea910c0"
 dependencies = [
  "noodles 0.66.0",
  "noodles-core 0.14.0",
@@ -7340,7 +7340,7 @@ dependencies = [
 [[package]]
 name = "ucf-sc-atac"
 version = "0.1.0"
-source = "git+ssh://git@172.16.211.53:2222/gilbert/UCF.git?rev=4df0b4ebc5fd782478dbb3656ee50235aedbf744#4df0b4ebc5fd782478dbb3656ee50235aedbf744"
+source = "git+ssh://git@172.16.211.53:2222/gilbert/UCF.git?rev=998f03455e37618c313e5d2e6c731eb72ea910c0#998f03455e37618c313e5d2e6c731eb72ea910c0"
 dependencies = [
  "serde",
  "serde_json",
