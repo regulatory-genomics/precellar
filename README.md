@@ -53,6 +53,9 @@ Each example dataset below contains approximately 2.5 million fastq records.
 There is no intermediate fragment TSV or BAM, so the conversion costs one extra
 external sort rather than a full write/read/compress cycle.
 
+The downstream producer contract is recorded in
+[`docs/ucf-contract.md`](docs/ucf-contract.md).
+
 ```python
 # scATAC: genome-major fragments in scATAC UCF v2
 atac_qc = (

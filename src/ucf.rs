@@ -1251,6 +1251,23 @@ mod tests {
     }
 
     #[test]
+    fn scatac_ucf_contract_pins_identity_coordinates_and_multiplicity() {
+        assert_eq!(DEFAULT_SC_ATAC_SCHEMA_V2, "sc_atac_fragment_v2");
+        let cell = CellInfoV2 {
+            cell_id: 7,
+            sample_id: "sample".into(),
+            barcode: "AAAC".into(),
+            cell_key: "sample:AAAC".into(),
+            order_rank: None,
+            tile_id: None,
+        };
+        let record = ScAtacRecordV2::new(3, 100, 150, cell.cell_id, 4, 0b101);
+        assert_eq!(cell.cell_key, "sample:AAAC");
+        assert_eq!((record.chrom_id, record.start_bp, record.end_bp), (3, 100, 150));
+        assert_eq!((record.cell_id, record.multiplicity), (7, 4));
+    }
+
+    #[test]
     fn publishing_pair_rolls_back_if_main_publish_fails() {
         let directory = tempfile::tempdir().unwrap();
         let main_output = directory.path().join("main.ucf");
