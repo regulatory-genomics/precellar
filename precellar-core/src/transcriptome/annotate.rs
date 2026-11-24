@@ -110,9 +110,16 @@ pub struct GeneCounter<'a>(Vec<(GeneIndex, Vec<AlignmentGroup<'a>>)>);
 
 impl<'a> GeneCounter<'a> {
     pub fn new(data: &'a Vec<TxAlignment>, genes: &IndexMap<String, String>) -> Self {
+        Self::from_alignments(data, genes)
+    }
+
+    pub(super) fn from_alignments(
+        data: impl IntoIterator<Item = &'a TxAlignment>,
+        genes: &IndexMap<String, String>,
+    ) -> Self {
         // Group the Tx alignments by gene
         let mut gene_group = BTreeMap::new();
-        data.iter().for_each(|x| {
+        data.into_iter().for_each(|x| {
             let idx = genes.get_full(x.uniquely_mapped_gene().unwrap()).unwrap().0;
             gene_group.entry(idx).or_insert_with(Vec::new).push(x);
         });
