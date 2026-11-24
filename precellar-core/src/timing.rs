@@ -20,8 +20,8 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::OnceLock;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
-/// Number of stages; keep in sync with [`Stage`].
-const NUM_STAGES: usize = 4;
+/// Number of trace rows; keep in sync with [`Stage`] and [`stage_names`].
+const NUM_STAGES: usize = 9;
 
 /// Stages reported by the trace, in output order.
 ///
@@ -40,6 +40,14 @@ pub enum Stage {
     Alignment = 2,
     /// Transcriptome annotation of one batch.
     TxAlign = 3,
+    /// Collect one batch of barcode groups from the sorted runs.
+    CountCollect = 5,
+    /// Count one batch of cells.
+    CellCount = 6,
+    /// Append one count batch to the temporary caches.
+    WriteCache = 7,
+    /// Finish the caches and write the h5ad output.
+    WriteDisk = 8,
 }
 
 impl Stage {
@@ -50,6 +58,10 @@ impl Stage {
             Stage::FastqAnnotation => "fastq_annotation",
             Stage::Alignment => "alignment",
             Stage::TxAlign => "tx_align",
+            Stage::CountCollect => "count_collect",
+            Stage::CellCount => "cell_count",
+            Stage::WriteCache => "write_cache",
+            Stage::WriteDisk => "write_disk",
         }
     }
 }
@@ -59,13 +71,17 @@ impl Stage {
 const QUANTIFY: usize = 4;
 
 /// The stages written to the trace, in output order.
-fn stage_names() -> [&'static str; NUM_STAGES + 1] {
+fn stage_names() -> [&'static str; NUM_STAGES] {
     [
         Stage::Prepare.name(),
         Stage::FastqAnnotation.name(),
         Stage::Alignment.name(),
         Stage::TxAlign.name(),
         "quantify",
+        Stage::CountCollect.name(),
+        Stage::CellCount.name(),
+        Stage::WriteCache.name(),
+        Stage::WriteDisk.name(),
     ]
 }
 
@@ -94,12 +110,11 @@ static PREPARE_FINISHED: AtomicBool = AtomicBool::new(false);
 static TRACE_PATH: OnceLock<String> = OnceLock::new();
 
 /// `u64::MAX` when the stage has not run yet.
-static FIRST_START_NS: [AtomicU64; NUM_STAGES + 1] =
-    [const { AtomicU64::new(u64::MAX) }; NUM_STAGES + 1];
+static FIRST_START_NS: [AtomicU64; NUM_STAGES] = [const { AtomicU64::new(u64::MAX) }; NUM_STAGES];
 /// Zero until the stage has finished at least one span.
-static LAST_END_NS: [AtomicU64; NUM_STAGES + 1] = [const { AtomicU64::new(0) }; NUM_STAGES + 1];
-static ACTIVE_NS: [AtomicU64; NUM_STAGES + 1] = [const { AtomicU64::new(0) }; NUM_STAGES + 1];
-static COUNT: [AtomicU64; NUM_STAGES + 1] = [const { AtomicU64::new(0) }; NUM_STAGES + 1];
+static LAST_END_NS: [AtomicU64; NUM_STAGES] = [const { AtomicU64::new(0) }; NUM_STAGES];
+static ACTIVE_NS: [AtomicU64; NUM_STAGES] = [const { AtomicU64::new(0) }; NUM_STAGES];
+static COUNT: [AtomicU64; NUM_STAGES] = [const { AtomicU64::new(0) }; NUM_STAGES];
 
 /// Starts the trace clock and arms the timer if `PRECELLAR_TRACE` is set.
 ///
@@ -230,7 +245,7 @@ fn seconds(ns: u64) -> f64 {
 fn summary() -> String {
     let names = stage_names();
     let mut parts = Vec::new();
-    for index in 0..=NUM_STAGES {
+    for index in 0..NUM_STAGES {
         let count = COUNT[index].load(Ordering::Relaxed);
         if count == 0 {
             continue;
@@ -263,7 +278,7 @@ pub fn flush() {
         "# precellar stage timing\n# origin_unix {:.6}\nstage\tfirst_start_s\tlast_end_s\tactive_s\tcount\n",
         origin().unix
     );
-    for index in 0..=NUM_STAGES {
+    for index in 0..NUM_STAGES {
         let count = COUNT[index].load(Ordering::Relaxed);
         if count == 0 {
             continue;

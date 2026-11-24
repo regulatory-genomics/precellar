@@ -111,13 +111,21 @@ impl Quantifier {
             let entries = barcodes_seen.entries;
             let mut start = 0;
             while start < entries.len() {
-                let (end, count) = batch_end(&entries, start, self.num_threads * 1_000_000);
-                let range = start..end;
-                let alignments = collect_batch(&mut runs, &entries, range.clone())?;
-                barcodes.extend(entries[range].iter().map(|entry| entry.name.clone()));
-                bar.inc(count as u64);
-                start = end;
-                let counts = self.count_cells(&genome_index, alignments);
+                let alignments = {
+                    let _span = crate::timing::stage(crate::timing::Stage::CountCollect);
+                    let (end, count) = batch_end(&entries, start, self.num_threads * 1_000_000);
+                    let range = start..end;
+                    let alignments = collect_batch(&mut runs, &entries, range.clone())?;
+                    barcodes.extend(entries[range].iter().map(|entry| entry.name.clone()));
+                    bar.inc(count as u64);
+                    start = end;
+                    alignments
+                };
+                let counts = {
+                    let _span = crate::timing::stage(crate::timing::Stage::CellCount);
+                    self.count_cells(&genome_index, alignments)
+                };
+                let _span = crate::timing::stage(crate::timing::Stage::WriteCache);
                 umi_cache.add(counts.umi).unwrap();
                 spliced_cache.add(counts.spliced).unwrap();
                 unspliced_cache.add(counts.unspliced).unwrap();
@@ -131,6 +139,8 @@ impl Quantifier {
             );
             bar.abandon();
         }
+
+        let _span = crate::timing::stage(crate::timing::Stage::WriteDisk);
 
         let umi_count = umi_cache.finish()?.map(|x| {
             let x = x.unwrap();
