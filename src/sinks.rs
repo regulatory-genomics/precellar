@@ -1,5 +1,5 @@
 use crate::align::AlignProgressBar;
-use crate::aligners::{AlignerRef, AnnotationSource};
+use crate::aligners::AnnotationSource;
 use anyhow::{bail, Result};
 use noodles_sam::{self as sam, alignment::io::Write};
 use precellar::{
@@ -54,11 +54,11 @@ pub(crate) trait AlignmentSink {
         Ok(None)
     }
 
-    fn consume<'py, 'stream>(
+    fn consume<'py>(
         &self,
         py: Python<'py>,
         header: &sam::Header,
-        alignments: &mut AlignProgressBar<'stream, AlignerRef<'py>>,
+        alignments: &mut AlignProgressBar<'_>,
         context: &mut AlignmentContext,
     ) -> Result<Option<OutputReport>>;
 }
@@ -147,11 +147,11 @@ impl NullSink {
 }
 
 impl AlignmentSink for NullSink {
-    fn consume<'py, 'stream>(
+    fn consume<'py>(
         &self,
         py: Python<'py>,
         _header: &sam::Header,
-        alignments: &mut AlignProgressBar<'stream, AlignerRef<'py>>,
+        alignments: &mut AlignProgressBar<'_>,
         _context: &mut AlignmentContext,
     ) -> Result<Option<OutputReport>> {
         for _ in alignments {
@@ -181,11 +181,11 @@ impl BamSink {
 }
 
 impl AlignmentSink for BamSink {
-    fn consume<'py, 'stream>(
+    fn consume<'py>(
         &self,
         py: Python<'py>,
         header: &sam::Header,
-        alignments: &mut AlignProgressBar<'stream, AlignerRef<'py>>,
+        alignments: &mut AlignProgressBar<'_>,
         _context: &mut AlignmentContext,
     ) -> Result<Option<OutputReport>> {
         write_alignments(py, self.output.clone(), header, alignments)?;
@@ -247,11 +247,11 @@ impl FragmentsSink {
 }
 
 impl AlignmentSink for FragmentsSink {
-    fn consume<'py, 'stream>(
+    fn consume<'py>(
         &self,
         py: Python<'py>,
         header: &sam::Header,
-        alignments: &mut AlignProgressBar<'stream, AlignerRef<'py>>,
+        alignments: &mut AlignProgressBar<'_>,
         context: &mut AlignmentContext,
     ) -> Result<Option<OutputReport>> {
         let compression = self
@@ -405,11 +405,11 @@ impl AlignmentSink for GeneQuantificationSink {
         parse_strandedness(assays, modality, self.strandedness.as_deref())
     }
 
-    fn consume<'py, 'stream>(
+    fn consume<'py>(
         &self,
         _py: Python<'py>,
         header: &sam::Header,
-        alignments: &mut AlignProgressBar<'stream, AlignerRef<'py>>,
+        alignments: &mut AlignProgressBar<'_>,
         context: &mut AlignmentContext,
     ) -> Result<Option<OutputReport>> {
         let annotator = context

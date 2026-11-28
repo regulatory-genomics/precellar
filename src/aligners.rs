@@ -195,6 +195,17 @@ pub enum AlignerRef<'py> {
 }
 
 impl AlignerRef<'_> {
+    /// Returns the Rust aligner inside the Python object. Unlike `AlignerRef`,
+    /// it can move to the alignment producer thread.
+    pub fn inner_mut(&mut self) -> &mut (dyn Aligner + Send) {
+        match self {
+            AlignerRef::STAR(aligner) => aligner.deref_mut().deref_mut(),
+            AlignerRef::BWA(aligner) => aligner.deref_mut().deref_mut(),
+            AlignerRef::MiniBwa(aligner) => aligner.deref_mut().deref_mut(),
+            AlignerRef::Minimap2(aligner) => aligner.deref_mut().deref_mut(),
+        }
+    }
+
     pub fn header(&self) -> Header {
         match self {
             AlignerRef::STAR(aligner) => aligner.header(),

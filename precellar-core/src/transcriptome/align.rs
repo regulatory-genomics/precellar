@@ -14,6 +14,8 @@ use seqspec::ChemistryStrandedness;
 
 use crate::align::MultiMapR;
 use crate::fragment::Fragment;
+use crate::qc::QcGeneQuant;
+use crate::timing::{self, Stage};
 use crate::transcriptome::{Exon, Transcript};
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Encode, Decode)]
@@ -583,9 +585,11 @@ impl TxAligner {
         self.transcripts.iter().map(|(_, t)| t)
     }
 
+    /// Annotates each batch in parallel and adds every result to `qc`.
     pub fn align<'a>(
         &'a self,
         data: impl IntoIterator<Item = Vec<(Option<MultiMapR>, Option<MultiMapR>)>> + 'a,
+        qc: &'a mut QcGeneQuant,
     ) -> impl Iterator<Item = Option<TxAlignment>> + 'a {
         fn helper<'a>(
             tx_aligner: &'a TxAligner,
@@ -609,13 +613,32 @@ impl TxAligner {
 
         let mut strandedness = self.strandedness;
         data.into_iter().flat_map(move |recs| {
+            // The transcriptome annotation of one batch runs eagerly inside the
+            // closure, so the span covers exactly this batch.
+            let _span = timing::stage(Stage::TxAlign);
             if strandedness.is_none() {
                 warn!("Strandedness not provided, detecting from data ...");
                 strandedness = Some(self.detect_strandedness(&recs));
             }
-            recs.par_chunks(4096)
-                .flat_map_iter(|chunk| helper(self, chunk, strandedness.unwrap()))
-                .collect::<Vec<_>>()
+            let strandedness = strandedness.unwrap();
+            // Each chunk counts its own QC; the parts are summed in input order.
+            let parts: Vec<_> = crate::threads::run(|| {
+                recs.par_chunks(4096)
+                    .map(|chunk| {
+                        let mut part = QcGeneQuant::default();
+                        let alignments: Vec<_> = helper(self, chunk, strandedness)
+                            .inspect(|aln| part.update(aln.as_ref()))
+                            .collect();
+                        (alignments, part)
+                    })
+                    .collect()
+            });
+            let mut alignments = Vec::with_capacity(recs.len());
+            for (chunk, part) in parts {
+                alignments.extend(chunk);
+                qc.extend(std::iter::once(part));
+            }
+            alignments
         })
     }
 

@@ -5,8 +5,8 @@ use crate::sinks::{
 };
 use anyhow::{bail, Result};
 use indicatif::{ProgressBar, ProgressFinish, ProgressStyle};
-use precellar::align::{Aligner, AlignmentResult, AlignmentRunner};
-use precellar::align::{BarcodeCorrectionConfig, FastqPlan, MultiMapR};
+use precellar::align::{AlignmentBatch, AlignmentReceiver, AlignmentRunner};
+use precellar::align::{BarcodeCorrectionConfig, FastqPlan};
 use precellar::qc::Metric;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
@@ -290,7 +290,8 @@ impl FastqPipeline {
     /// aligner : precellar.aligners.Star | BwaMem2 | MiniBwa | Minimap2
     ///     Configured aligner object.
     /// num_threads : int, keyword-only, default=8
-    ///     Number of threads used for FASTQ processing and alignment.
+    ///     Number of threads used for FASTQ processing, alignment, and the
+    ///     output sink.
     /// chunk_size : int, keyword-only, default=10000000
     ///     Approximate number of bases per synchronized FASTQ batch per thread.
     /// mito_dna : list[str], keyword-only, default=["chrM", "M"]
@@ -470,7 +471,13 @@ impl AlignmentJob {
 }
 
 impl AlignmentJobState {
+    /// Runs the job with every parallel stage capped at `num_threads` threads.
     fn run_sink<'py, S: AlignmentSink>(self, py: Python<'py>, sink: &S) -> Result<Py<PyAny>> {
+        let num_threads = self.num_threads as usize;
+        precellar::threads::with_threads(num_threads, || self.run_sink_inner(py, sink))?
+    }
+
+    fn run_sink_inner<'py, S: AlignmentSink>(self, py: Python<'py>, sink: &S) -> Result<Py<PyAny>> {
         let strandedness = sink.strandedness(&self.assays, self.modality)?;
         let mut aligner = AlignerRef::try_from(self.aligner.bind(py).clone())?;
         let header = aligner.header();
@@ -510,42 +517,44 @@ impl AlignmentJobState {
             "Aligning {} reads to reference genome ...",
             execution.read_summary()
         );
-        let alignments = AlignmentRunner::new(&mut aligner, self.num_threads)
-            .with_mito_dna(self.mito_dna.iter().cloned())
-            .stream(execution);
-        let mut alignments = AlignProgressBar::new(alignments);
+        // The producer thread aligns batch N+1 while the sink consumes batch N.
+        // It gets the Rust aligner; the Python object stays on this thread.
+        let runner = AlignmentRunner::new(aligner.inner_mut(), self.num_threads)
+            .with_mito_dna(self.mito_dna.iter().cloned());
         let mut context = AlignmentContext {
             num_threads: self.num_threads,
             mito_dna: self.mito_dna,
             temp_dir: self.temp_dir,
             transcript_annotator,
         };
-        let output_qc = sink.consume(py, &header, &mut alignments, &mut context)?;
-        let report = alignments.finish()?;
+        let (output_qc, report) = runner.run(execution, |receiver| {
+            let mut alignments = AlignProgressBar::new(receiver);
+            sink.consume(py, &header, &mut alignments, &mut context)
+        });
+        // A sink error comes first: it also stops the producer early.
+        let output_qc = output_qc?;
+        let report = report?;
         let report = assemble_report(
             report,
             output_qc.map(|report| (report.name, report.metrics)),
         );
+        precellar::timing::flush();
         Ok(value_into_pyobject(report, py).unbind())
     }
 }
 
-pub(crate) struct AlignProgressBar<'a, A> {
+pub(crate) struct AlignProgressBar<'a> {
     pb: ProgressBar,
-    alignments: AlignmentResult<'a, A>,
+    alignments: &'a mut AlignmentReceiver,
 }
 
-impl<'a, A> AlignProgressBar<'a, A> {
-    fn new(alignments: AlignmentResult<'a, A>) -> Self {
+impl<'a> AlignProgressBar<'a> {
+    fn new(alignments: &'a mut AlignmentReceiver) -> Self {
         let pb = alignment_progress_bar(alignments.num_records() as u64);
         Self {
             pb: pb.with_finish(ProgressFinish::Abandon),
             alignments,
         }
-    }
-
-    fn finish(self) -> Result<precellar::align::RunReport> {
-        self.alignments.finish()
     }
 }
 
@@ -572,8 +581,8 @@ fn alignment_progress_bar(num_records: u64) -> ProgressBar {
     }
 }
 
-impl<A: Aligner> Iterator for AlignProgressBar<'_, A> {
-    type Item = Vec<(Option<MultiMapR>, Option<MultiMapR>)>;
+impl Iterator for AlignProgressBar<'_> {
+    type Item = AlignmentBatch;
 
     fn next(&mut self) -> Option<Self::Item> {
         let item = self.alignments.next();

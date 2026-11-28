@@ -35,17 +35,20 @@ use crate::barcode::{BarcodeAnalyzer, BarcodeCorrectOptions};
 use crate::long::{BarcodeExtractor, LrBarcodeExtractionStats};
 use crate::pipeline::{FastqStage, FastqStagePipeline, MiddlewareQcReport};
 use crate::qc::{QcAlign, QcFastq, QcLongRead};
+use crate::timing::{self, Stage};
 use crate::utils::{rev_compl_fastq_record, PrefetchIterator};
 use anyhow::{Context, Result};
 use bstr::BString;
 use itertools::Itertools;
 use log::{debug, info};
 use noodles_fastq as fastq;
-use rayon::iter::ParallelIterator;
+use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 use rayon::slice::ParallelSlice;
 use seqspec::{Assay, AssayType, FastqReader, Modality, SegmentInfo, SeqArcContext};
 use smallvec::SmallVec;
 use std::collections::HashSet;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::mpsc::{sync_channel, Receiver};
 use std::sync::Arc;
 
 /// Configuration for standard barcode correction during FASTQ annotation.
@@ -457,13 +460,13 @@ impl FastqExecution {
 /// execution settings that apply uniformly to each batch. Calling
 /// [`Self::stream`] consumes the runner and moves a [`FastqExecution`] into the
 /// returned [`AlignmentResult`].
-pub struct AlignmentRunner<'a, A> {
+pub struct AlignmentRunner<'a, A: ?Sized> {
     aligner: &'a mut A,
     num_threads: u16,
     mito_dna: HashSet<String>,
 }
 
-impl<'a, A: Aligner> AlignmentRunner<'a, A> {
+impl<'a, A: Aligner + ?Sized> AlignmentRunner<'a, A> {
     /// Creates a runner that uses `num_threads` for each aligner batch call.
     ///
     /// No mitochondrial references are configured initially. The accepted
@@ -502,6 +505,95 @@ impl<'a, A: Aligner> AlignmentRunner<'a, A> {
     }
 }
 
+/// Number of aligned batches that can wait between the producer thread of
+/// [`AlignmentRunner::run`] and its consumer.
+const ALIGNMENT_QUEUE_CAPACITY: usize = 1;
+
+impl<'a, A: Aligner + Send + ?Sized> AlignmentRunner<'a, A> {
+    /// Aligns `execution` on a producer thread and runs `consume` on the
+    /// calling thread.
+    ///
+    /// The producer reads, annotates and aligns the next batches while
+    /// `consume` processes the current one. Batches arrive in input order. The
+    /// producer runs parallel work on the pool that [`crate::threads`] installed
+    /// on the calling thread.
+    ///
+    /// Returns the value of `consume` and the run report. The report is an
+    /// error if FASTQ processing or alignment QC failed, or if `consume`
+    /// stopped before the end of the stream. A panic on the producer thread
+    /// resumes on the calling thread.
+    pub fn run<R>(
+        self,
+        execution: FastqExecution,
+        consume: impl FnOnce(&mut AlignmentReceiver) -> R,
+    ) -> (R, Result<RunReport>) {
+        let num_records = execution.num_records();
+        let num_processed = Arc::new(AtomicUsize::new(0));
+        let pool = crate::threads::current();
+        std::thread::scope(|scope| {
+            let (sender, receiver) = sync_channel(ALIGNMENT_QUEUE_CAPACITY);
+            let progress = num_processed.clone();
+            let producer = scope.spawn(move || {
+                crate::threads::with_pool(pool, || {
+                    let mut stream = self.stream(execution);
+                    while let Some(batch) = stream.next() {
+                        progress.store(stream.num_processed(), Ordering::Release);
+                        if sender.send(batch).is_err() {
+                            // The consumer stopped early.
+                            break;
+                        }
+                    }
+                    progress.store(stream.num_processed(), Ordering::Release);
+                    // Close the queue before finalizing, so `consume` can return.
+                    drop(sender);
+                    stream.finish()
+                })
+            });
+            let mut alignments = AlignmentReceiver {
+                receiver,
+                num_records,
+                num_processed,
+            };
+            let output = consume(&mut alignments);
+            // Disconnect the queue, so a producer blocked in `send` stops.
+            drop(alignments);
+            let report = producer
+                .join()
+                .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+            (output, report)
+        })
+    }
+}
+
+/// Consumer side of [`AlignmentRunner::run`]: the aligned batches in input
+/// order. The iterator ends at the end of the stream or after a producer error.
+pub struct AlignmentReceiver {
+    receiver: Receiver<AlignmentBatch>,
+    num_records: usize,
+    num_processed: Arc<AtomicUsize>,
+}
+
+impl AlignmentReceiver {
+    /// Returns the estimated total logical-record count for progress reporting.
+    pub fn num_records(&self) -> usize {
+        self.num_records
+    }
+
+    /// Returns the number of records submitted to the aligner so far. The
+    /// count includes the batches that the producer has not handed over yet.
+    pub fn num_processed(&self) -> usize {
+        self.num_processed.load(Ordering::Acquire)
+    }
+}
+
+impl Iterator for AlignmentReceiver {
+    type Item = AlignmentBatch;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.receiver.recv().ok()
+    }
+}
+
 /// Alignment results for one annotated FASTQ batch.
 ///
 /// Each vector element corresponds to one [`AlignmentInput`]. The tuple stores
@@ -534,7 +626,7 @@ pub struct RunReport {
 /// item type. Such an error causes `next` to return `None` and is retained for
 /// [`Self::finish`] to return. Consumers must stop after the first `None` and
 /// always call `finish`; this type does not implement `FusedIterator`.
-pub struct AlignmentResult<'a, A> {
+pub struct AlignmentResult<'a, A: ?Sized> {
     aligner: &'a mut A,
     execution: FastqExecution,
     qc: QcAlign,
@@ -546,7 +638,7 @@ pub struct AlignmentResult<'a, A> {
     error: Option<anyhow::Error>,
 }
 
-impl<'a, A: Aligner> AlignmentResult<'a, A> {
+impl<'a, A: Aligner + ?Sized> AlignmentResult<'a, A> {
     fn new(
         aligner: &'a mut A,
         execution: FastqExecution,
@@ -577,7 +669,40 @@ impl<'a, A: Aligner> AlignmentResult<'a, A> {
     }
 }
 
-impl<'a, A> AlignmentResult<'a, A> {
+impl<'a, A: ?Sized> AlignmentResult<'a, A> {
+    /// Adds the alignment QC of one batch. The batch is split across the
+    /// thread pool and the partial counts are summed.
+    fn add_qc(&mut self, results: &[(Option<MultiMapR>, Option<MultiMapR>)]) -> Result<()> {
+        let header = &self.header;
+        // `QcAlign::default` has no mitochondrial references; keep this run's.
+        let empty = self.qc.empty_like();
+        let batch_qc = crate::threads::run(|| {
+            results
+                .par_iter()
+                .try_fold(
+                    || empty.clone(),
+                    |mut qc, alignment| {
+                        match alignment {
+                            (Some(ali1), Some(ali2)) => qc.add_pair(header, ali1, ali2)?,
+                            (Some(ali1), None) => qc.add_read1(header, ali1)?,
+                            (None, Some(ali2)) => qc.add_read2(header, ali2)?,
+                            (None, None) => debug!("No alignment found for read"),
+                        }
+                        Ok::<_, anyhow::Error>(qc)
+                    },
+                )
+                .try_reduce(
+                    || empty.clone(),
+                    |mut total, part| {
+                        total.extend(std::iter::once(part));
+                        Ok(total)
+                    },
+                )
+        })?;
+        self.qc.extend(std::iter::once(batch_qc));
+        Ok(())
+    }
+
     /// Returns the estimated total logical-record count for progress reporting.
     pub fn num_records(&self) -> usize {
         self.num_records
@@ -614,10 +739,14 @@ impl<'a, A> AlignmentResult<'a, A> {
 }
 
 /// Advances FASTQ processing, alignment, and alignment QC by one batch.
-impl<'a, A: Aligner> Iterator for AlignmentResult<'a, A> {
+impl<'a, A: Aligner + ?Sized> Iterator for AlignmentResult<'a, A> {
     type Item = AlignmentBatch;
     fn next(&mut self) -> Option<Self::Item> {
-        let data = match self.execution.next_batch() {
+        timing::finish_prepare();
+        let data = match {
+            let _span = timing::stage(Stage::FastqAnnotation);
+            self.execution.next_batch()
+        } {
             Ok(Some(data)) => data,
             Ok(None) => {
                 if self.num_records > 0 {
@@ -635,24 +764,17 @@ impl<'a, A: Aligner> Iterator for AlignmentResult<'a, A> {
         self.num_processed += data.len();
 
         // Align the reads.
-        let records = data.into_iter().map(AlignmentInput::from).collect();
-        let results: Vec<_> = self.aligner.align_reads(self.num_threads, records);
-        for alignment in &results {
-            let result = match alignment {
-                (Some(ali1), Some(ali2)) => self.qc.add_pair(&self.header, ali1, ali2),
-                (Some(ali1), None) => self.qc.add_read1(&self.header, ali1),
-                (None, Some(ali2)) => self.qc.add_read2(&self.header, ali2),
-                _ => {
-                    debug!("No alignment found for read");
-                    Ok(())
-                }
-            };
-            if let Err(error) = result {
+        let results: Vec<_> = {
+            let _span = timing::stage(Stage::Alignment);
+            let records = data.into_iter().map(AlignmentInput::from).collect();
+            let results: Vec<_> = self.aligner.align_reads(self.num_threads, records);
+            if let Err(error) = self.add_qc(&results) {
                 self.error = Some(error);
                 self.complete = true;
                 return None;
             }
-        }
+            results
+        };
         Some(results)
     }
 }
@@ -822,10 +944,12 @@ impl Iterator for AnnotatedFastqReader {
 
         let parallel_chunk_size = (chunk.len() / 128).max(1);
         let annotation = &self.annotation;
-        let processed: Vec<_> = chunk
-            .par_chunks(parallel_chunk_size)
-            .map(|chunk| annotation.process_chunk(chunk))
-            .collect();
+        let processed: Vec<_> = crate::threads::run(|| {
+            chunk
+                .par_chunks(parallel_chunk_size)
+                .map(|chunk| annotation.process_chunk(chunk))
+                .collect()
+        });
         let mut records = Vec::new();
         let mut qc = QcFastq::default();
         let mut qc_long_read = self.annotation.is_long_read().then(QcLongRead::default);
@@ -1893,6 +2017,116 @@ mod tests {
         assert_eq!(alignments.num_processed(), 2);
         assert!(alignments.finish().unwrap().fastq.long_read.is_some());
         assert_eq!(*layouts.lock().unwrap(), [(true, false), (false, true)]);
+    }
+
+    /// Short-read execution with `n` records, one record per batch.
+    fn short_read_batches(
+        directory: &Path,
+        n: usize,
+        stage: Option<FailingStage>,
+    ) -> FastqExecution {
+        let (assay, _, _, _) = short_read_fixture(directory);
+        let read1 = std::fs::read_to_string(directory.join("R1.fastq")).unwrap();
+        let read2 = std::fs::read_to_string(directory.join("R2.fastq")).unwrap();
+        std::fs::write(directory.join("R1.fastq"), read1.repeat(n)).unwrap();
+        std::fs::write(directory.join("R2.fastq"), read2.repeat(n)).unwrap();
+        let mut plan = FastqPlan::new(vec![assay], Modality::RNA);
+        if let Some(stage) = stage {
+            plan = plan.with_stage(stage);
+        }
+        plan.build(false, 1).unwrap()
+    }
+
+    /// Fails on the second batch it processes.
+    struct FailingStage {
+        seen: usize,
+    }
+
+    impl FastqStage for FailingStage {
+        fn process(&mut self, batch: Vec<AnnotatedFastq>) -> Result<Vec<AnnotatedFastq>> {
+            self.seen += 1;
+            anyhow::ensure!(self.seen < 2, "stage failed on batch {}", self.seen);
+            Ok(batch)
+        }
+    }
+
+    /// Panics on its second batch.
+    struct PanickingAligner {
+        calls: usize,
+    }
+
+    impl Aligner for PanickingAligner {
+        fn header(&self) -> noodles_sam::Header {
+            noodles_sam::Header::default()
+        }
+
+        fn align_reads(
+            &mut self,
+            _num_threads: u16,
+            records: Vec<AlignmentInput>,
+        ) -> Vec<(Option<MultiMapR>, Option<MultiMapR>)> {
+            self.calls += 1;
+            assert!(self.calls < 2, "aligner failed on batch {}", self.calls);
+            records.into_iter().map(|_| (None, None)).collect()
+        }
+    }
+
+    fn recording_aligner() -> RecordingAligner {
+        RecordingAligner {
+            layouts: Arc::new(std::sync::Mutex::new(Vec::new())),
+        }
+    }
+
+    /// The producer thread must hand over every batch in order and finish.
+    #[test]
+    fn test_alignment_run_delivers_all_batches() {
+        let directory = tempfile::tempdir().unwrap();
+        let execution = short_read_batches(directory.path(), 3, None);
+        let mut aligner = recording_aligner();
+        let (sizes, report) = AlignmentRunner::new(&mut aligner, 1).run(execution, |batches| {
+            let sizes: Vec<_> = batches.by_ref().map(|batch| batch.len()).collect();
+            assert_eq!(batches.num_processed(), 3);
+            sizes
+        });
+        assert_eq!(sizes, [1, 1, 1]);
+        report.unwrap();
+        assert_eq!(aligner.layouts.lock().unwrap().len(), 3);
+    }
+
+    /// A producer error must end the consumer's iterator and come back in the report.
+    #[test]
+    fn test_alignment_run_returns_producer_error() {
+        let directory = tempfile::tempdir().unwrap();
+        let execution = short_read_batches(directory.path(), 3, Some(FailingStage { seen: 0 }));
+        let mut aligner = recording_aligner();
+        let (count, report) =
+            AlignmentRunner::new(&mut aligner, 1).run(execution, |batches| batches.count());
+        assert_eq!(count, 1);
+        let error = report.unwrap_err();
+        assert!(format!("{error:#}").contains("stage failed on batch 2"));
+    }
+
+    /// A consumer that stops early must not block the producer.
+    #[test]
+    fn test_alignment_run_stops_when_consumer_stops() {
+        let directory = tempfile::tempdir().unwrap();
+        let execution = short_read_batches(directory.path(), 3, None);
+        let mut aligner = recording_aligner();
+        let (first, report) =
+            AlignmentRunner::new(&mut aligner, 1).run(execution, |batches| batches.next());
+        assert_eq!(first.unwrap().len(), 1);
+        let error = report.unwrap_err();
+        assert!(error.to_string().contains("has not reached end-of-input"));
+    }
+
+    /// A panic on the producer thread must resume on the calling thread.
+    #[test]
+    #[should_panic(expected = "aligner failed on batch 2")]
+    fn test_alignment_run_resumes_producer_panic() {
+        let directory = tempfile::tempdir().unwrap();
+        let execution = short_read_batches(directory.path(), 3, None);
+        let mut aligner = PanickingAligner { calls: 0 };
+        let _ = AlignmentRunner::new(&mut aligner, 1).run(execution, |batches| batches.count());
     }
 
     /// Invalid long-read plans must fail with actionable validation errors.

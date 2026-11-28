@@ -426,12 +426,14 @@ impl<'a, I: Iterator<Item = AlignmentInfo>, F: FnMut(&AlignmentInfo) -> String> 
                 }
             })
             .collect();
-        fragments.par_sort_unstable_by(|a, b| {
-            a.chrom()
-                .cmp(b.chrom())
-                .then_with(|| a.start().cmp(&b.start()))
-                .then_with(|| a.end().cmp(&b.end()))
-                .then_with(|| a.score().as_deref().cmp(&b.score().as_deref()))
+        crate::threads::run(|| {
+            fragments.par_sort_unstable_by(|a, b| {
+                a.chrom()
+                    .cmp(b.chrom())
+                    .then_with(|| a.start().cmp(&b.start()))
+                    .then_with(|| a.end().cmp(&b.end()))
+                    .then_with(|| a.score().as_deref().cmp(&b.score().as_deref()))
+            })
         });
         Some(fragments)
     }
@@ -446,9 +448,12 @@ where
     I: Iterator<Item = AlignmentInfo>,
     P: AsRef<std::path::Path>,
 {
+    // The sorter sorts and writes chunks on its own pool; size it like the
+    // shared pool instead of rayon's default of one thread per core.
     let mut sorter = ExternalSorterBuilder::new()
         .with_chunk_size(chunk_size)
-        .with_compression(2);
+        .with_compression(2)
+        .num_threads(crate::threads::current_num_threads());
     if let Some(tmp) = temp_dir {
         sorter = sorter.with_tmp_dir(tmp);
     }

@@ -9,9 +9,11 @@ use noodles_sam::alignment::{
     Record,
 };
 use rand::distr::{slice::Choose, Distribution};
-use seqspec::{Assay, Modality, RegionId, SequenceType};
+use rayon::prelude::*;
+use seqspec::{Assay, FastqReader, Modality, Read, RegionId, SegmentInfo, SequenceType, UrlType};
 use std::{
     collections::{HashMap, HashSet},
+    io::BufReader,
     ops::{Deref, DerefMut},
 };
 
@@ -93,40 +95,9 @@ impl BarcodeAnalyzer {
             .filter(|(_, info)| info.iter().any(|x| x.is_barcode()));
 
         barcoded_regions.for_each(|(read, segment_info)| {
-            let read_id = &read.read_id;
-            let is_reverse = read.is_reverse();
-            let mut reader = read
-                .open()
-                .expect(&format!("Failed to open FASTQ file: {}", read_id));
-
-            info!("Counting barcodes in read {} ...", read_id);
-            let spinner =
-                ProgressBar::with_draw_target(None, ProgressDrawTarget::stderr_with_hz(1))
-                    .with_style(
-                        ProgressStyle::with_template(
-                            "{spinner} Processed {human_pos} reads in {elapsed} ({per_sec}) ...",
-                        )
-                        .unwrap(),
-                    );
-            for fq in reader.records().progress_with(spinner) {
-                if let Ok(segments) = segment_info.split(&fq.unwrap()) {
-                    segments.iter().for_each(|segment| {
-                        if segment.is_barcode() {
-                            let builder =
-                                wl_builders.get_mut(segment.region_id()).expect(&format!(
-                                    "Region '{}' not found in whitelist builders",
-                                    segment.region_id()
-                                ));
-                            let should_rc = is_reverse ^ rc_regions.contains(segment.region_id());
-                            if should_rc {
-                                builder.add(&rev_compl(segment.seq));
-                            } else {
-                                builder.add(segment.seq);
-                            }
-                        }
-                    });
-                }
-            }
+            count_read_barcodes(read, &segment_info, &rc_regions, &mut wl_builders).unwrap_or_else(
+                |e| panic!("Failed to count barcodes in read '{}': {e:#}", read.read_id),
+            );
         });
 
         let whitelists: IndexMap<_, _> = wl_builders
@@ -189,6 +160,94 @@ impl BarcodeAnalyzer {
             Ok(barcode)
         }
     }
+}
+
+type BarcodeBuilders = IndexMap<RegionId, WhitelistBuilder>;
+
+fn count_read_barcodes(
+    read: &Read,
+    segment_info: &SegmentInfo,
+    rc_regions: &HashSet<String>,
+    builders: &mut BarcodeBuilders,
+) -> Result<()> {
+    let is_reverse = read.is_reverse();
+    let count = |record: &noodles_fastq::Record, builders: &mut BarcodeBuilders| {
+        if let Ok(segments) = segment_info.split(record) {
+            for segment in segments.iter().filter(|segment| segment.is_barcode()) {
+                let region_id = segment.region_id();
+                let builder = builders.get_mut(region_id).unwrap_or_else(|| {
+                    panic!("Region '{region_id}' not found in whitelist builders")
+                });
+                if is_reverse ^ rc_regions.contains(region_id) {
+                    builder.add(&rev_compl(segment.seq));
+                } else {
+                    builder.add(segment.seq);
+                }
+            }
+        }
+    };
+
+    let workers = crate::threads::current_num_threads();
+    if let Some(files) = read.files.as_deref().filter(|files| {
+        workers > 1
+            && files.len() > 1
+            && files.iter().all(|file| {
+                file.urltype == UrlType::Local && file.filetype == "fastq" && !file.is_seqarc()
+            })
+    }) {
+        info!(
+            "Counting barcodes in read {} across {} FASTQ files ...",
+            read.read_id,
+            files.len()
+        );
+        // Each task scans a group of lanes into independent counters. Limit
+        // the number of copies of the whitelist to the shared pool size.
+        let seed = &*builders;
+        let partials = crate::threads::run(|| {
+            files
+                .par_chunks(files.len().div_ceil(workers))
+                .map(|lanes| -> Result<BarcodeBuilders> {
+                    let mut partial = seed
+                        .iter()
+                        .map(|(id, builder)| (id.clone(), builder.empty_like()))
+                        .collect();
+                    let mut record = noodles_fastq::Record::default();
+                    for lane in lanes {
+                        let mut reader = FastqReader::new(
+                            Box::new(BufReader::new(lane.open()?)),
+                            read.min_len,
+                            read.max_len,
+                        );
+                        while reader.read_record(&mut record)? != 0 {
+                            count(&record, &mut partial);
+                        }
+                    }
+                    Ok(partial)
+                })
+                .collect::<Result<Vec<_>>>()
+        })?;
+        for partial in partials {
+            for (id, counts) in partial {
+                builders[&id].merge_counts(counts);
+            }
+        }
+    } else {
+        info!("Counting barcodes in read {} ...", read.read_id);
+        let mut reader = read
+            .try_open()?
+            .ok_or_else(|| anyhow::anyhow!("No FASTQ input"))?;
+        let spinner = ProgressBar::with_draw_target(None, ProgressDrawTarget::stderr_with_hz(1))
+            .with_style(
+                ProgressStyle::with_template(
+                    "{spinner} Processed {human_pos} reads in {elapsed} ({per_sec}) ...",
+                )
+                .unwrap(),
+            );
+        for record in reader.records().progress_with(spinner) {
+            count(&record?, builders);
+        }
+    }
+    Ok(())
 }
 
 /// A map of oligo species to their frequency in a given library.
@@ -428,6 +487,28 @@ pub(crate) struct WhitelistBuilder {
 }
 
 impl WhitelistBuilder {
+    // Preserve the supplied whitelist and settings, but not observed counts.
+    fn empty_like(&self) -> Self {
+        Self::new(
+            self.barcode_counts
+                .keys()
+                .filter(|_| self.whitelist_exists)
+                .cloned(),
+            self.call_cell_enabled,
+        )
+    }
+
+    // Merge a counter created by `empty_like` before any cell calling.
+    fn merge_counts(&mut self, other: Self) {
+        for (barcode, count) in other.barcode_counts.0 {
+            if count != 0 {
+                *self.barcode_counts.entry(barcode).or_insert(0) += count;
+            }
+        }
+        self.mismatch_count += other.mismatch_count;
+        self.total_count += other.total_count;
+    }
+
     /// Create a new whitelist builder from list of valid barcodes.
     /// This list can be empty, in which case the whitelist will be predicted from the observed barcodes.
     pub(crate) fn new<I: IntoIterator<Item = S>, S: Into<Vec<u8>>>(
@@ -690,6 +771,96 @@ fn compute_loss(num_obs: usize, num_exp: usize) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parallel_fastq_counts_match_serial_scan() -> Result<()> {
+        use seqspec::{File, Region, RegionType, Strand};
+        use std::io::Write;
+
+        let dir = tempfile::tempdir()?;
+        let mut files = Vec::new();
+        for (lane, sequences) in [["AACCAGTC", "AACCNNNN"], ["TTTTAGTC", "CCCCACTG"]]
+            .into_iter()
+            .enumerate()
+        {
+            let path = dir.path().join(format!("lane{lane}.fastq.gz"));
+            let mut writer = seqspec::utils::create_file(
+                &path,
+                Some(seqspec::utils::Compression::Gzip),
+                None,
+                1,
+            )?;
+            for (i, seq) in sequences.into_iter().enumerate() {
+                // The trailing base is clipped by the read's maximum length.
+                writeln!(writer, "@read{lane}_{i}\n{seq}A\n+\nIIIIIIIII")?;
+            }
+            drop(writer);
+            files.push(File::from_fastq(&path, false)?);
+        }
+        let read = Read {
+            min_len: 8,
+            max_len: 8,
+            strand: Strand::Neg,
+            files: Some(files),
+            ..Read::default()
+        };
+        let segment_info = SegmentInfo::new(
+            [
+                ("listed", SequenceType::Onlist),
+                ("observed", SequenceType::Random),
+            ]
+            .map(|(id, sequence_type)| Region {
+                region_id: id.into(),
+                region_type: RegionType::Barcode,
+                name: id.into(),
+                sequence_type,
+                sequence: "NNNN".into(),
+                min_len: 4,
+                max_len: 4,
+                onlist: None,
+                subregions: Vec::new(),
+            }),
+            true,
+        );
+        let rc_regions = HashSet::from([String::from("listed")]);
+        let scan = |workers| -> Result<BarcodeBuilders> {
+            let mut builders = IndexMap::from([
+                (
+                    "listed".into(),
+                    WhitelistBuilder::new(
+                        [b"AACC".to_vec(), b"CCCC".to_vec(), b"AAAA".to_vec()],
+                        true,
+                    ),
+                ),
+                (
+                    "observed".into(),
+                    WhitelistBuilder::new(Vec::<Vec<u8>>::new(), false),
+                ),
+            ]);
+            for (id, seq) in [("listed", b"CCCC"), ("observed", b"GACT")] {
+                builders[id].add(seq);
+            }
+            crate::threads::with_threads(workers, || {
+                count_read_barcodes(&read, &segment_info, &rc_regions, &mut builders)
+            })??;
+            Ok(builders)
+        };
+
+        let serial = scan(1)?;
+        let parallel = scan(2)?;
+        for (id, want) in &serial {
+            let got = &parallel[id];
+            assert_eq!(got.barcode_counts.0, want.barcode_counts.0);
+            assert_eq!(got.total_count, 5);
+            assert_eq!(got.total_count, want.total_count);
+            assert_eq!(got.mismatch_count, 1);
+            assert_eq!(got.mismatch_count, want.mismatch_count);
+        }
+        assert_eq!(parallel["listed"].barcode_counts[b"AACC".as_slice()], 2);
+        assert_eq!(parallel["listed"].barcode_counts[b"AAAA".as_slice()], 0);
+        assert_eq!(parallel["observed"].barcode_counts[b"GACT".as_slice()], 3);
+        Ok(())
+    }
 
     #[test]
     fn test_find_within_ordmag() {
